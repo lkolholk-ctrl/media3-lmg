@@ -1048,9 +1048,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
     // ребуфера входящий трек остался бы немым. Стартуем его отдельно.
     int fadeInIdx = audioFadeControl.getFadeInRendererIndex();
     int fadeOutIdx = audioFadeControl.getFadeOutRendererIndex();
+    // КРИТИЧНО: после свода играющий трек сидит на ВТОРОМ аудио-рендерере, а его
+    // TrackSelectorResult по-прежнему указывает на первый. Поэтому штатный гейт
+    // (isRendererEnabled по TSR) его не поднимал — после паузы/перемотки звук
+    // пропадал совсем. Поднимаем ещё и фактический рендерер playing-периода.
+    int playingIdx = playingPeriodHolder.getRendererIdx();
     for (int i = 0; i < renderers.length; i++) {
       boolean isFadeRenderer = (i == fadeInIdx || i == fadeOutIdx);
-      if ((trackSelectorResult.isRendererEnabled(i) || isFadeRenderer)
+      boolean isPlayingRenderer = (i == playingIdx);
+      if ((trackSelectorResult.isRendererEnabled(i) || isFadeRenderer || isPlayingRenderer)
           && renderers[i].getState() == STATE_ENABLED) {
         renderers[i].start();
       }
