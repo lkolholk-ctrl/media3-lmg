@@ -189,6 +189,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private final int primaryAudioRendererIndex;
   private final int secondaryAudioRendererIndex;
   private long lastFadeDiagLogMs;
+  private long fadeStartedAtMs = C.TIME_UNSET;
+  private boolean fadeInOffsetShifted;
   // LMG-fork (crossfade): флаги машины состояний Apple. Порт ExoPlayerImplInternal.
   private boolean shouldStartCrossFade;
   private boolean shouldDisplayFadeInMetadata;
@@ -2366,6 +2368,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
     if (playing == null || !audioFadeControl.isCrossFadeEnabled()) {
       return;
     }
+    // WATCHDOG: страховка от «музыка встала». Если фейд идёт дольше, чем
+    // длительность + 3 c, значит что-то пошло не так (B молчит, часы встали и
+    // т.п.) — принудительно сбрасываем фейд, снимаем гейты и возвращаем полную
+    // громкость. Хуже кроссфейда только тишина.
+    if (audioFadeControl.isCrossFadeInProgress()) {
+      long fadeLimitMs = (long) audioFadeControl.getCrossFadeDuration() * 1000L + 3000L;
+      if (fadeStartedAtMs != C.TIME_UNSET && clock.elapsedRealtime() - fadeStartedAtMs > fadeLimitMs) {
+        Log.e(TAG, "xfade WATCHDOG: fade stuck > " + fadeLimitMs + "ms → force reset");
+        audioFadeControl.reset();
+        fadeStartedAtMs = C.TIME_UNSET;
+        shouldStartCrossFade = false;
+        shouldDisplayFadeInMetadata = false;
+        return;
+      }
+    } else {
+      fadeStartedAtMs = C.TIME_UNSET;
+    }
     audioFadeControl.maybeDoFadeOut(playing, rendererPositionUs);
     if (!audioFadeControl.isCrossFadeInProgress()) {
       // next!=null guard добавлен для nullness (canFadeBetweenPeriods(x,null) и так вернёт false —
@@ -2396,6 +2415,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
         // isCrossFadeInProgress=false → плеер продолжит обычный gapless, НЕ виснет.
         if (updateFadeInPeriodRenderers(next)) {
           shouldStartCrossFade = true;
+          fadeStartedAtMs = clock.elapsedRealtime(); // watchdog
           audioFadeControl.prepareForCrossFade(playing, next);
         } else {
           Log.e(TAG, "xfade ARM ROLLBACK: fadeIn renderer not enabled → gapless");
@@ -2462,6 +2482,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
       disableRenderer(outgoingIdx);
     }
     audioFadeControl.reset();
+    fadeStartedAtMs = C.TIME_UNSET;
+    fadeInOffsetShifted = false;
   }
 
   /**
@@ -2506,6 +2528,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
               + " freeIdx="
               + freeIdx);
       return false;
+    }
+    // КЛЮЧЕВОЕ для перекрытия: период B в media3 начинается ПОСЛЕ конца A
+    // (rendererOffset = конец A), поэтому включённый рендерер B молчал бы до
+    // конца A — фейд-ин никогда бы не вырос и фаза висела бы вечно. Сдвигаем
+    // начало B назад на длительность фейда, чтобы он зазвучал параллельно с A.
+    // Аналог secondTrackOffset у Apple (там его задаёт нативный композер).
+    long fadeUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
+    if (!fadeInOffsetShifted) {
+      fadeInHolder.setRendererOffset(fadeInHolder.getRendererOffset() - fadeUs);
+      fadeInOffsetShifted = true;
+      Log.e(TAG, "xfade: B offset shifted back by " + fadeUs + "us for overlap");
     }
     Renderer free = renderers[freeIdx];
     if (free.getState() == Renderer.STATE_DISABLED && renderersToReset.remove(free)) {
