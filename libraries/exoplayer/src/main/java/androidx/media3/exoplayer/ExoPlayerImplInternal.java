@@ -2502,7 +2502,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
       }
     }
     fadeInHolder.setRendererIdx(freeIdx);
-    Log.e(TAG, "xfade: fadeIn renderer ENABLED freeIdx=" + freeIdx + " startNow=" + startNow);
+    Log.e(
+        TAG,
+        "xfade: fadeIn renderer ENABLED freeIdx="
+            + freeIdx
+            + " state="
+            + renderers[freeIdx].getState());
     return true;
   }
 
