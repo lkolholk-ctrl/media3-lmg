@@ -2500,11 +2500,32 @@ import java.util.concurrent.atomic.AtomicBoolean;
    */
   private void applyRecipeCurveIfAny() {
     int type = CrossfadeConfig.getCurveType();
-    AudioFadeControl.FadeEffectType[] curves = AudioFadeControl.FadeEffectType.values();
-    if (type < 0 || type >= curves.length) {
-      return;
+    // ВАЖНО: transitionType модели — это СЕМАНТИКА перехода (0=smooth, 1=energy,
+    // 2=beat_match, 3=hard_cut, 4=filter_sweep, 5=echo_out), а НЕ индекс кривой
+    // громкости. Поэтому мапим осмысленно, а не values()[type]:
+    //   smooth      → CONSTANT_POWER (equal-power, самый ровный свод)
+    //   energy      → EXPONENTIAL (уходящий держится дольше, входящий врывается)
+    //   beat_match  → LINEAR (ровный, чтобы не плыл ритм)
+    //   hard_cut / filter_sweep / echo_out — это не кривые громкости
+    //     (резкий стык / эффекты), их отрабатывает не фейд → оставляем дефолт Apple.
+    @Nullable AudioFadeControl.FadeEffectType curve;
+    switch (type) {
+      case 0:
+        curve = AudioFadeControl.FadeEffectType.CONSTANT_POWER;
+        break;
+      case 1:
+        curve = AudioFadeControl.FadeEffectType.EXPONENTIAL;
+        break;
+      case 2:
+        curve = AudioFadeControl.FadeEffectType.LINEAR;
+        break;
+      default:
+        curve = null;
+        break;
     }
-    AudioFadeControl.FadeEffectType curve = curves[type];
+    if (curve == null) {
+      return; // дефолт Apple: fade-in LOGARITHMIC / fade-out EXPONENTIAL
+    }
     long durationUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
     audioFadeControl.setFadeAudioEffect(
         AudioFadeControl.FadeType.FADE_IN,
