@@ -38,6 +38,9 @@ import java.util.HashMap;
   private long lastMsgTs = Long.MAX_VALUE;
   private float fadeInLevel = MIN_VOLUME;
   private float fadeOutLevel = MAX_VOLUME;
+  // Wall-clock старта фейда — по нему детерминированно завершаем ровно за
+  // crossFadeDuration секунд (гейт продвижения периода гарантированно снимается).
+  private long fadeStartWallMs = 0L;
 
   @Nullable private MediaPeriodHolder fadeOutPeriodHolder;
   @Nullable private MediaPeriodHolder fadeInPeriodHolder;
@@ -197,6 +200,7 @@ import java.util.HashMap;
     this.fadeInLevel = MIN_VOLUME;
     this.paused = false;
     this.lastMsgTs = Long.MAX_VALUE;
+    this.fadeStartWallMs = 0L; // старт wall-clock проставится на первом doCrossFade
     this.fadePhase = FadePhase.FADE_OUT;
   }
 
@@ -211,6 +215,10 @@ import java.util.HashMap;
   }
 
   // ГЛАВНЫЙ tick: вызывается каждым проходом плеера во время перехода.
+  // Прогресс t считаем по wall-clock от старта фейда — детерминированно и без
+  // зависимости от аудио-часов (которые во время гейта могут встать). Ровно за
+  // crossFadeDuration секунд t достигает 1 → COMPLETED → гейт снимается, media3
+  // штатно переходит на следующий трек. Кривая — equal-power (√), без провала.
   @Override
   public synchronized void doCrossFade(
       MediaPeriodHolder fadeOut, MediaPeriodHolder fadeIn, long rendererPositionUs)
@@ -219,26 +227,29 @@ import java.util.HashMap;
       return;
     }
     long now = System.currentTimeMillis();
-    if (now - lastMsgTs < msBetweenMessages) {
-      return; // троттлинг: не чаще шага
+    if (fadeStartWallMs == 0L) {
+      fadeStartWallMs = now;
+    }
+    long fadeMs = (long) crossFadeDuration * 1000L;
+    if (now - lastMsgTs < msBetweenMessages && (now - fadeStartWallMs) < fadeMs) {
+      return; // троттлинг, но финальный тик (t>=1) не пропускаем
     }
     lastMsgTs = now;
 
-    int fadeOutIdx = fadeOut.getRendererIdx();
-    long posOutUs = rendererPositionUs;
-    MediaClock clock = fadeOutIdx >= 0 ? renderers[fadeOutIdx].getMediaClock() : null;
-    if (clock != null) {
-      posOutUs = clock.getPositionUs(); // привязка к реальным аудио-часам
+    float t = fadeMs > 0 ? (now - fadeStartWallMs) / (float) fadeMs : 1f;
+    if (t < 0f) {
+      t = 0f;
     }
-
-    fadeInLevel = doFadeIn(fadeIn, posOutUs);
-    fadeOutLevel = doFadeOut(fadeOut, posOutUs);
+    if (t > 1f) {
+      t = 1f;
+    }
+    fadeOutLevel = (float) Math.sqrt(1f - t);
+    fadeInLevel = (float) Math.sqrt(t);
+    setVolume(fadeOut.getRendererIdx(), fadeOutLevel);
+    setVolume(fadeIn.getRendererIdx(), fadeInLevel);
 
     fadePhase = (fadeInLevel < fadeOutLevel) ? FadePhase.FADE_OUT : FadePhase.FADE_IN;
-
-    boolean ended = fadeOutIdx >= 0 && renderers[fadeOutIdx].isEnded();
-    boolean readToEnd = fadeOutIdx >= 0 && renderers[fadeOutIdx].hasReadStreamToEnd();
-    if ((fadeOutLevel < 0.05f && fadeInLevel > 0.95f) || (readToEnd && ended)) {
+    if (t >= 1f) {
       fadePhase = FadePhase.COMPLETED;
     }
   }
@@ -283,6 +294,7 @@ import java.util.HashMap;
       // ignore
     }
     lastMsgTs = Long.MAX_VALUE;
+    fadeStartWallMs = 0L;
     fadeOutPeriodHolder = null;
     fadeInPeriodHolder = null;
     fadeOutLevel = MAX_VOLUME;

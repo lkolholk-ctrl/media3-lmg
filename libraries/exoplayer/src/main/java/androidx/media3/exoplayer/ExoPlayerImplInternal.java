@@ -2315,24 +2315,40 @@ import java.util.concurrent.atomic.AtomicBoolean;
       return;
     }
     // Уходящий период → основной рендерер, входящий → второй.
-    playing.crossFadeRendererIndex = primaryAudioRendererIndex;
-    next.crossFadeRendererIndex = secondaryAudioRendererIndex;
+    // Взвод обёрнут в try/catch: сбой включения второго рендерера НЕ должен
+    // ронять воспроизведение — просто откатываемся к штатному переходу media3.
     Renderer secondary = renderers[secondaryAudioRendererIndex];
-    if (secondary.getState() == Renderer.STATE_DISABLED) {
-      secondary.enable(
-          config,
-          getFormats(selection),
-          audioStream,
-          rendererPositionUs,
-          /* joining= */ false,
-          /* mayRenderStartOfStream= */ true,
-          next.getStartPositionRendererTime(),
-          next.getRendererOffset(),
-          next.info.id);
-      renderersToReset.add(secondary);
-      secondary.start();
+    try {
+      playing.crossFadeRendererIndex = primaryAudioRendererIndex;
+      next.crossFadeRendererIndex = secondaryAudioRendererIndex;
+      if (secondary.getState() == Renderer.STATE_DISABLED) {
+        secondary.enable(
+            config,
+            getFormats(selection),
+            audioStream,
+            rendererPositionUs,
+            /* joining= */ false,
+            /* mayRenderStartOfStream= */ true,
+            next.getStartPositionRendererTime(),
+            next.getRendererOffset(),
+            next.info.id);
+        renderersToReset.add(secondary);
+        secondary.start();
+      }
+      audioFadeControl.prepareForCrossFade(playing, next);
+    } catch (RuntimeException | ExoPlaybackException e) {
+      Log.e(TAG, "crossfade arm failed, falling back to normal transition", e);
+      playing.crossFadeRendererIndex = C.INDEX_UNSET;
+      next.crossFadeRendererIndex = C.INDEX_UNSET;
+      try {
+        if (secondary.getState() != Renderer.STATE_DISABLED) {
+          secondary.disable();
+        }
+      } catch (RuntimeException ignored) {
+        // ignore
+      }
+      audioFadeControl.reset();
     }
-    audioFadeControl.prepareForCrossFade(playing, next);
   }
 
   // LMG-fork: завершение кроссфейда — глушим второй рендерер и снимаем гейт;
