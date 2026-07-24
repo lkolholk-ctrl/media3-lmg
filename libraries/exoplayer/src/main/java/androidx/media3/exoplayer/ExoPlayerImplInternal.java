@@ -319,12 +319,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
     this.secondaryAudioRendererIndex = secondAudio;
     this.audioFadeControl = new PlayerAudioFadeControl(renderers);
     this.audioFadeControl.setRepeatMode(repeatMode);
-    // TODO(crossfade): включение/длительность придут из UI (Фаза 3). Для теста
-    // включаем MANUAL 6 c, если есть второй аудио-рендерер.
-    if (secondaryAudioRendererIndex != C.INDEX_UNSET) {
-      this.audioFadeControl.setCrossFadeState(/* MANUAL= */ 1);
-      this.audioFadeControl.setCrossFadeDuration(6);
-    }
+    this.audioFadeControl.setCrossFadeDuration(6);
+    // Кроссфейд ВЫКЛЮЧЕН по умолчанию (STATE_OFF) — обычный gapless media3.
+    // Упрощённая модель v2 давала рывки на стыке; включим кроссфейд обратно
+    // только после порта настоящей модели Apple (advance-without-releasing).
+    // TODO(crossfade Фаза 3): включение/длительность из UI.
     mediaClock = new DefaultMediaClock(this, clock);
     pendingMessages = new ArrayList<>();
     renderersToReset = Sets.newIdentityHashSet();
