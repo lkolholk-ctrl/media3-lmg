@@ -341,7 +341,7 @@ import java.util.HashMap;
       @Nullable MediaPeriodHolder fadeOutPeriodHolder,
       @Nullable MediaPeriodHolder fadeInPeriodHolder)
       throws ExoPlaybackException {
-    Log.d(TAG, "prepareForCrossFade()");
+    Log.e(TAG, "prepareForCrossFade()");
     if (fadeOutPeriodHolder == null || fadeInPeriodHolder == null) {
       return;
     }
@@ -413,7 +413,7 @@ import java.util.HashMap;
     if (this.fadePhase != FadePhase.IDLE) {
       this.fadePhase = FadePhase.FADE_OUT;
     }
-    Log.d(TAG, "maybeStartCrossFading() ARMED phase=" + this.fadePhase);
+    Log.e(TAG, "maybeStartCrossFading() ARMED phase=" + this.fadePhase);
     return this.fadePhase != FadePhase.IDLE;
   }
 
@@ -457,7 +457,7 @@ import java.util.HashMap;
     if (this.fadePhase != FadePhase.IDLE && !this.paused) {
       this.fadeInLevel = doFadeIn(fadeInPeriodHolder, fadeOutPositionUs);
       this.fadeOutLevel = doFadeOut(fadeOutPeriodHolder, fadeOutPositionUs);
-      Log.d(
+      Log.e(
           TAG,
           "doCrossFade() fadeOutLevel: "
               + this.fadeOutLevel
@@ -485,7 +485,7 @@ import java.util.HashMap;
       boolean hasReadStreamToEnd = renderers[fadeOutPeriodHolder.getRendererIdx()].hasReadStreamToEnd();
       if ((this.fadeOutLevel < 0.05d && this.fadeInLevel > 0.95d)
           || (hasReadStreamToEnd && isEnded)) {
-        Log.d(
+        Log.e(
             TAG,
             "doCrossFade() complete. EOS: " + hasReadStreamToEnd + ", isEnded: " + isEnded);
         this.fadePhase = FadePhase.COMPLETED;
@@ -551,7 +551,7 @@ import java.util.HashMap;
   // ── reset (Apple 1:1 + реинициализация durationUs через crossFadeDuration) ──
   @Override
   public synchronized void reset() throws ExoPlaybackException {
-    Log.d(TAG, "reset()");
+    Log.e(TAG, "reset()");
     try {
       if (this.fadeInPeriodHolder != null) {
         setVolume(this.fadeInPeriodHolder.getRendererIdx(), MAX_VOLUME);
@@ -560,7 +560,7 @@ import java.util.HashMap;
         setVolume(this.fadeOutPeriodHolder.getRendererIdx(), MAX_VOLUME);
       }
     } catch (Exception e) {
-      Log.d(TAG, "reset() exception ex: " + e);
+      Log.e(TAG, "reset() exception ex: " + e);
     }
     this.lastMsgTs = Long.MAX_VALUE;
     this.fadeOutPeriodHolder = null;
@@ -619,7 +619,7 @@ import java.util.HashMap;
         try {
           setVolume(mediaPeriodHolder.getRendererIdx(), MAX_VOLUME);
         } catch (ExoPlaybackException e) {
-          Log.d(TAG, "setCrossFadeState() volume reset exception: " + e);
+          Log.e(TAG, "setCrossFadeState() volume reset exception: " + e);
         }
       }
       // TODO: Apple здесь mediaPlayer.setCrossFadeDuration(playerContext.getCrossFadeDuration()) —
@@ -641,7 +641,7 @@ import java.util.HashMap;
                 (transition.getDurationUs() / MILLIS_PER_SECOND) / ((long) NUM_MESSAGES),
                 MAX_MS_BETWEEN_MESSAGES),
             MIN_MS_BETWEEN_MESSAGES);
-    Log.d(
+    Log.e(
         TAG,
         "setFadeAudioEffect() new duration: "
             + transition.getDurationUs()

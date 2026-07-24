@@ -2339,17 +2339,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
           && next != null
           && audioFadeControl.canFadeBetweenPeriods(playing, next)
           && audioFadeControl.maybeStartCrossFading(playing, next, rendererPositionUs)) {
-        Log.d(
+        Log.e(
             TAG,
-            "crossfade ARM: remainingUs="
+            "xfade ARM: remainingUs="
                 + (durationUs - playbackInfo.positionUs)
                 + " playingIdx="
                 + playing.getRendererIdx()
                 + " nextPrepared="
                 + next.prepared);
-        shouldStartCrossFade = true;
-        updateFadeInPeriodRenderers(next);
-        audioFadeControl.prepareForCrossFade(playing, next);
+        // Взводим фейд ТОЛЬКО если второй рендерер реально включился на аудио B.
+        // Иначе (B не renderable — sampleStreams пусты и т.п.) откат: reset →
+        // isCrossFadeInProgress=false → плеер продолжит обычный gapless, НЕ виснет.
+        if (updateFadeInPeriodRenderers(next)) {
+          shouldStartCrossFade = true;
+          audioFadeControl.prepareForCrossFade(playing, next);
+        } else {
+          Log.e(TAG, "xfade ARM ROLLBACK: fadeIn renderer not enabled → gapless");
+          audioFadeControl.reset();
+        }
       }
       return;
     }
@@ -2417,15 +2424,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
    * Включает второй аудио-рендерер под аудио входящего периода. Порт Apple
    * updateFadeInPeriodRenderers (Вариант B — ручное включение, свободный индекс детерминированно).
    */
-  private void updateFadeInPeriodRenderers(@Nullable MediaPeriodHolder fadeInHolder)
+  private boolean updateFadeInPeriodRenderers(@Nullable MediaPeriodHolder fadeInHolder)
       throws ExoPlaybackException {
     @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
     if (playing == null || fadeInHolder == null || fadeInHolder == playing) {
-      return;
+      Log.e(TAG, "xfade: updateFadeInPeriodRenderers FAIL playing/fadeIn null/same");
+      return false;
     }
     if (primaryAudioRendererIndex == C.INDEX_UNSET
         || secondaryAudioRendererIndex == C.INDEX_UNSET) {
-      return;
+      Log.e(TAG, "xfade: FAIL no two audio renderers");
+      return false;
     }
     // Свободный аудио-рендерер = не тот, на котором играет уходящий playing (чередование).
     int currentIdx = playing.getRendererIdx();
@@ -2440,7 +2449,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
     @Nullable RendererConfiguration config = tsr.rendererConfigurations[sourceAudioIdx];
     @Nullable ExoTrackSelection selection = tsr.selections[sourceAudioIdx];
     if (audioStream == null || config == null || selection == null) {
-      return;
+      Log.e(
+          TAG,
+          "xfade: FAIL fadeIn not renderable — stream="
+              + (audioStream != null)
+              + " config="
+              + (config != null)
+              + " sel="
+              + (selection != null)
+              + " prepared="
+              + fadeInHolder.prepared
+              + " freeIdx="
+              + freeIdx);
+      return false;
     }
     Renderer free = renderers[freeIdx];
     if (free.getState() == Renderer.STATE_DISABLED && renderersToReset.remove(free)) {
@@ -2481,6 +2502,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
       }
     }
     fadeInHolder.setRendererIdx(freeIdx);
+    Log.e(TAG, "xfade: fadeIn renderer ENABLED freeIdx=" + freeIdx + " startNow=" + startNow);
+    return true;
   }
 
   /**
