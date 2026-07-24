@@ -307,7 +307,12 @@ import java.util.HashMap;
     if (periodHolder == null || !periodHolder.prepared || transition == null) {
       return false;
     }
-    return periodHolder.info.durationUs >= transition.getDurationUs() * ((long) 2)
+    // Apple: durationUs >= 2 * fade. Для нашего окна 5–30 c это отсекало бы длинные
+    // своды (30 c потребовали бы трек >= 60 c), поэтому достаточно, чтобы фейд
+    // помещался в трек с небольшим запасом.
+    long minTrackUs = transition.getDurationUs() + 2_000_000L;
+    return periodHolder.info.durationUs == C.TIME_UNSET
+        || periodHolder.info.durationUs >= minTrackUs
         || getTransitionDataAvailable();
   }
 

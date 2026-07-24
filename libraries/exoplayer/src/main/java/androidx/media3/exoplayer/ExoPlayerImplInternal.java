@@ -325,7 +325,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
     this.secondaryAudioRendererIndex = secondAudio;
     this.audioFadeControl = new PlayerAudioFadeControl(renderers);
     this.audioFadeControl.setRepeatMode(repeatMode);
-    this.audioFadeControl.setCrossFadeDuration(6);
+    // Длительность больше не хардкод: берётся из CrossfadeConfig (рецепт модели
+    // AutoMix в окне 5–30 c, либо фолбэк). Обновляется при каждом взводе фейда.
+    this.audioFadeControl.setCrossFadeDuration((int) (CrossfadeConfig.getXfadeMs() / 1000L));
     this.shouldStartCrossFade = false;
     this.shouldDisplayFadeInMetadata = false;
     // Кроссфейд ВКЛЮЧЁН (MANUAL 6c) для теста модели Apple (advance-without-releasing).
@@ -2372,7 +2374,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
               + " secAudio="
               + secondaryAudioRendererIndex);
     }
-    if (playing == null || !audioFadeControl.isCrossFadeEnabled()) {
+    if (playing == null || !audioFadeControl.isCrossFadeEnabled() || !CrossfadeConfig.isEnabled()) {
       return;
     }
     // WATCHDOG: страховка от «музыка встала». Если фейд идёт дольше, чем
@@ -2414,6 +2416,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
       // только когда до конца A осталось <= длительности фейда. У Apple тайминг задаёт
       // нативный композер (окно = последние d секунд); у нас его нет, поэтому арм по
       // позиции, иначе второй рендерер стартует слишком рано (B без перекрытия/раньше).
+      // Рецепт модели применяем ДО расчёта окна арма: длительность свода и кривая
+      // приходят на каждую пару треков отдельно (AutoMix), поэтому читаем их здесь,
+      // а не один раз в конструкторе.
+      long recipeXfadeMs = CrossfadeConfig.getXfadeMs();
+      if (audioFadeControl.getCrossFadeDuration() * 1000L != recipeXfadeMs) {
+        audioFadeControl.setCrossFadeDuration((int) (recipeXfadeMs / 1000L));
+      }
+      applyRecipeCurveIfAny();
       long durationUs = playing.info.durationUs;
       long fadeUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
       boolean nearEnd =
@@ -2482,6 +2492,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
             Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
     updatePlaybackPositions();
     maybeNotifyPlaybackInfoChanged();
+  }
+
+  /**
+   * LMG-fork: применяет кривую свода из рецепта модели (transitionType). Вне
+   * диапазона — оставляем дефолт Apple (fade-in LOGARITHMIC / fade-out EXPONENTIAL).
+   */
+  private void applyRecipeCurveIfAny() {
+    int type = CrossfadeConfig.getCurveType();
+    AudioFadeControl.FadeEffectType[] curves = AudioFadeControl.FadeEffectType.values();
+    if (type < 0 || type >= curves.length) {
+      return;
+    }
+    AudioFadeControl.FadeEffectType curve = curves[type];
+    long durationUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
+    audioFadeControl.setFadeAudioEffect(
+        AudioFadeControl.FadeType.FADE_IN,
+        new AudioFadeControl.AudioFadeTransition(curve, 0L, durationUs));
+    audioFadeControl.setFadeAudioEffect(
+        AudioFadeControl.FadeType.FADE_OUT,
+        new AudioFadeControl.AudioFadeTransition(curve, 0L, durationUs));
   }
 
   /** Выгрузка уходящего периода по завершении фейда. Порт Apple maybeReleaseFadeOutPeriod. */
