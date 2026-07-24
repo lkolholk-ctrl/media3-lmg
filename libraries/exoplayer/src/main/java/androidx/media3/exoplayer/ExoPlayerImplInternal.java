@@ -2474,7 +2474,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
             newPlaying.info.startPositionUs,
             newPlaying.info.requestedContentPositionUs,
             /* discontinuityStartPositionUs= */ newPlaying.info.startPositionUs,
-            /* reportDiscontinuity= */ !oldPlaying.info.isLastInTimelinePeriod,
+            // ВСЕГДА true: смена media item обязана сопровождаться discontinuity, иначе
+            // ExoPlayerImpl.evaluateMediaItemTransitionReason бросает IllegalStateException
+            // («A change in window uid must be justified») — краш на хендоффе фейда.
+            // Apple тоже репортит discontinuity всегда (менялся лишь код причины).
+            /* reportDiscontinuity= */ true,
             Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
     updatePlaybackPositions();
     maybeNotifyPlaybackInfoChanged();
