@@ -182,6 +182,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private static final long PLAYBACK_BUFFER_EMPTY_THRESHOLD_US = 500_000;
 
   private final Renderer[] renderers;
+
+  // LMG-fork (crossfade). Два аудио-рендерера + фейд-контроль. Индексы вычисляются
+  // в конструкторе; C.INDEX_UNSET, если второго аудио-рендерера нет (кроссфейд off).
+  private final PlayerAudioFadeControl audioFadeControl;
+  private final int primaryAudioRendererIndex;
+  private final int secondaryAudioRendererIndex;
   private final Set<Renderer> renderersToReset;
   private final RendererCapabilities[] rendererCapabilities;
   private final boolean[] rendererReportedReady;
@@ -295,6 +301,29 @@ import java.util.concurrent.atomic.AtomicBoolean;
       if (rendererCapabilitiesListener != null) {
         rendererCapabilities[i].setListener(rendererCapabilitiesListener);
       }
+    }
+    // LMG-fork (crossfade): находим два первых аудио-рендерера.
+    int firstAudio = C.INDEX_UNSET;
+    int secondAudio = C.INDEX_UNSET;
+    for (int i = 0; i < renderers.length; i++) {
+      if (renderers[i].getTrackType() == C.TRACK_TYPE_AUDIO) {
+        if (firstAudio == C.INDEX_UNSET) {
+          firstAudio = i;
+        } else if (secondAudio == C.INDEX_UNSET) {
+          secondAudio = i;
+          break;
+        }
+      }
+    }
+    this.primaryAudioRendererIndex = firstAudio;
+    this.secondaryAudioRendererIndex = secondAudio;
+    this.audioFadeControl = new PlayerAudioFadeControl(renderers);
+    this.audioFadeControl.setRepeatMode(repeatMode);
+    // TODO(crossfade): включение/длительность придут из UI (Фаза 3). Для теста
+    // включаем MANUAL 6 c, если есть второй аудио-рендерер.
+    if (secondaryAudioRendererIndex != C.INDEX_UNSET) {
+      this.audioFadeControl.setCrossFadeState(/* MANUAL= */ 1);
+      this.audioFadeControl.setCrossFadeDuration(6);
     }
     mediaClock = new DefaultMediaClock(this, clock);
     pendingMessages = new ArrayList<>();
@@ -1119,6 +1148,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
     TraceUtil.beginSection("doSomeWork");
 
     updatePlaybackPositions();
+
+    // LMG-fork (crossfade): взвод/тик/завершение фейда до цикла рендера, чтобы
+    // только что включённый второй аудио-рендерер отрендерился в этом же проходе.
+    maybeCrossFade();
 
     boolean renderersEnded = true;
     boolean renderersAllowPlayback = true;
@@ -2239,7 +2272,98 @@ import java.util.concurrent.atomic.AtomicBoolean;
     return loadingPeriodChanged;
   }
 
+  // LMG-fork (crossfade): взводит / тикает / завершает кроссфейд. Вызывается из
+  // doSomeWork каждым проходом. Взвод — когда до конца текущего трека осталось
+  // <= длительности фейда и следующий период готов; тогда включаем второй аудио-
+  // рендерер на аудио-стрим входящего трека и ramp'им громкости обоих.
+  private void maybeCrossFade() throws ExoPlaybackException {
+    if (secondaryAudioRendererIndex == C.INDEX_UNSET
+        || primaryAudioRendererIndex == C.INDEX_UNSET
+        || !audioFadeControl.isCrossFadeEnabled()) {
+      return;
+    }
+    audioFadeControl.setRepeatMode(repeatMode);
+    @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
+    if (playing == null || !playing.prepared) {
+      return;
+    }
+    if (audioFadeControl.isCrossFadeInProgress()) {
+      audioFadeControl.doCrossFade(playing, playing.getNext(), rendererPositionUs);
+      if (audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.COMPLETED) {
+        endCrossFade();
+      }
+      return;
+    }
+    @Nullable MediaPeriodHolder next = playing.getNext();
+    if (next == null || !next.prepared) {
+      return;
+    }
+    long durationUs = playing.info.durationUs;
+    if (durationUs == C.TIME_UNSET) {
+      return;
+    }
+    long remainingUs = durationUs - playbackInfo.positionUs;
+    long fadeDurationUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
+    if (remainingUs > fadeDurationUs || !audioFadeControl.canFadeBetweenPeriods(playing, next)) {
+      return;
+    }
+    @Nullable SampleStream audioStream = next.sampleStreams[primaryAudioRendererIndex];
+    TrackSelectorResult tsr = next.getTrackSelectorResult();
+    @Nullable RendererConfiguration config = tsr.rendererConfigurations[primaryAudioRendererIndex];
+    @Nullable ExoTrackSelection selection = tsr.selections[primaryAudioRendererIndex];
+    if (audioStream == null || config == null || selection == null) {
+      return;
+    }
+    // Уходящий период → основной рендерер, входящий → второй.
+    playing.crossFadeRendererIndex = primaryAudioRendererIndex;
+    next.crossFadeRendererIndex = secondaryAudioRendererIndex;
+    Renderer secondary = renderers[secondaryAudioRendererIndex];
+    if (secondary.getState() == Renderer.STATE_DISABLED) {
+      secondary.enable(
+          config,
+          getFormats(selection),
+          audioStream,
+          rendererPositionUs,
+          /* joining= */ false,
+          /* mayRenderStartOfStream= */ true,
+          next.getStartPositionRendererTime(),
+          next.getRendererOffset(),
+          next.info.id);
+      renderersToReset.add(secondary);
+      secondary.start();
+    }
+    audioFadeControl.prepareForCrossFade(playing, next);
+  }
+
+  // LMG-fork: завершение кроссфейда — глушим второй рендерер и снимаем гейт;
+  // media3 дальше сама переходит на следующий период штатно.
+  private void endCrossFade() throws ExoPlaybackException {
+    Renderer secondary = renderers[secondaryAudioRendererIndex];
+    try {
+      if (secondary.getState() != Renderer.STATE_DISABLED) {
+        secondary.disable();
+      }
+    } catch (RuntimeException e) {
+      // Не роняем плеер из-за диагностики фейда.
+    }
+    @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
+    if (playing != null) {
+      playing.crossFadeRendererIndex = C.INDEX_UNSET;
+      @Nullable MediaPeriodHolder next = playing.getNext();
+      if (next != null) {
+        next.crossFadeRendererIndex = C.INDEX_UNSET;
+      }
+    }
+    audioFadeControl.reset();
+  }
+
   private void maybeUpdateReadingPeriod() throws ExoPlaybackException {
+    // LMG-fork (crossfade): пока идёт фейд, НЕ продвигаем reading-период — иначе
+    // media3 через replaceStream переключит основной рендерер на входящий трек и
+    // «перебьёт» второй рендерер, который его уже играет.
+    if (audioFadeControl.isCrossFadeInProgress()) {
+      return;
+    }
     @Nullable MediaPeriodHolder readingPeriodHolder = queue.getReadingPeriod();
     if (readingPeriodHolder == null) {
       return;
@@ -2421,6 +2545,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
   }
 
   private void maybeUpdatePlayingPeriod() throws ExoPlaybackException {
+    // LMG-fork (crossfade): пока идёт фейд, playing-период не продвигаем —
+    // уходящий трек доигрывает на основном рендерере с затуханием.
+    if (audioFadeControl.isCrossFadeInProgress()) {
+      return;
+    }
     boolean advancedPlayingPeriod = false;
     while (shouldAdvancePlayingPeriod()) {
       if (advancedPlayingPeriod) {
