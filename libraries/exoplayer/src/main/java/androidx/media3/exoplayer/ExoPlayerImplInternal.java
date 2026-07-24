@@ -2327,9 +2327,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
       // next!=null guard добавлен для nullness (canFadeBetweenPeriods(x,null) и так вернёт false —
       // семантика Apple сохранена); prepareForCrossFade принимает @NonNull.
       @Nullable MediaPeriodHolder next = playing.getNext();
-      if (next != null
+      // media3-адаптация (MANUAL без композера): позиционный гейт арма — взводим фейд
+      // только когда до конца A осталось <= длительности фейда. У Apple тайминг задаёт
+      // нативный композер (окно = последние d секунд); у нас его нет, поэтому арм по
+      // позиции, иначе второй рендерер стартует слишком рано (B без перекрытия/раньше).
+      long durationUs = playing.info.durationUs;
+      long fadeUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
+      boolean nearEnd =
+          durationUs != C.TIME_UNSET && (durationUs - playbackInfo.positionUs) <= fadeUs;
+      if (nearEnd
+          && next != null
           && audioFadeControl.canFadeBetweenPeriods(playing, next)
           && audioFadeControl.maybeStartCrossFading(playing, next, rendererPositionUs)) {
+        Log.d(
+            TAG,
+            "crossfade ARM: remainingUs="
+                + (durationUs - playbackInfo.positionUs)
+                + " playingIdx="
+                + playing.getRendererIdx()
+                + " nextPrepared="
+                + next.prepared);
         shouldStartCrossFade = true;
         updateFadeInPeriodRenderers(next);
         audioFadeControl.prepareForCrossFade(playing, next);

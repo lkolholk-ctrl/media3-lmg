@@ -403,11 +403,17 @@ import java.util.HashMap;
     if (this.isComputeTransitionJobExecuted) {
       setCrossFadeInProgress(fadeOutPeriodHolder, fadeInPeriodHolder, rendererPositionUs);
     } else {
-      computeTransitionJob(fadeOutPeriodHolder, fadeInPeriodHolder);
+      // media3-адаптация: у Apple здесь computeTransitionJob → нативный композер
+      // (даже в MANUAL, с fallbackTransitionDuration), который и взводит фазу через
+      // setCrossFadeInProgress. Композера у нас НЕТ → взводим MANUAL напрямую, иначе
+      // фаза остаётся IDLE и кроссфейд не запускается вообще (треки идут gapless).
+      computeTransitionJob(fadeOutPeriodHolder, fadeInPeriodHolder); // no-op
+      this.fadePhase = FadePhase.FADE_OUT;
     }
     if (this.fadePhase != FadePhase.IDLE) {
       this.fadePhase = FadePhase.FADE_OUT;
     }
+    Log.d(TAG, "maybeStartCrossFading() ARMED phase=" + this.fadePhase);
     return this.fadePhase != FadePhase.IDLE;
   }
 

@@ -15,7 +15,7 @@ permissions:
 
 env:
   # Версия форка. Бампать при каждом изменении патча (…-lmg1, -lmg2, …).
-  RELEASE_VERSION: 1.5.1-lmg6
+  RELEASE_VERSION: 1.5.1-lmg7
 
 jobs:
   build:
