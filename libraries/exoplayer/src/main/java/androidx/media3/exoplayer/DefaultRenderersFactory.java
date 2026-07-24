@@ -469,6 +469,22 @@ public class DefaultRenderersFactory implements RenderersFactory {
             audioSink);
     out.add(audioRenderer);
 
+    // LMG-fork (crossfade): второй аудио-рендерер со СВОИМ AudioSink. Во время
+    // кроссфейда играет входящий трек параллельно с уходящим (первым рендерером),
+    // громкость каждого ramp'ится независимо. Вне кроссфейда трек-селектор его не
+    // выбирает → рендерер отключён, свой AudioTrack не открывается (нулевая
+    // стоимость). См. AudioFadeControl / ExoPlayerImplInternal.
+    MediaCodecAudioRenderer secondaryAudioRenderer =
+        new MediaCodecAudioRenderer(
+            context,
+            getCodecAdapterFactory(),
+            mediaCodecSelector,
+            enableDecoderFallback,
+            eventHandler,
+            eventListener,
+            new androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context).build());
+    out.add(secondaryAudioRenderer);
+
     if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) {
       return;
     }
