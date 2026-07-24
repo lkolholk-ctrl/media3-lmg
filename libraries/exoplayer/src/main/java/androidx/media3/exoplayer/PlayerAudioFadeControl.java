@@ -1,94 +1,137 @@
 /*
- * LMG-fork (crossfade). Реализация AudioFadeControl для media3 — режим MANUAL
- * (симметричный фейд фиксированной длительности 1..12 c). Портировано из
- * Apple Music PlayerAudioFadeControl; нативный AUTOMATIC-композер (seamless по
- * AudioAnalysis) выкинут — у нас нет серверного анализа трека.
+ * LMG-fork (crossfade). Реализация AudioFadeControl для media3 — режим MANUAL,
+ * портирована 1:1 из Apple Music PlayerAudioFadeControl (декомпиляция, 1087 строк).
  *
- * Модель: два аудио-рендерера играют одновременно; громкость каждого ставится
- * renderer.handleMessage(Renderer.MSG_SET_VOLUME). Кривые и тайминг — как у Apple:
- * fade-in логарифмическая, fade-out экспоненциальная; шаг = clamp(dur/20,200,500)мс;
- * привязка к аудио-часам рендерера (MediaClock.getPositionUs).
+ * Портирован MANUAL-путь (transitionDataAvailable == false): позиционная
+ * математика doFadeIn/doFadeOut по startPositionUs/durationUs периода и
+ * getDurationUs() фейда; кривые calculateFadeInLevel/doFadeOut switch 1:1;
+ * doCrossFade — логика доминирующего периода + завершение по уровням/EOS (НЕ
+ * wall-clock, НЕ equal-power).
+ *
+ * НЕ портирован AUTOMATIC-путь (нативный LevelComposer по серверному
+ * AudioAnalysis): у нас нет обёртки MediaPlayer/MediaPlayerContext, нативных
+ * биндингов renderer.javanative и PlayerMediaItem. Ветки composer сохранены
+ * структурно (if getTransitionDataAvailable()), но так как transitionDataAvailable
+ * всегда false, они не исполняются; computeTransitionJob/setComposerTransition/
+ * prepareFeature/setAutomations/getAudioAnalysis НЕ перенесены (см. TODO ниже).
+ *
+ * Модель media3: два аудио-рендерера играют одновременно; громкость каждого
+ * ставится renderers[idx].handleMessage(Renderer.MSG_SET_VOLUME, level). Индекс
+ * рендерера периода берётся из MediaPeriodHolder.getRendererIdx().
  */
 package androidx.media3.exoplayer;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Player;
+import androidx.media3.common.util.Log;
 import java.util.HashMap;
 
 /* package */ final class PlayerAudioFadeControl implements AudioFadeControl {
 
-  private static final float MAX_VOLUME = 1.0f;
-  private static final float MIN_VOLUME = 0.0f;
-  private static final int NUM_MESSAGES = 20;
+  private static final String TAG = "PlayerAudioFadeControl";
+
+  // ── Константы Apple 1:1 ──
+  private static final long CROSS_POINT_TOLERANCE_US = 100000;
   private static final long MAX_MS_BETWEEN_MESSAGES = 500;
   private static final long MIN_MS_BETWEEN_MESSAGES = 200;
+  private static final int NUM_MESSAGES = 20;
+  private static final float MAX_VOLUME = 1.0f;
+  private static final float MIN_VOLUME = 0.0f;
+  private static final long MILLIS_PER_SECOND = 1000L;
   private static final long US_PER_SECOND = 1_000_000L;
 
-  // Состояния кроссфейда.
-  private static final int STATE_AUTOMATIC = 0;
-  private static final int STATE_MANUAL = 1;
-  private static final int STATE_OFF = 2;
-
+  // Состояния кроссфейда: 0=AUTOMATIC, 1=MANUAL, 2=OFF (как у Apple).
   private final Renderer[] renderers;
   private final HashMap<FadeType, AudioFadeTransition> transitionsMap = new HashMap<>();
 
   private long msBetweenMessages = MAX_MS_BETWEEN_MESSAGES;
+  private long secondTrackOffsetUs = Long.MAX_VALUE;
   private boolean paused = false;
   private long lastMsgTs = Long.MAX_VALUE;
   private float fadeInLevel = MIN_VOLUME;
   private float fadeOutLevel = MAX_VOLUME;
-  // Wall-clock старта фейда — по нему детерминированно завершаем ровно за
-  // crossFadeDuration секунд (гейт продвижения периода гарантированно снимается).
-  private long fadeStartWallMs = 0L;
 
   @Nullable private MediaPeriodHolder fadeOutPeriodHolder;
   @Nullable private MediaPeriodHolder fadeInPeriodHolder;
 
-  private int crossFadeState = STATE_OFF;
+  private boolean isComputeTransitionJobExecuted = false;
+  // Всегда false в нашем порте (нативный композер не перенесён).
+  private volatile boolean transitionDataAvailable = false;
+
+  private int crossFadeState = 2; // OFF
   private int crossFadeDuration; // секунды
-  private int repeatMode = Player.REPEAT_MODE_OFF;
   private FadePhase fadePhase = FadePhase.IDLE;
+  private float crossingTimeUs = MIN_VOLUME; // всегда 0 в MANUAL (заполняется только композером)
+  @Nullable private Boolean canFadeCached;
+
+  // media3-адаптация: Apple берёт repeatMode из обёртки MediaPlayer.getRepeatMode();
+  // у нас его прокидывает ExoPlayerImplInternal через setRepeatMode(int).
+  private int repeatMode = Player.REPEAT_MODE_OFF;
 
   public PlayerAudioFadeControl(Renderer[] renderers) {
     this.renderers = renderers;
-    // Дефолт-кривые: вход логарифмическая, выход экспоненциальная.
+    // Дефолт-кривые (как в Apple reset() и по ТЗ): fade-in LOGARITHMIC, fade-out EXPONENTIAL.
+    // Примечание: Apple-конструктор кладёт new AudioFadeTransition() (LINEAR) и полагается
+    // на композер; у нас композера нет, поэтому сразу ставим LOG/EXP (совпадает с reset()).
     transitionsMap.put(FadeType.FADE_IN, new AudioFadeTransition(FadeEffectType.LOGARITHMIC));
     transitionsMap.put(FadeType.FADE_OUT, new AudioFadeTransition(FadeEffectType.EXPONENTIAL));
   }
 
-  /** Обновляется из ExoPlayerImplInternal — кроссфейд не запускаем при REPEAT_ONE. */
+  /** media3-адаптация: прокидывается из ExoPlayerImplInternal (замена MediaPlayer.getRepeatMode). */
   public void setRepeatMode(int repeatMode) {
     this.repeatMode = repeatMode;
   }
 
-  // ── Кривая fade-IN (уровень входящего по нормализованному t∈[0,1]) ──
-  private float calculateFadeInLevel(float t) {
-    AudioFadeTransition tr = transitionsMap.get(FadeType.FADE_IN);
-    if (tr == null) {
+  // ── Кривая fade-IN (Apple calculateFadeInLevel 1:1) ──
+  private float calculateFadeInLevel(float fadeInTimeNormalized) {
+    AudioFadeTransition audioFadeTransition = transitionsMap.get(FadeType.FADE_IN);
+    if (audioFadeTransition == null) {
       return MIN_VOLUME;
     }
-    double c = tr.getCoefficient();
     float f;
-    switch (tr.getEffectType()) {
+    FadeEffectType effectType = audioFadeTransition.getEffectType();
+    switch (effectType) {
       case LINEAR:
-        f = 1 - t;
+        f = 1 - fadeInTimeNormalized;
         break;
       case CUBIC:
-        f = (float) Math.pow(1 - (double) t, 3.0);
+        f = (float) Math.pow((double) 1 - (double) fadeInTimeNormalized, 3.0d);
         break;
       case EXPONENTIAL:
-        f = (float) ((Math.pow(c, 1 - (double) t) - 1) / (c - 1));
-        break;
+        {
+          double d = 1;
+          f =
+              (float)
+                  ((Math.pow(audioFadeTransition.getCoefficient(), d - (double) fadeInTimeNormalized)
+                          - d)
+                      / (audioFadeTransition.getCoefficient() - d));
+          break;
+        }
       case LOGARITHMIC:
-        f = (float) (Math.log(c + (1 - c) * (double) t) / Math.log(c));
+        f =
+            (float)
+                (Math.log(
+                        audioFadeTransition.getCoefficient()
+                            + (((double) 1 - audioFadeTransition.getCoefficient())
+                                * (double) fadeInTimeNormalized))
+                    / Math.log(audioFadeTransition.getCoefficient()));
         break;
       case CONSTANT_POWER:
-        f = (float) Math.sqrt(1 - (double) t);
+        f = (float) Math.sqrt((double) 1 - (double) fadeInTimeNormalized);
         break;
       case SIGMOID:
-        f = (float) (1.0 / (Math.exp(((double) t - 0.5) * c) + 1));
-        break;
+        {
+          double d = 1;
+          f =
+              (float)
+                  (d
+                      / (Math.exp(
+                              ((double) fadeInTimeNormalized - 0.5d)
+                                  * audioFadeTransition.getCoefficient())
+                          + d));
+          break;
+        }
       default:
         f = 1.0f;
         break;
@@ -96,277 +139,550 @@ import java.util.HashMap;
     return Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, f));
   }
 
-  private float doFadeIn(@Nullable MediaPeriodHolder fadeIn, long rendererPositionUs)
+  // ── doFadeIn (Apple 1:1; обе ветки сохранены, composer-ветка не исполняется) ──
+  private float doFadeIn(@Nullable MediaPeriodHolder fadeInPeriodHolder, long rendererPositionUs)
       throws ExoPlaybackException {
-    AudioFadeTransition tr = transitionsMap.get(FadeType.FADE_IN);
-    if (fadeIn == null || tr == null || fadeOutPeriodHolder == null || tr.getDurationUs() <= 0) {
+    float periodTime;
+    AudioFadeTransition audioFadeTransition = transitionsMap.get(FadeType.FADE_IN);
+    if (fadeInPeriodHolder == null
+        || audioFadeTransition == null
+        || this.fadeOutPeriodHolder == null) {
       return MIN_VOLUME;
     }
-    MediaPeriodInfo info = fadeIn.info;
-    // MANUAL: t = (startPositionUs - позиция_в_периоде) / длительность_фейда.
-    float t =
-        (info.startPositionUs - fadeIn.toPeriodTime(rendererPositionUs)) / (float) tr.getDurationUs();
-    float level = calculateFadeInLevel(t);
-    setVolume(fadeIn.getRendererIdx(), level);
+    MediaPeriodInfo mediaPeriodInfo = fadeInPeriodHolder.info;
+    if (getTransitionDataAvailable()) {
+      // AUTOMATIC (composer) — не исполняется (transitionDataAvailable == false).
+      MediaPeriodHolder mediaPeriodHolder = this.fadeOutPeriodHolder;
+      long periodTime2 = mediaPeriodHolder.toPeriodTime(rendererPositionUs);
+      if (periodTime2 < audioFadeTransition.getStartUs()) {
+        return MIN_VOLUME;
+      }
+      if (periodTime2 > audioFadeTransition.getDurationUs() + audioFadeTransition.getStartUs()) {
+        setVolume(fadeInPeriodHolder.getRendererIdx(), MAX_VOLUME);
+        return MAX_VOLUME;
+      }
+      periodTime =
+          ((float) (audioFadeTransition.getStartUs() - periodTime2)
+                  / audioFadeTransition.getDurationUs())
+              + MAX_VOLUME;
+    } else {
+      // MANUAL: t = (startPositionUs - позиция_в_периоде) / длительность_фейда.
+      periodTime =
+          (float) (mediaPeriodInfo.startPositionUs - fadeInPeriodHolder.toPeriodTime(rendererPositionUs))
+              / audioFadeTransition.getDurationUs();
+    }
+    float level = calculateFadeInLevel(periodTime);
+    setVolume(fadeInPeriodHolder.getRendererIdx(), level);
     return level;
   }
 
-  private float doFadeOut(@Nullable MediaPeriodHolder fadeOut, long rendererPositionUs)
+  // ── doFadeOut (Apple 1:1; обе ветки сохранены, composer-ветка не исполняется) ──
+  private float doFadeOut(@Nullable MediaPeriodHolder fadeOutPeriodHolder, long rendererPositionUs)
       throws ExoPlaybackException {
-    AudioFadeTransition tr = transitionsMap.get(FadeType.FADE_OUT);
-    if (fadeOut == null || tr == null || tr.getDurationUs() <= 0) {
+    float numerator;
+    long durationDenom;
+    AudioFadeTransition audioFadeTransition = transitionsMap.get(FadeType.FADE_OUT);
+    if (fadeOutPeriodHolder == null || audioFadeTransition == null) {
       return MIN_VOLUME;
     }
-    MediaPeriodInfo info = fadeOut.info;
-    // MANUAL: фейд начинается за durationUs до конца периода.
-    float num =
-        ((info.startPositionUs + info.durationUs) - tr.getDurationUs())
-            - fadeOut.toPeriodTime(rendererPositionUs);
-    float x = (num / (float) tr.getDurationUs()) + MAX_VOLUME; // x: 1→0 по ходу фейда
-    double c = tr.getCoefficient();
-    float f;
-    switch (tr.getEffectType()) {
+    MediaPeriodInfo mediaPeriodInfo = fadeOutPeriodHolder.info;
+    if (getTransitionDataAvailable()) {
+      // AUTOMATIC (composer) — не исполняется (transitionDataAvailable == false).
+      long periodTime = fadeOutPeriodHolder.toPeriodTime(rendererPositionUs);
+      if (periodTime < audioFadeTransition.getStartUs()) {
+        return MAX_VOLUME;
+      }
+      if (periodTime > audioFadeTransition.getDurationUs() + audioFadeTransition.getStartUs()) {
+        setVolume(fadeOutPeriodHolder.getRendererIdx(), MIN_VOLUME);
+        return MIN_VOLUME;
+      }
+      numerator = audioFadeTransition.getStartUs() - periodTime;
+      durationDenom = audioFadeTransition.getDurationUs();
+    } else {
+      // MANUAL: фейд начинается за durationUs до конца периода.
+      numerator =
+          ((mediaPeriodInfo.startPositionUs + mediaPeriodInfo.durationUs)
+                  - audioFadeTransition.getDurationUs())
+              - fadeOutPeriodHolder.toPeriodTime(rendererPositionUs);
+      durationDenom = audioFadeTransition.getDurationUs();
+    }
+    float fExp = (numerator / durationDenom) + MAX_VOLUME; // x: 1→0 по ходу фейда
+    FadeEffectType effectType = audioFadeTransition.getEffectType();
+    switch (effectType) {
       case LINEAR:
-        f = x;
         break;
       case CUBIC:
-        f = (float) Math.pow(x, 3.0);
+        fExp = (float) Math.pow(fExp, 3.0d);
         break;
       case EXPONENTIAL:
-        f = (float) ((Math.pow(c, x) - 1) / (c - 1));
-        break;
+        {
+          double d = 1;
+          fExp =
+              (float)
+                  ((Math.pow(audioFadeTransition.getCoefficient(), fExp) - d)
+                      / (audioFadeTransition.getCoefficient() - d));
+          break;
+        }
       case LOGARITHMIC:
-        f = (float) (Math.log((c - 1) * (double) x + 1) / Math.log(c));
-        break;
+        {
+          double d2 = 1;
+          fExp =
+              (float)
+                  (Math.log(((audioFadeTransition.getCoefficient() - d2) * (double) fExp) + d2)
+                      / Math.log(audioFadeTransition.getCoefficient()));
+          break;
+        }
       case CONSTANT_POWER:
-        f = (float) Math.sqrt(x);
+        fExp = (float) Math.sqrt(fExp);
         break;
       case SIGMOID:
-        f = (float) (1.0 / (Math.exp(((double) x - 0.5) * (-c)) + 1));
-        break;
+        {
+          double d3 = 1;
+          fExp =
+              (float)
+                  (d3
+                      / (Math.exp(
+                              ((double) fExp - 0.5d)
+                                  * (audioFadeTransition.getCoefficient() * ((double) (-1))))
+                          + d3));
+          break;
+        }
       default:
-        f = 1.0f;
+        fExp = 1.0f;
         break;
     }
-    float level = Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, f));
-    setVolume(fadeOut.getRendererIdx(), level);
+    float level = Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, fExp));
+    setVolume(fadeOutPeriodHolder.getRendererIdx(), level);
     return level;
   }
 
   private void setVolume(int rendererIdx, float volume) throws ExoPlaybackException {
     if (rendererIdx >= 0 && rendererIdx < renderers.length) {
-      renderers[rendererIdx].handleMessage(Renderer.MSG_SET_VOLUME, volume);
+      renderers[rendererIdx].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(volume));
     }
   }
 
+  // ── canFadeBetweenPeriods (Apple 1:1, адаптировано под отсутствие обёртки) ──
   @Override
   public synchronized boolean canFadeBetweenPeriods(
-      @Nullable MediaPeriodHolder fadeOut, @Nullable MediaPeriodHolder fadeIn) {
-    if (!isCrossFadeEnabled() || repeatMode == Player.REPEAT_MODE_ONE) {
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder) {
+    if (!isCrossFadeEnabled()) {
       return false;
     }
-    if (!isMediaPeriodReady(fadeOut, transitionsMap.get(FadeType.FADE_OUT))
-        || !isMediaPeriodReady(fadeIn, transitionsMap.get(FadeType.FADE_IN))
-        || areTheSameMediaPeriods(fadeOut, fadeIn)) {
+    Boolean bool = this.canFadeCached;
+    if (bool != null) {
+      return bool.booleanValue();
+    }
+    if (this.repeatMode == Player.REPEAT_MODE_ONE) { // Apple: mediaPlayer.getRepeatMode() == 1
       return false;
     }
+    if (!canMediaPeriodFade(fadeOutPeriodHolder, transitionsMap.get(FadeType.FADE_OUT))
+        || !canMediaPeriodFade(fadeInPeriodHolder, transitionsMap.get(FadeType.FADE_IN))
+        || areTheSameMediaPeriods(fadeOutPeriodHolder, fadeInPeriodHolder)
+        || areSequentialItems(fadeOutPeriodHolder, fadeInPeriodHolder)) {
+      return false;
+    }
+    // Apple: if (!FeatureFlag.l() || !isUnsupportedModel(...)) return true; иначе кэшируем false.
+    // media3-адаптация: нет фичефлага C0149j — гейт по модели устройства опущен → return true.
+    // (isUnsupportedModel() сохранён как заглушка ниже, но в гейте не участвует.)
     return true;
   }
 
+  private boolean canMediaPeriodFade(
+      @Nullable MediaPeriodHolder periodHolder, @Nullable AudioFadeTransition transition) {
+    return isCorrectMediaType(periodHolder) && isMediaPeriodReady(periodHolder, transition);
+  }
+
+  // Apple 1:1.
   private boolean isMediaPeriodReady(
-      @Nullable MediaPeriodHolder holder, @Nullable AudioFadeTransition tr) {
-    if (holder == null || !holder.prepared || tr == null) {
+      @Nullable MediaPeriodHolder periodHolder, @Nullable AudioFadeTransition transition) {
+    if (periodHolder == null || !periodHolder.prepared || transition == null) {
       return false;
     }
-    // Трек должен быть минимум вдвое длиннее фейда.
-    return holder.info.durationUs == C.TIME_UNSET
-        || holder.info.durationUs >= tr.getDurationUs() * 2;
+    return periodHolder.info.durationUs >= transition.getDurationUs() * ((long) 2)
+        || getTransitionDataAvailable();
   }
 
+  // Apple сравнивает getMediaPeriodUid (кастит periodUid к Long). В media3 uid — Object,
+  // поэтому сравниваем через uid.equals (эквивалентно по смыслу).
   private boolean areTheSameMediaPeriods(
-      @Nullable MediaPeriodHolder a, @Nullable MediaPeriodHolder b) {
-    return a != null && b != null && a.uid.equals(b.uid);
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder) {
+    return fadeOutPeriodHolder != null
+        && fadeInPeriodHolder != null
+        && fadeOutPeriodHolder.uid.equals(fadeInPeriodHolder.uid);
   }
 
-  // Разовая подготовка: стартовые громкости + запоминаем холдеры.
+  // TODO: media-type check недоступен без обёртки MediaPlayer/PlayerMediaItem
+  // (Apple: getPlayerMediaItemFromPeriodHolder(...).getType() == 1). Заглушка → true.
+  private boolean isCorrectMediaType(@Nullable MediaPeriodHolder periodHolder) {
+    return periodHolder != null;
+  }
+
+  // TODO: album-check (areSequentialItems по albumSubscriptionStoreId/disc/track) недоступен
+  // без обёртки MediaPlayer/PlayerMediaItem. Заглушка → false (не блокирует кроссфейд).
+  private boolean areSequentialItems(
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder) {
+    return false;
+  }
+
+  // Apple hardcode: return true. Сохранён, но в canFadeBetweenPeriods не используется (см. коммент).
+  private boolean isUnsupportedModel(
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder) {
+    return true;
+  }
+
+  // ── prepareForCrossFade (Apple 1:1 + необходимая инициализация lastMsgTs) ──
   @Override
-  public void prepareForCrossFade(MediaPeriodHolder fadeOut, MediaPeriodHolder fadeIn)
+  public void prepareForCrossFade(
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder)
       throws ExoPlaybackException {
-    setVolume(fadeOut.getRendererIdx(), MAX_VOLUME);
-    setVolume(fadeIn.getRendererIdx(), MIN_VOLUME);
-    this.fadeOutPeriodHolder = fadeOut;
-    this.fadeInPeriodHolder = fadeIn;
+    Log.d(TAG, "prepareForCrossFade()");
+    if (fadeOutPeriodHolder == null || fadeInPeriodHolder == null) {
+      return;
+    }
+    if (!getTransitionDataAvailable()) {
+      setVolume(fadeOutPeriodHolder.getRendererIdx(), MAX_VOLUME);
+    }
+    setVolume(fadeInPeriodHolder.getRendererIdx(), MIN_VOLUME);
+    this.fadeOutPeriodHolder = fadeOutPeriodHolder;
+    this.fadeInPeriodHolder = fadeInPeriodHolder;
     this.fadeOutLevel = MAX_VOLUME;
     this.fadeInLevel = MIN_VOLUME;
     this.paused = false;
-    this.lastMsgTs = Long.MAX_VALUE;
-    this.fadeStartWallMs = 0L; // старт wall-clock проставится на первом doCrossFade
+    // media3-адаптация: хост стартует фейд через prepareForCrossFade (а не setCrossFadeInProgress),
+    // поэтому здесь взводим lastMsgTs = now — иначе троттлинг doCrossFade (now - lastMsgTs<step)
+    // при lastMsgTs=MAX_VALUE навсегда блокировал бы первый тик. У Apple lastMsgTs ставит
+    // setCrossFadeInProgress в момент cross-point.
+    this.lastMsgTs = System.currentTimeMillis();
     this.fadePhase = FadePhase.FADE_OUT;
   }
 
-  @Override
-  public synchronized boolean maybeStartCrossFading(
-      MediaPeriodHolder fadeOut, MediaPeriodHolder fadeIn, long rendererPositionUs) {
-    if (fadePhase != FadePhase.IDLE || !canFadeBetweenPeriods(fadeOut, fadeIn)) {
+  // ── setCrossFadeInProgress (Apple 1:1) ──
+  // Не вызывается хостом media3 (тот стартует через prepareForCrossFade), сохранён по ТЗ.
+  private boolean setCrossFadeInProgress(
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder,
+      long rendererPositionUs) {
+    if (fadeOutPeriodHolder == null) {
       return false;
     }
-    fadePhase = FadePhase.FADE_OUT;
-    return true;
+    long periodTime = fadeOutPeriodHolder.toPeriodTime(rendererPositionUs) - this.secondTrackOffsetUs;
+    if (1 <= periodTime && periodTime < CROSS_POINT_TOLERANCE_US) {
+      this.lastMsgTs = System.currentTimeMillis();
+      this.fadePhase = FadePhase.FADE_OUT;
+    }
+    return this.fadePhase != FadePhase.IDLE;
   }
 
-  // ГЛАВНЫЙ tick: вызывается каждым проходом плеера во время перехода.
-  // Прогресс t считаем по wall-clock от старта фейда — детерминированно и без
-  // зависимости от аудио-часов (которые во время гейта могут встать). Ровно за
-  // crossFadeDuration секунд t достигает 1 → COMPLETED → гейт снимается, media3
-  // штатно переходит на следующий трек. Кривая — equal-power (√), без провала.
+  // ── maybeStartCrossFading (Apple 1:1) ──
+  // В MANUAL isComputeTransitionJobExecuted всегда false → путь composer (computeTransitionJob)
+  // ничего не делает (композер не перенесён), поэтому метод фактически инертен. Хост media3
+  // стартует фейд напрямую через prepareForCrossFade. Сохранён по ТЗ.
+  @Override
+  public synchronized boolean maybeStartCrossFading(
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder,
+      long rendererPositionUs) {
+    if (!isCrossFadeEnabled()) {
+      return false;
+    }
+    if (fadeInPeriodHolder == null || fadeOutPeriodHolder == null) {
+      return false;
+    }
+    if (this.fadePhase != FadePhase.IDLE) {
+      return false;
+    }
+    if (!canFadeBetweenPeriods(fadeOutPeriodHolder, fadeInPeriodHolder)) {
+      return false;
+    }
+    if (this.isComputeTransitionJobExecuted) {
+      setCrossFadeInProgress(fadeOutPeriodHolder, fadeInPeriodHolder, rendererPositionUs);
+    } else {
+      computeTransitionJob(fadeOutPeriodHolder, fadeInPeriodHolder);
+    }
+    if (this.fadePhase != FadePhase.IDLE) {
+      this.fadePhase = FadePhase.FADE_OUT;
+    }
+    return this.fadePhase != FadePhase.IDLE;
+  }
+
+  // TODO: AUTOMATIC — нативный LevelComposer (setComposerTransition/prepareFeature/setAutomations)
+  // не перенесён. В нашем порте computeTransitionJob — no-op, transitionDataAvailable остаётся false.
+  private void computeTransitionJob(
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder) {
+    // no-op (composer omitted)
+  }
+
+  // ── doCrossFade (Apple 1:1, MANUAL: crossingTimeUs==0 ветка) ──
   @Override
   public synchronized void doCrossFade(
-      MediaPeriodHolder fadeOut, MediaPeriodHolder fadeIn, long rendererPositionUs)
+      @Nullable MediaPeriodHolder fadeOutPeriodHolder,
+      @Nullable MediaPeriodHolder fadeInPeriodHolder,
+      long rendererPositionUs)
       throws ExoPlaybackException {
-    if (fadeIn == null || fadeOut == null || fadePhase == FadePhase.IDLE || paused) {
+    if (fadeInPeriodHolder == null) {
+      return;
+    }
+    if (fadeOutPeriodHolder == null) {
       return;
     }
     long now = System.currentTimeMillis();
-    if (fadeStartWallMs == 0L) {
-      fadeStartWallMs = now;
+    if (now - this.lastMsgTs < this.msBetweenMessages) {
+      return;
     }
-    long fadeMs = (long) crossFadeDuration * 1000L;
-    if (now - lastMsgTs < msBetweenMessages && (now - fadeStartWallMs) < fadeMs) {
-      return; // троттлинг, но финальный тик (t>=1) не пропускаем
+    int rendererIdx2 = fadeOutPeriodHolder.getRendererIdx();
+    if (rendererIdx2 < 0 || rendererIdx2 >= renderers.length) {
+      return; // индекс рендерера ещё не назначен — фейд не тикаем (защита от AIOOBE)
     }
-    lastMsgTs = now;
-
-    float t = fadeMs > 0 ? (now - fadeStartWallMs) / (float) fadeMs : 1f;
-    if (t < 0f) {
-      t = 0f;
+    // Apple берёт позицию из аудио-часов fade-out рендерера (getMediaClock().getPositionUs()).
+    MediaClock mediaClock = renderers[rendererIdx2].getMediaClock();
+    if (mediaClock == null) {
+      // Apple здесь ассертит non-null (иначе NPE). Защищаемся: пропускаем тик.
+      return;
     }
-    if (t > 1f) {
-      t = 1f;
-    }
-    fadeOutLevel = (float) Math.sqrt(1f - t);
-    fadeInLevel = (float) Math.sqrt(t);
-    setVolume(fadeOut.getRendererIdx(), fadeOutLevel);
-    setVolume(fadeIn.getRendererIdx(), fadeInLevel);
-
-    fadePhase = (fadeInLevel < fadeOutLevel) ? FadePhase.FADE_OUT : FadePhase.FADE_IN;
-    if (t >= 1f) {
-      fadePhase = FadePhase.COMPLETED;
+    long fadeOutPositionUs = mediaClock.getPositionUs();
+    this.lastMsgTs = now;
+    if (this.fadePhase != FadePhase.IDLE && !this.paused) {
+      this.fadeInLevel = doFadeIn(fadeInPeriodHolder, fadeOutPositionUs);
+      this.fadeOutLevel = doFadeOut(fadeOutPeriodHolder, fadeOutPositionUs);
+      Log.d(
+          TAG,
+          "doCrossFade() fadeOutLevel: "
+              + this.fadeOutLevel
+              + " fadeInLevel: "
+              + this.fadeInLevel
+              + " crossingTime "
+              + this.crossingTimeUs);
+      if (this.crossingTimeUs == MIN_VOLUME) {
+        // MANUAL: доминирующий период по уровням.
+        if (this.fadeInLevel < this.fadeOutLevel) {
+          if (this.fadePhase != FadePhase.FADE_OUT) {
+            this.fadePhase = FadePhase.FADE_OUT;
+          }
+        } else {
+          if (this.fadePhase != FadePhase.FADE_IN) {
+            this.fadePhase = FadePhase.FADE_IN;
+          }
+        }
+      } else {
+        // TODO: AUTOMATIC — выбор доминирующего периода по crossingTimeUs/duration
+        // (Apple использует getPlayerMediaItemFromPeriodHolder().getDuration()).
+        // Не перенесён; crossingTimeUs всегда 0 в MANUAL, ветка не исполняется.
+      }
+      boolean isEnded = renderers[fadeOutPeriodHolder.getRendererIdx()].isEnded();
+      boolean hasReadStreamToEnd = renderers[fadeOutPeriodHolder.getRendererIdx()].hasReadStreamToEnd();
+      if ((this.fadeOutLevel < 0.05d && this.fadeInLevel > 0.95d)
+          || (hasReadStreamToEnd && isEnded)) {
+        Log.d(
+            TAG,
+            "doCrossFade() complete. EOS: " + hasReadStreamToEnd + ", isEnded: " + isEnded);
+        this.fadePhase = FadePhase.COMPLETED;
+      }
     }
   }
 
+  // ── maybeDoFadeOut (Apple 1:1) ── исполняется только при AUTOMATIC → в MANUAL no-op.
   @Override
-  public void maybeDoFadeOut(MediaPeriodHolder fadeOut, long rendererPositionUs) {
-    // Только для AUTOMATIC (composer) — в MANUAL не используется.
+  public void maybeDoFadeOut(@Nullable MediaPeriodHolder fadeOutPeriodHolder, long rendererPositionUs)
+      throws ExoPlaybackException {
+    if (getTransitionDataAvailable()
+        && this.fadePhase == FadePhase.IDLE
+        && fadeOutPeriodHolder != null) {
+      AudioFadeTransition transition = transitionsMap.get(FadeType.FADE_OUT);
+      if (transition == null) {
+        return;
+      }
+      long periodTime = fadeOutPeriodHolder.toPeriodTime(rendererPositionUs);
+      if (periodTime < transition.getStartUs()) {
+        return;
+      }
+      long now = System.currentTimeMillis();
+      if (now - this.lastMsgTs < this.msBetweenMessages) {
+        return;
+      }
+      this.lastMsgTs = now;
+      doFadeOut(fadeOutPeriodHolder, rendererPositionUs);
+    }
   }
 
+  // ── pauseFadeOut / resumeFadeOut (Apple 1:1) ──
   @Override
   public synchronized void pauseFadeOut() throws ExoPlaybackException {
-    if (isCrossFadeEnabled() && fadePhase != FadePhase.IDLE && fadeOutPeriodHolder != null) {
-      int idx = fadeOutPeriodHolder.getRendererIdx();
-      if (idx >= 0 && renderers[idx].getState() == Renderer.STATE_STARTED) {
-        renderers[idx].stop();
-        paused = true;
+    if (isCrossFadeEnabled() && this.fadePhase != FadePhase.IDLE) {
+      MediaPeriodHolder mediaPeriodHolder = this.fadeOutPeriodHolder;
+      if (mediaPeriodHolder == null) {
+        return;
+      }
+      Renderer renderer = renderers[mediaPeriodHolder.getRendererIdx()];
+      if (renderer.getState() == Renderer.STATE_STARTED) {
+        renderer.stop();
+        this.paused = true;
       }
     }
   }
 
   @Override
   public synchronized void resumeFadeOut() throws ExoPlaybackException {
-    if (isCrossFadeEnabled() && fadePhase != FadePhase.IDLE && fadeOutPeriodHolder != null) {
-      int idx = fadeOutPeriodHolder.getRendererIdx();
-      if (idx >= 0 && renderers[idx].getState() == Renderer.STATE_ENABLED) {
-        renderers[idx].start();
+    if (isCrossFadeEnabled() && this.fadePhase != FadePhase.IDLE) {
+      MediaPeriodHolder mediaPeriodHolder = this.fadeOutPeriodHolder;
+      if (mediaPeriodHolder == null) {
+        return;
       }
-      paused = false;
+      Renderer renderer = renderers[mediaPeriodHolder.getRendererIdx()];
+      if (renderer.getState() == Renderer.STATE_ENABLED) {
+        renderer.start();
+      }
+      this.paused = false;
     }
   }
 
+  // ── reset (Apple 1:1 + реинициализация durationUs через crossFadeDuration) ──
   @Override
   public synchronized void reset() throws ExoPlaybackException {
+    Log.d(TAG, "reset()");
     try {
-      if (fadeInPeriodHolder != null) {
-        setVolume(fadeInPeriodHolder.getRendererIdx(), MAX_VOLUME);
+      if (this.fadeInPeriodHolder != null) {
+        setVolume(this.fadeInPeriodHolder.getRendererIdx(), MAX_VOLUME);
       }
-      if (fadeOutPeriodHolder != null) {
-        setVolume(fadeOutPeriodHolder.getRendererIdx(), MAX_VOLUME);
+      if (this.fadeOutPeriodHolder != null) {
+        setVolume(this.fadeOutPeriodHolder.getRendererIdx(), MAX_VOLUME);
       }
     } catch (Exception e) {
-      // ignore
+      Log.d(TAG, "reset() exception ex: " + e);
     }
-    lastMsgTs = Long.MAX_VALUE;
-    fadeStartWallMs = 0L;
-    fadeOutPeriodHolder = null;
-    fadeInPeriodHolder = null;
-    fadeOutLevel = MAX_VOLUME;
-    fadeInLevel = MIN_VOLUME;
-    paused = false;
-    fadePhase = FadePhase.IDLE;
+    this.lastMsgTs = Long.MAX_VALUE;
+    this.fadeOutPeriodHolder = null;
+    this.fadeInPeriodHolder = null;
+    this.fadeOutLevel = MAX_VOLUME;
+    this.fadeInLevel = MIN_VOLUME;
+    this.isComputeTransitionJobExecuted = false;
+    this.transitionDataAvailable = false;
+    transitionsMap.put(FadeType.FADE_IN, new AudioFadeTransition(FadeEffectType.LOGARITHMIC));
+    transitionsMap.put(FadeType.FADE_OUT, new AudioFadeTransition(FadeEffectType.EXPONENTIAL));
+    this.fadePhase = FadePhase.IDLE;
+    this.crossingTimeUs = MIN_VOLUME;
+    this.canFadeCached = null;
+    // media3-адаптация: Apple после reset заново заполняет start/durationUs транзишенов через
+    // композер (setAutomations). Композера нет → сами восстанавливаем durationUs из
+    // crossFadeDuration, иначе default-транзишены имеют durationUs=0 и следующий фейд сломается.
+    if (this.crossFadeDuration > 0) {
+      applyCrossFadeDurationToTransitions(this.crossFadeDuration);
+    }
   }
 
   // ── Конфиг ──
+  // media3-адаптация: Apple setCrossFadeDuration лишь сохраняет поле (durationUs транзишенов
+  // задаёт композер). Без композера мы обязаны здесь же залить durationUs в транзишены.
   @Override
-  public synchronized void setCrossFadeDuration(int crossFadeDurationSeconds) {
-    this.crossFadeDuration = crossFadeDurationSeconds;
-    long durationUs = (long) crossFadeDurationSeconds * US_PER_SECOND;
-    setFadeAudioEffect(
-        FadeType.FADE_IN,
-        new AudioFadeTransition(
-            transitionsMap.get(FadeType.FADE_IN).getEffectType(),
-            durationUs,
-            transitionsMap.get(FadeType.FADE_IN).getCoefficient()));
-    setFadeAudioEffect(
-        FadeType.FADE_OUT,
-        new AudioFadeTransition(
-            transitionsMap.get(FadeType.FADE_OUT).getEffectType(),
-            durationUs,
-            transitionsMap.get(FadeType.FADE_OUT).getCoefficient()));
+  public synchronized void setCrossFadeDuration(int crossFadeDuration) {
+    this.crossFadeDuration = crossFadeDuration;
+    applyCrossFadeDurationToTransitions(crossFadeDuration);
   }
 
+  private void applyCrossFadeDurationToTransitions(int crossFadeDurationSeconds) {
+    long durationUs = (long) crossFadeDurationSeconds * US_PER_SECOND;
+    AudioFadeTransition in = transitionsMap.get(FadeType.FADE_IN);
+    AudioFadeTransition out = transitionsMap.get(FadeType.FADE_OUT);
+    if (in != null) {
+      setFadeAudioEffect(
+          FadeType.FADE_IN,
+          new AudioFadeTransition(in.getEffectType(), durationUs, in.getCoefficient()));
+    }
+    if (out != null) {
+      setFadeAudioEffect(
+          FadeType.FADE_OUT,
+          new AudioFadeTransition(out.getEffectType(), durationUs, out.getCoefficient()));
+    }
+  }
+
+  // ── setCrossFadeState (Apple 1:1; MediaPlayer-зависимые части опущены/помечены TODO) ──
   @Override
   public synchronized void setCrossFadeState(int crossFadeState) {
+    int old = this.crossFadeState;
     this.crossFadeState = crossFadeState;
+    if (crossFadeState == 1) { // MANUAL
+      this.secondTrackOffsetUs = Long.MAX_VALUE;
+      MediaPeriodHolder mediaPeriodHolder = this.fadeOutPeriodHolder;
+      if (mediaPeriodHolder != null) {
+        try {
+          setVolume(mediaPeriodHolder.getRendererIdx(), MAX_VOLUME);
+        } catch (ExoPlaybackException e) {
+          Log.d(TAG, "setCrossFadeState() volume reset exception: " + e);
+        }
+      }
+      // TODO: Apple здесь mediaPlayer.setCrossFadeDuration(playerContext.getCrossFadeDuration()) —
+      // недоступно без обёртки MediaPlayer/MediaPlayerContext.
+    }
+    if (old == 2 && (crossFadeState == 1 || crossFadeState == 0)) {
+      // TODO: Apple делает seek-nudge (mediaPlayer.seekToPosition(pos+1)) чтобы перезапустить
+      // конвейер — недоступно без обёртки MediaPlayer.
+    }
   }
 
+  // ── setFadeAudioEffect (Apple 1:1) ──
   @Override
   public synchronized void setFadeAudioEffect(FadeType fadeType, AudioFadeTransition transition) {
     transitionsMap.put(fadeType, transition);
-    long stepMs = (transition.getDurationUs() / US_PER_SECOND * 1000) / NUM_MESSAGES;
-    msBetweenMessages = Math.max(Math.min(stepMs, MAX_MS_BETWEEN_MESSAGES), MIN_MS_BETWEEN_MESSAGES);
+    this.msBetweenMessages =
+        Math.max(
+            Math.min(
+                (transition.getDurationUs() / MILLIS_PER_SECOND) / ((long) NUM_MESSAGES),
+                MAX_MS_BETWEEN_MESSAGES),
+            MIN_MS_BETWEEN_MESSAGES);
+    Log.d(
+        TAG,
+        "setFadeAudioEffect() new duration: "
+            + transition.getDurationUs()
+            + " msBetweenMsg: "
+            + this.msBetweenMessages);
   }
 
-  // ── Геттеры/состояние ──
+  // ── Геттеры/состояние (Apple 1:1) ──
   @Override
   public int getCrossFadeDuration() {
-    return crossFadeDuration;
+    return this.crossFadeDuration;
   }
 
   @Override
   public int getCrossFadeState() {
-    return crossFadeState;
+    return this.crossFadeState;
   }
 
   @Override
   public FadePhase getCrossFadePhase() {
-    return fadePhase;
+    return this.fadePhase;
   }
 
   @Override
   public boolean isCrossFadeEnabled() {
-    return crossFadeState == STATE_AUTOMATIC || crossFadeState == STATE_MANUAL;
+    int i = this.crossFadeState;
+    return i == 0 || i == 1;
   }
 
   @Override
   public synchronized boolean isCrossFadeInProgress() {
-    return fadePhase != FadePhase.IDLE;
+    return this.fadePhase != FadePhase.IDLE;
   }
 
   @Override
   public int getFadeInRendererIndex() {
-    return fadeInPeriodHolder != null ? fadeInPeriodHolder.getRendererIdx() : C.INDEX_UNSET;
+    MediaPeriodHolder mediaPeriodHolder = this.fadeInPeriodHolder;
+    return mediaPeriodHolder != null ? mediaPeriodHolder.getRendererIdx() : C.INDEX_UNSET;
   }
 
   @Override
   public int getFadeOutRendererIndex() {
-    return fadeOutPeriodHolder != null ? fadeOutPeriodHolder.getRendererIdx() : C.INDEX_UNSET;
+    MediaPeriodHolder mediaPeriodHolder = this.fadeOutPeriodHolder;
+    return mediaPeriodHolder != null ? mediaPeriodHolder.getRendererIdx() : C.INDEX_UNSET;
+  }
+
+  private boolean getTransitionDataAvailable() {
+    return this.transitionDataAvailable;
   }
 }

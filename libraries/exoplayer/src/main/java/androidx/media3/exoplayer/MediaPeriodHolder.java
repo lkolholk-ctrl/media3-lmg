@@ -93,6 +93,9 @@ import java.io.IOException;
   private final MediaSourceList mediaSourceList;
 
   @Nullable private MediaPeriodHolder next;
+  // LMG-fork (crossfade): обратная ссылка на предыдущий период (уходящий fade-out).
+  // Порт Apple MediaPeriodHolder.previous. Ставится в MediaPeriodQueue.enqueueNextMediaPeriodHolder.
+  @Nullable private MediaPeriodHolder previous;
   private TrackGroupArray trackGroups;
   private TrackSelectorResult trackSelectorResult;
   private long rendererPositionOffsetUs;
@@ -161,6 +164,14 @@ import java.io.IOException;
    */
   public int getRendererIdx() {
     return crossFadeRendererIndex;
+  }
+
+  /**
+   * LMG-fork (crossfade): назначает индекс аудио-рендерера этому периоду. Порт Apple
+   * MediaPeriodHolder.setRendererIdx (маппится на {@link #crossFadeRendererIndex}).
+   */
+  public void setRendererIdx(int rendererIndex) {
+    crossFadeRendererIndex = rendererIndex;
   }
 
   /**
@@ -398,6 +409,26 @@ import java.io.IOException;
   @Nullable
   public MediaPeriodHolder getNext() {
     return next;
+  }
+
+  /**
+   * LMG-fork (crossfade): назначает предыдущий период. Порт Apple MediaPeriodHolder.setPrevious.
+   * Тривиально (в отличие от setNext) — не трогает track-selection retention.
+   */
+  public void setPrevious(@Nullable MediaPeriodHolder previousMediaPeriodHolder) {
+    if (previousMediaPeriodHolder == previous) {
+      return;
+    }
+    previous = previousMediaPeriodHolder;
+  }
+
+  /**
+   * LMG-fork (crossfade): предыдущий период (уходящий fade-out) или null. Порт Apple
+   * MediaPeriodHolder.getPrevious.
+   */
+  @Nullable
+  public MediaPeriodHolder getPrevious() {
+    return previous;
   }
 
   /** Returns the {@link TrackGroupArray} exposed by this media period. */

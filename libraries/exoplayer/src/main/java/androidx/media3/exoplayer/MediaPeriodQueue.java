@@ -214,6 +214,8 @@ import java.util.List;
       newPeriodHolder.setRendererOffset(rendererPositionOffsetUs);
     }
     if (loading != null) {
+      // LMG-fork (crossfade): back-link previous — порт Apple enqueueNextMediaPeriodHolder.
+      newPeriodHolder.setPrevious(loading);
       loading.setNext(newPeriodHolder);
     } else {
       playing = newPeriodHolder;
@@ -356,6 +358,11 @@ import java.util.List;
     return playing;
   }
 
+  /** LMG-fork (crossfade): число периодов в очереди. Порт Apple MediaPeriodQueue.getLength. */
+  public int getLength() {
+    return length;
+  }
+
   /** Returns the reading period holder, or null if the queue is empty. */
   @Nullable
   public MediaPeriodHolder getReadingPeriod() {
@@ -388,6 +395,31 @@ import java.util.List;
       reading = playing.getNext();
     }
     playing.release();
+    length--;
+    if (length == 0) {
+      loading = null;
+      oldFrontPeriodUid = playing.uid;
+      oldFrontPeriodWindowSequenceNumber = playing.info.id.windowSequenceNumber;
+    }
+    playing = playing.getNext();
+    notifyQueueUpdate();
+    return playing;
+  }
+
+  /**
+   * LMG-fork (crossfade): как {@link #advancePlayingPeriod()}, но НЕ вызывает {@code release()} у
+   * старого playing — период доигрывает fade-out и остаётся доступен как {@code
+   * newPlaying.getPrevious()}. Порт Apple MediaPeriodQueue.advancePlayingPeriodWithoutReleasing().
+   */
+  @Nullable
+  public MediaPeriodHolder advancePlayingPeriodWithoutReleasing() {
+    if (playing == null) {
+      return null;
+    }
+    if (playing == reading) {
+      reading = playing.getNext();
+    }
+    // NB: НЕ вызываем playing.release() — период доигрывает fade-out.
     length--;
     if (length == 0) {
       loading = null;

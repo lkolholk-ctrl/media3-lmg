@@ -188,6 +188,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private final PlayerAudioFadeControl audioFadeControl;
   private final int primaryAudioRendererIndex;
   private final int secondaryAudioRendererIndex;
+  // LMG-fork (crossfade): флаги машины состояний Apple. Порт ExoPlayerImplInternal.
+  private boolean shouldStartCrossFade;
+  private boolean shouldDisplayFadeInMetadata;
   private final Set<Renderer> renderersToReset;
   private final RendererCapabilities[] rendererCapabilities;
   private final boolean[] rendererReportedReady;
@@ -320,6 +323,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
     this.audioFadeControl = new PlayerAudioFadeControl(renderers);
     this.audioFadeControl.setRepeatMode(repeatMode);
     this.audioFadeControl.setCrossFadeDuration(6);
+    this.shouldStartCrossFade = false;
+    this.shouldDisplayFadeInMetadata = false;
     // Кроссфейд ВЫКЛЮЧЕН по умолчанию (STATE_OFF) — обычный gapless media3.
     // Упрощённая модель v2 давала рывки на стыке; включим кроссфейд обратно
     // только после порта настоящей модели Apple (advance-without-releasing).
@@ -960,6 +965,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private void setRepeatModeInternal(@Player.RepeatMode int repeatMode)
       throws ExoPlaybackException {
     this.repeatMode = repeatMode;
+    // LMG-fork (crossfade): держим repeatMode фейд-контроля в синхроне (раньше это делал
+    // per-tick maybeCrossFade; теперь — в точке смены режима). canFadeBetweenPeriods запрещает
+    // кроссфейд при REPEAT_MODE_ONE.
+    audioFadeControl.setRepeatMode(repeatMode);
     if (!queue.updateRepeatMode(playbackInfo.timeline, repeatMode)) {
       seekToCurrentPosition(/* sendDiscontinuity= */ true);
     }
@@ -1013,6 +1022,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
         renderers[i].start();
       }
     }
+    // LMG-fork (crossfade): порт Apple startRenderers — возобновляем fade-out при resume.
+    if (audioFadeControl.isCrossFadeInProgress()) {
+      audioFadeControl.resumeFadeOut();
+    }
   }
 
   private void stopRenderers() throws ExoPlaybackException {
@@ -1021,6 +1034,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
       if (isRendererEnabled(renderer)) {
         ensureStopped(renderer);
       }
+    }
+    // LMG-fork (crossfade): порт Apple stopRenderers — приостанавливаем fade-out при pause.
+    if (audioFadeControl.isCrossFadeInProgress()) {
+      audioFadeControl.pauseFadeOut();
     }
   }
 
@@ -1148,9 +1165,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
     updatePlaybackPositions();
 
-    // LMG-fork (crossfade): взвод/тик/завершение фейда до цикла рендера, чтобы
-    // только что включённый второй аудио-рендерер отрендерился в этом же проходе.
-    maybeCrossFade();
+    // LMG-fork (crossfade): драйвер фейда перенесён 1:1 в updatePeriods() по модели Apple
+    // (maybeUpdateFadeInPeriod/FadeOutPeriod/ReleaseFadeOutPeriod). Здесь ничего не вызываем.
 
     boolean renderersEnded = true;
     boolean renderersAllowPlayback = true;
@@ -1334,6 +1350,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
   private void seekToInternal(SeekPosition seekPosition) throws ExoPlaybackException {
     playbackInfoUpdate.incrementPendingOperationAcks(/* operationAcks= */ 1);
+
+    // LMG-fork (crossfade), §8а: сброс фейда в начале seek (порт Apple seekToInternal —
+    // maybeReleaseFadeOutPeriod(true) + reset + флаги на всех exit-путях; семантически один раз здесь).
+    maybeReleaseFadeOutPeriod(/* force= */ true);
+    audioFadeControl.reset();
+    shouldStartCrossFade = false;
+    shouldDisplayFadeInMetadata = false;
 
     MediaPeriodId periodId;
     long periodPositionUs;
@@ -1625,6 +1648,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
       }
     }
     enabledRendererCount = 0;
+
+    // LMG-fork (crossfade), §8а: сброс фейда (порт Apple resetInternal — audioFadeControl.reset()
+    // после disable всех рендереров). resetInternal без throws → оборачиваем в try/catch.
+    try {
+      audioFadeControl.reset();
+    } catch (ExoPlaybackException e) {
+      Log.e(TAG, "Fade reset failed.", e);
+    }
+    shouldStartCrossFade = false;
+    shouldDisplayFadeInMetadata = false;
 
     MediaPeriodId mediaPeriodId = playbackInfo.periodId;
     long startPositionUs = playbackInfo.positionUs;
@@ -2236,6 +2269,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
     boolean loadingPeriodChanged = maybeUpdateLoadingPeriod();
     maybeUpdateReadingPeriod();
     maybeUpdateReadingRenderers();
+    // LMG-fork (crossfade): драйвер фейда 1:1 по Apple, между reading и playing.
+    maybeUpdateFadeInPeriod();
+    maybeUpdateFadeOutPeriod();
+    maybeReleaseFadeOutPeriod(/* force= */ false);
     maybeUpdatePlayingPeriod();
     maybeUpdatePreloadPeriods(loadingPeriodChanged);
   }
@@ -2243,7 +2280,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private boolean maybeUpdateLoadingPeriod() throws ExoPlaybackException {
     boolean loadingPeriodChanged = false;
     queue.reevaluateBuffer(rendererPositionUs);
-    if (queue.shouldLoadNextMediaPeriod()) {
+    // LMG-fork (crossfade): не грузить новый период во время фейда; до старта — только если в очереди < 2.
+    if (queue.shouldLoadNextMediaPeriod() && shouldLoadNextMediaPeriodWithCrossFade()) {
       @Nullable
       MediaPeriodInfo info = queue.getNextMediaPeriodInfo(rendererPositionUs, playbackInfo);
       if (info != null) {
@@ -2271,105 +2309,236 @@ import java.util.concurrent.atomic.AtomicBoolean;
     return loadingPeriodChanged;
   }
 
-  // LMG-fork (crossfade): взводит / тикает / завершает кроссфейд. Вызывается из
-  // doSomeWork каждым проходом. Взвод — когда до конца текущего трека осталось
-  // <= длительности фейда и следующий период готов; тогда включаем второй аудио-
-  // рендерер на аудио-стрим входящего трека и ramp'им громкости обоих.
-  private void maybeCrossFade() throws ExoPlaybackException {
-    if (secondaryAudioRendererIndex == C.INDEX_UNSET
-        || primaryAudioRendererIndex == C.INDEX_UNSET
-        || !audioFadeControl.isCrossFadeEnabled()) {
-      return;
-    }
-    audioFadeControl.setRepeatMode(repeatMode);
+  // =========================================================================================
+  // LMG-fork (crossfade): машина состояний Apple, порт 1:1 из ExoPlayerImplInternal.
+  // Вызываются из updatePeriods() в порядке Apple. Вариант B (без PlayerTrackSelector):
+  // второй аудио-рендерер включаем вручную, свободный индекс выбираем по playing.getRendererIdx().
+  // =========================================================================================
+
+  /** ДРАЙВЕР: взвод + тик фейда. Порт Apple maybeUpdateFadeInPeriod. */
+  private void maybeUpdateFadeInPeriod() throws ExoPlaybackException {
     @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
-    if (playing == null || !playing.prepared) {
+    if (playing == null || !audioFadeControl.isCrossFadeEnabled()) {
       return;
     }
-    if (audioFadeControl.isCrossFadeInProgress()) {
-      audioFadeControl.doCrossFade(playing, playing.getNext(), rendererPositionUs);
-      if (audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.COMPLETED) {
-        endCrossFade();
+    audioFadeControl.maybeDoFadeOut(playing, rendererPositionUs);
+    if (!audioFadeControl.isCrossFadeInProgress()) {
+      // next!=null guard добавлен для nullness (canFadeBetweenPeriods(x,null) и так вернёт false —
+      // семантика Apple сохранена); prepareForCrossFade принимает @NonNull.
+      @Nullable MediaPeriodHolder next = playing.getNext();
+      if (next != null
+          && audioFadeControl.canFadeBetweenPeriods(playing, next)
+          && audioFadeControl.maybeStartCrossFading(playing, next, rendererPositionUs)) {
+        shouldStartCrossFade = true;
+        updateFadeInPeriodRenderers(next);
+        audioFadeControl.prepareForCrossFade(playing, next);
       }
       return;
     }
-    @Nullable MediaPeriodHolder next = playing.getNext();
-    if (next == null || !next.prepared) {
-      return;
-    }
-    long durationUs = playing.info.durationUs;
-    if (durationUs == C.TIME_UNSET) {
-      return;
-    }
-    long remainingUs = durationUs - playbackInfo.positionUs;
-    long fadeDurationUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
-    if (remainingUs > fadeDurationUs || !audioFadeControl.canFadeBetweenPeriods(playing, next)) {
-      return;
-    }
-    @Nullable SampleStream audioStream = next.sampleStreams[primaryAudioRendererIndex];
-    TrackSelectorResult tsr = next.getTrackSelectorResult();
-    @Nullable RendererConfiguration config = tsr.rendererConfigurations[primaryAudioRendererIndex];
-    @Nullable ExoTrackSelection selection = tsr.selections[primaryAudioRendererIndex];
-    if (audioStream == null || config == null || selection == null) {
-      return;
-    }
-    // Уходящий период → основной рендерер, входящий → второй.
-    // Взвод обёрнут в try/catch: сбой включения второго рендерера НЕ должен
-    // ронять воспроизведение — просто откатываемся к штатному переходу media3.
-    Renderer secondary = renderers[secondaryAudioRendererIndex];
-    try {
-      playing.crossFadeRendererIndex = primaryAudioRendererIndex;
-      next.crossFadeRendererIndex = secondaryAudioRendererIndex;
-      if (secondary.getState() == Renderer.STATE_DISABLED) {
-        secondary.enable(
-            config,
-            getFormats(selection),
-            audioStream,
-            rendererPositionUs,
-            /* joining= */ false,
-            /* mayRenderStartOfStream= */ true,
-            next.getStartPositionRendererTime(),
-            next.getRendererOffset(),
-            next.info.id);
-        renderersToReset.add(secondary);
-        secondary.start();
+    if (audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.FADE_OUT) {
+      @Nullable MediaPeriodHolder next = playing.getNext();
+      if (next != null) {
+        audioFadeControl.doCrossFade(playing, next, rendererPositionUs);
       }
-      audioFadeControl.prepareForCrossFade(playing, next);
-    } catch (RuntimeException | ExoPlaybackException e) {
-      Log.e(TAG, "crossfade arm failed, falling back to normal transition", e);
-      playing.crossFadeRendererIndex = C.INDEX_UNSET;
-      next.crossFadeRendererIndex = C.INDEX_UNSET;
-      try {
-        if (secondary.getState() != Renderer.STATE_DISABLED) {
-          secondary.disable();
-        }
-      } catch (RuntimeException ignored) {
-        // ignore
+    } else if (audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.FADE_IN) {
+      @Nullable MediaPeriodHolder prev = playing.getPrevious(); // защитный null-check
+      if (prev != null) {
+        audioFadeControl.doCrossFade(prev, playing, rendererPositionUs);
       }
-      audioFadeControl.reset();
     }
   }
 
-  // LMG-fork: завершение кроссфейда — глушим второй рендерер и снимаем гейт;
-  // media3 дальше сама переходит на следующий период штатно.
-  private void endCrossFade() throws ExoPlaybackException {
-    Renderer secondary = renderers[secondaryAudioRendererIndex];
-    try {
-      if (secondary.getState() != Renderer.STATE_DISABLED) {
-        secondary.disable();
-      }
-    } catch (RuntimeException e) {
-      // Не роняем плеер из-за диагностики фейда.
+  /** Продвижение playing в точке пересечения (без release уходящего). Порт Apple maybeUpdateFadeOutPeriod. */
+  private void maybeUpdateFadeOutPeriod() throws ExoPlaybackException {
+    if (!shouldAdvanceFadeInPeriod()) {
+      return;
     }
-    @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
-    if (playing != null) {
-      playing.crossFadeRendererIndex = C.INDEX_UNSET;
-      @Nullable MediaPeriodHolder next = playing.getNext();
-      if (next != null) {
-        next.crossFadeRendererIndex = C.INDEX_UNSET;
-      }
+    MediaPeriodHolder oldPlaying = checkNotNull(queue.getPlayingPeriod()); // A
+    MediaPeriodHolder newPlaying =
+        checkNotNull(queue.advancePlayingPeriodWithoutReleasing()); // B (A остаётся как B.previous)
+    updatePlayingPeriodRenderers(oldPlaying, /* disableOldRenderers= */ false);
+    // playbackInfo/позиция/метадата → B. handlePositionDiscontinuity сам обновляет track info
+    // из нового playing (media3-эквивалент Apple copyWithNewPosition + copyWithTrackInfo).
+    playbackInfo =
+        handlePositionDiscontinuity(
+            newPlaying.info.id,
+            newPlaying.info.startPositionUs,
+            newPlaying.info.requestedContentPositionUs,
+            /* discontinuityStartPositionUs= */ newPlaying.info.startPositionUs,
+            /* reportDiscontinuity= */ !oldPlaying.info.isLastInTimelinePeriod,
+            Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
+    updatePlaybackPositions();
+    maybeNotifyPlaybackInfoChanged();
+  }
+
+  /** Выгрузка уходящего периода по завершении фейда. Порт Apple maybeReleaseFadeOutPeriod. */
+  private void maybeReleaseFadeOutPeriod(boolean force) throws ExoPlaybackException {
+    if (!shouldReleaseFadeOutPeriod(force)) {
+      return;
+    }
+    shouldDisplayFadeInMetadata = false;
+    shouldStartCrossFade = false;
+    MediaPeriodHolder playing = checkNotNull(queue.getPlayingPeriod()); // B
+    MediaPeriodHolder previous = checkNotNull(playing.getPrevious()); // A (fade-out)
+    // [Вариант B — адаптация против спеки §5.5] Apple глушит рендерер по playing.trackSel
+    // (там PlayerTrackSelector включает secondary для B). У нас trackSel B включает primary,
+    // поэтому глушим ЯВНО рендерер уходящего периода previous.getRendererIdx(), а B доигрывает
+    // на своём playing.getRendererIdx().
+    int outgoingIdx = previous.getRendererIdx();
+    int playingIdx = playing.getRendererIdx();
+    previous.release();
+    if (outgoingIdx != C.INDEX_UNSET
+        && outgoingIdx != playingIdx
+        && isRendererEnabled(renderers[outgoingIdx])) {
+      disableRenderer(outgoingIdx);
     }
     audioFadeControl.reset();
+  }
+
+  /**
+   * Включает второй аудио-рендерер под аудио входящего периода. Порт Apple
+   * updateFadeInPeriodRenderers (Вариант B — ручное включение, свободный индекс детерминированно).
+   */
+  private void updateFadeInPeriodRenderers(@Nullable MediaPeriodHolder fadeInHolder)
+      throws ExoPlaybackException {
+    @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
+    if (playing == null || fadeInHolder == null || fadeInHolder == playing) {
+      return;
+    }
+    if (primaryAudioRendererIndex == C.INDEX_UNSET
+        || secondaryAudioRendererIndex == C.INDEX_UNSET) {
+      return;
+    }
+    // Свободный аудио-рендерер = не тот, на котором играет уходящий playing (чередование).
+    int currentIdx = playing.getRendererIdx();
+    int freeIdx =
+        (currentIdx == primaryAudioRendererIndex)
+            ? secondaryAudioRendererIndex
+            : primaryAudioRendererIndex;
+    // Аудио fadeIn-периода лежит на его primaryAudioRendererIndex в его же TrackSelectorResult.
+    int sourceAudioIdx = primaryAudioRendererIndex;
+    TrackSelectorResult tsr = fadeInHolder.getTrackSelectorResult();
+    @Nullable SampleStream audioStream = fadeInHolder.sampleStreams[sourceAudioIdx];
+    @Nullable RendererConfiguration config = tsr.rendererConfigurations[sourceAudioIdx];
+    @Nullable ExoTrackSelection selection = tsr.selections[sourceAudioIdx];
+    if (audioStream == null || config == null || selection == null) {
+      return;
+    }
+    Renderer free = renderers[freeIdx];
+    if (free.getState() == Renderer.STATE_DISABLED && renderersToReset.remove(free)) {
+      free.reset();
+    }
+    if (free.getState() == Renderer.STATE_DISABLED) {
+      boolean startNow = shouldPlayWhenReady() && playbackInfo.playbackState == Player.STATE_READY;
+      enabledRendererCount++;
+      renderersToReset.add(free);
+      free.enable(
+          config,
+          getFormats(selection),
+          audioStream,
+          rendererPositionUs,
+          /* joining= */ false,
+          /* mayRenderStartOfStream= */ true,
+          fadeInHolder.getStartPositionRendererTime(),
+          fadeInHolder.getRendererOffset(),
+          fadeInHolder.info.id);
+      free.handleMessage(
+          Renderer.MSG_SET_WAKEUP_LISTENER,
+          new Renderer.WakeupListener() {
+            @Override
+            public void onSleep() {
+              requestForRendererSleep = true;
+            }
+
+            @Override
+            public void onWakeup() {
+              if (dynamicSchedulingEnabled || offloadSchedulingEnabled) {
+                handler.sendEmptyMessage(MSG_DO_SOME_WORK);
+              }
+            }
+          });
+      mediaClock.onRendererEnabled(free);
+      if (startNow) {
+        free.start();
+      }
+    }
+    fadeInHolder.setRendererIdx(freeIdx);
+  }
+
+  /**
+   * Переключает master audio-clock со старого playing-рендерера на новый. Порт Apple
+   * updatePlayingPeriodRenderers (Вариант B — по getRendererIdx(), без trackSel-роутинга).
+   */
+  private void updatePlayingPeriodRenderers(
+      @Nullable MediaPeriodHolder oldPlayingHolder, boolean disableOldRenderers)
+      throws ExoPlaybackException {
+    @Nullable MediaPeriodHolder newPlaying = queue.getPlayingPeriod();
+    if (newPlaying == null || oldPlayingHolder == newPlaying) {
+      return;
+    }
+    int oldIdx = oldPlayingHolder == null ? C.INDEX_UNSET : oldPlayingHolder.getRendererIdx();
+    int newIdx = newPlaying.getRendererIdx();
+    // 1) отцепить master-clock от старого playing-рендерера (A).
+    if (oldIdx != C.INDEX_UNSET && oldIdx != newIdx && isRendererEnabled(renderers[oldIdx])) {
+      if (disableOldRenderers) {
+        disableRenderer(oldIdx);
+      } else {
+        mediaClock.onRendererDisabled(renderers[oldIdx]); // A играет дальше, часы уходят на B
+      }
+    }
+    // 2) прицепить master-clock к новому playing-рендереру (B); B уже включён в updateFadeInPeriodRenderers.
+    if (newIdx != C.INDEX_UNSET && isRendererEnabled(renderers[newIdx])) {
+      mediaClock.onRendererEnabled(renderers[newIdx]);
+    }
+    // NB: Apple copyWithTrackInfo здесь опущен — track info нового playing обновит
+    // handlePositionDiscontinuity в maybeUpdateFadeOutPeriod (media3-адаптация).
+  }
+
+  /** Порт Apple shouldAdvanceFadeInPeriod (одноразовый триггер продвижения playing). */
+  private boolean shouldAdvanceFadeInPeriod() {
+    if (!shouldPlayWhenReady()
+        || !audioFadeControl.isCrossFadeEnabled()
+        || !audioFadeControl.isCrossFadeInProgress()) {
+      return false;
+    }
+    @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
+    if (playing == null || playing.getNext() == null) {
+      return false;
+    }
+    if (shouldDisplayFadeInMetadata) {
+      return false;
+    }
+    AudioFadeControl.FadePhase phase = audioFadeControl.getCrossFadePhase();
+    if (phase != AudioFadeControl.FadePhase.FADE_IN && phase != AudioFadeControl.FadePhase.COMPLETED) {
+      return false;
+    }
+    shouldDisplayFadeInMetadata = true; // взвод флага в «should»-методе — by design (Apple 1:1)
+    return true;
+  }
+
+  /** Порт Apple shouldReleaseFadeOutPeriod. */
+  private boolean shouldReleaseFadeOutPeriod(boolean force) {
+    if (shouldPlayWhenReady()
+        && audioFadeControl.isCrossFadeEnabled()
+        && audioFadeControl.isCrossFadeInProgress()) {
+      @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
+      if (playing != null && playing.getPrevious() != null && shouldDisplayFadeInMetadata) {
+        return force || audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.COMPLETED;
+      }
+    }
+    return false;
+  }
+
+  /** Порт Apple shouldLoadNextMediaPeriodWithCrossFade. */
+  private boolean shouldLoadNextMediaPeriodWithCrossFade() {
+    if (!audioFadeControl.isCrossFadeEnabled()) {
+      return true;
+    }
+    int length = queue.getLength();
+    if (!audioFadeControl.isCrossFadeInProgress()) {
+      return length < 2; // до старта фейда грузим, только если в очереди < 2
+    }
+    return false; // во время фейда новый период не грузим
   }
 
   private void maybeUpdateReadingPeriod() throws ExoPlaybackException {
@@ -2468,6 +2637,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
   }
 
   private void maybeUpdateReadingRenderers() throws ExoPlaybackException {
+    // LMG-fork (crossfade): во время фейда reading-рендереры не трогаем — иначе
+    // replaceStreamsOrDisableRendererForTransition перебьёт второй рендерер.
+    if (audioFadeControl.isCrossFadeInProgress()) {
+      return;
+    }
     @Nullable MediaPeriodHolder readingPeriod = queue.getReadingPeriod();
     if (readingPeriod == null
         || queue.getPlayingPeriod() == readingPeriod
@@ -2560,11 +2734,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
   }
 
   private void maybeUpdatePlayingPeriod() throws ExoPlaybackException {
-    // LMG-fork (crossfade): пока идёт фейд, playing-период не продвигаем —
-    // уходящий трек доигрывает на основном рендерере с затуханием.
-    if (audioFadeControl.isCrossFadeInProgress()) {
-      return;
-    }
+    // LMG-fork (crossfade): гейт «во время фейда не продвигаем» перенесён 1:1 в
+    // shouldAdvancePlayingPeriod() (модель Apple) — раннего return здесь больше нет.
     boolean advancedPlayingPeriod = false;
     while (shouldAdvancePlayingPeriod()) {
       if (advancedPlayingPeriod) {
@@ -2572,6 +2743,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
         maybeNotifyPlaybackInfoChanged();
       }
       MediaPeriodHolder newPlayingPeriodHolder = checkNotNull(queue.advancePlayingPeriod());
+      shouldStartCrossFade = false; // Apple: сброс флага при штатном продвижении playing
       boolean isCancelledSSAIAdTransition =
           playbackInfo.periodId.periodUid.equals(newPlayingPeriodHolder.info.id.periodUid)
               && playbackInfo.periodId.adGroupIndex == C.INDEX_UNSET
@@ -2647,9 +2819,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
       return false;
     }
     MediaPeriodHolder nextPlayingPeriodHolder = playingPeriodHolder.getNext();
-    return nextPlayingPeriodHolder != null
-        && rendererPositionUs >= nextPlayingPeriodHolder.getStartPositionRendererTime()
-        && nextPlayingPeriodHolder.allRenderersInCorrectState;
+    if (nextPlayingPeriodHolder == null
+        || rendererPositionUs < nextPlayingPeriodHolder.getStartPositionRendererTime()
+        || !nextPlayingPeriodHolder.allRenderersInCorrectState) {
+      return false;
+    }
+    // LMG-fork (crossfade): во время фейда обычное продвижение заморожено — двигает только фейд-путь.
+    if (audioFadeControl.isCrossFadeEnabled() && audioFadeControl.isCrossFadeInProgress()) {
+      return false;
+    }
+    return true;
   }
 
   private boolean hasReadingPeriodFinishedReading() {
@@ -3006,6 +3185,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
     // Start the renderer if playing and the Playing and Reading periods are the same.
     if (playing && arePlayingAndReadingTheSamePeriod) {
       renderer.start();
+    }
+    // LMG-fork (crossfade), §8в: инициализируем crossFadeRendererIndex playing-периода индексом
+    // его аудио-рендерера при штатном enable (reading==playing). Иначе первый freeIdx в
+    // updateFadeInPeriodRenderers будет неверным (getRendererIdx() по умолчанию C.INDEX_UNSET).
+    if (arePlayingAndReadingTheSamePeriod
+        && renderer.getTrackType() == C.TRACK_TYPE_AUDIO) {
+      periodHolder.setRendererIdx(rendererIndex);
     }
   }
 
