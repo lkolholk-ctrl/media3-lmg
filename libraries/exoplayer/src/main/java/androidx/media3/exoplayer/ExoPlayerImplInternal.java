@@ -1041,8 +1041,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
       return;
     }
     TrackSelectorResult trackSelectorResult = playingPeriodHolder.getTrackSelectorResult();
+    // LMG-fork (crossfade): fade-рендерер (включённый вручную) НЕ входит в TSR
+    // играющего периода, поэтому штатный гейт его бы не поднял — после любого
+    // ребуфера входящий трек остался бы немым. Стартуем его отдельно.
+    int fadeInIdx = audioFadeControl.getFadeInRendererIndex();
+    int fadeOutIdx = audioFadeControl.getFadeOutRendererIndex();
     for (int i = 0; i < renderers.length; i++) {
-      if (trackSelectorResult.isRendererEnabled(i) && renderers[i].getState() == STATE_ENABLED) {
+      boolean isFadeRenderer = (i == fadeInIdx || i == fadeOutIdx);
+      if ((trackSelectorResult.isRendererEnabled(i) || isFadeRenderer)
+          && renderers[i].getState() == STATE_ENABLED) {
         renderers[i].start();
       }
     }
@@ -2376,6 +2383,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
       long fadeLimitMs = (long) audioFadeControl.getCrossFadeDuration() * 1000L + 3000L;
       if (fadeStartedAtMs != C.TIME_UNSET && clock.elapsedRealtime() - fadeStartedAtMs > fadeLimitMs) {
         Log.e(TAG, "xfade WATCHDOG: fade stuck > " + fadeLimitMs + "ms → force reset");
+        // Сначала гасим и выключаем fade-in рендерер: reset() вернул бы ОБОИМ
+        // полную громкость, и два трека заиграли бы одновременно на 100%.
+        int stuckFadeInIdx = audioFadeControl.getFadeInRendererIndex();
+        if (stuckFadeInIdx != C.INDEX_UNSET
+            && stuckFadeInIdx < renderers.length
+            && isRendererEnabled(renderers[stuckFadeInIdx])) {
+          try {
+            renderers[stuckFadeInIdx].handleMessage(Renderer.MSG_SET_VOLUME, 0f);
+            disableRenderer(stuckFadeInIdx);
+          } catch (RuntimeException e) {
+            Log.e(TAG, "xfade WATCHDOG: disable fadeIn failed", e);
+          }
+        }
         audioFadeControl.reset();
         fadeStartedAtMs = C.TIME_UNSET;
         shouldStartCrossFade = false;
@@ -2529,17 +2549,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
               + freeIdx);
       return false;
     }
-    // КЛЮЧЕВОЕ для перекрытия: период B в media3 начинается ПОСЛЕ конца A
-    // (rendererOffset = конец A), поэтому включённый рендерер B молчал бы до
-    // конца A — фейд-ин никогда бы не вырос и фаза висела бы вечно. Сдвигаем
-    // начало B назад на длительность фейда, чтобы он зазвучал параллельно с A.
-    // Аналог secondTrackOffset у Apple (там его задаёт нативный композер).
-    long fadeUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
-    if (!fadeInOffsetShifted) {
-      fadeInHolder.setRendererOffset(fadeInHolder.getRendererOffset() - fadeUs);
-      fadeInOffsetShifted = true;
-      Log.e(TAG, "xfade: B offset shifted back by " + fadeUs + "us for overlap");
-    }
+    // NB: rendererOffset периода B НЕ трогаем (Apple тоже не трогает — проверено
+    // по декомпиляции). Звук идёт не от офсета: у каждого аудио-рендерера свой
+    // AudioSink/AudioTrack, аудио-тракт не гейтит буферы по renderer-позиции, а
+    // doSomeWork рендерит все включённые рендереры. Ручной сдвиг офсета ломал бы
+    // расчёт следующих периодов и bufferedDuration.
     Renderer free = renderers[freeIdx];
     if (free.getState() == Renderer.STATE_DISABLED && renderersToReset.remove(free)) {
       free.reset();

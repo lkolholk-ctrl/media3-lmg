@@ -95,9 +95,14 @@ import androidx.media3.common.util.Clock;
     @Nullable MediaClock rendererMediaClock = renderer.getMediaClock();
     if (rendererMediaClock != null && rendererMediaClock != rendererClock) {
       if (rendererClock != null) {
-        throw ExoPlaybackException.createForUnexpected(
-            new IllegalStateException("Multiple renderer media clocks enabled."),
-            PlaybackException.ERROR_CODE_UNSPECIFIED);
+        // LMG-fork (crossfade), порт семантики Apple: во время кроссфейда
+        // ОДНОВРЕМЕННО включены два аудио-рендерера, у каждого свой MediaClock.
+        // Сток media3 бросал здесь ExoPlaybackException («Multiple renderer media
+        // clocks enabled») прямо в playback-loop → плеер вставал в момент старта
+        // фейда. Apple в своём форке второй клок молча игнорирует: мастер-клок
+        // остаётся на уходящем треке, а передача происходит позже, в
+        // updatePlayingPeriodRenderers (onRendererDisabled старого).
+        return;
       }
       this.rendererClock = rendererMediaClock;
       this.rendererClockSource = renderer;

@@ -48,7 +48,7 @@ package androidx.media3.exoplayer;
    */
   final class AudioFadeTransition {
 
-    private static final double DEFAULT_COEFFICIENT = 10.0d;
+    private static final double DEFAULT_COEFFICIENT = 2.0d; // Apple: 2.0 (было 10.0 — давало резкую кривую и NaN при t>1.11)
 
     private final FadeEffectType effectType;
     private final long startUs;

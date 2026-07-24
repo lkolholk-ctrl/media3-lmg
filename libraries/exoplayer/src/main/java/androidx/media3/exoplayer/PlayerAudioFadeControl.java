@@ -89,6 +89,13 @@ import java.util.HashMap;
     if (audioFadeTransition == null) {
       return MIN_VOLUME;
     }
+    // Защита: t вне [0,1] (позиция ещё/уже вне окна фейда) давала бы NaN в
+    // LOGARITHMIC (log отрицательного) и мусор в остальных кривых. NaN затем
+    // проходил бы Math.max/min и уходил в громкость.
+    if (Float.isNaN(fadeInTimeNormalized)) {
+      return MIN_VOLUME;
+    }
+    fadeInTimeNormalized = Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, fadeInTimeNormalized));
     float f;
     FadeEffectType effectType = audioFadeTransition.getEffectType();
     switch (effectType) {
