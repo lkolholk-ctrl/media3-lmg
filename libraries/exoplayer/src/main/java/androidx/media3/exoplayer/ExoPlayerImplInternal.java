@@ -188,6 +188,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private final PlayerAudioFadeControl audioFadeControl;
   private final int primaryAudioRendererIndex;
   private final int secondaryAudioRendererIndex;
+  private long lastFadeDiagLogMs;
   // LMG-fork (crossfade): флаги машины состояний Apple. Порт ExoPlayerImplInternal.
   private boolean shouldStartCrossFade;
   private boolean shouldDisplayFadeInMetadata;
@@ -330,6 +331,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
     if (secondaryAudioRendererIndex != C.INDEX_UNSET) {
       this.audioFadeControl.setCrossFadeState(/* MANUAL= */ 1);
     }
+    // БЕЗУСЛОВНАЯ диагностика: выполняется всегда при создании плеера. Если этой
+    // строки нет в логе — значит играет НЕ наш форкнутый ExoPlayer.
+    StringBuilder rendererTypes = new StringBuilder();
+    for (int i = 0; i < renderers.length; i++) {
+      rendererTypes.append(i).append(':').append(renderers[i].getTrackType()).append(' ');
+    }
+    Log.e(
+        TAG,
+        "xfade INIT: renderers="
+            + renderers.length
+            + " types=["
+            + rendererTypes
+            + "] primAudio="
+            + primaryAudioRendererIndex
+            + " secAudio="
+            + secondaryAudioRendererIndex
+            + " state="
+            + audioFadeControl.getCrossFadeState()
+            + " enabled="
+            + audioFadeControl.isCrossFadeEnabled());
     mediaClock = new DefaultMediaClock(this, clock);
     pendingMessages = new ArrayList<>();
     renderersToReset = Sets.newIdentityHashSet();
@@ -2319,6 +2340,29 @@ import java.util.concurrent.atomic.AtomicBoolean;
   /** ДРАЙВЕР: взвод + тик фейда. Порт Apple maybeUpdateFadeInPeriod. */
   private void maybeUpdateFadeInPeriod() throws ExoPlaybackException {
     @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
+    // Диагностика ДО всех early-return (раз в 2 c): видно, почему фейд не армится.
+    long nowDiagMs = clock.elapsedRealtime();
+    if (nowDiagMs - lastFadeDiagLogMs > 2000) {
+      lastFadeDiagLogMs = nowDiagMs;
+      Log.e(
+          TAG,
+          "xfade DIAG: enabled="
+              + audioFadeControl.isCrossFadeEnabled()
+              + " state="
+              + audioFadeControl.getCrossFadeState()
+              + " inProgress="
+              + audioFadeControl.isCrossFadeInProgress()
+              + " playing="
+              + (playing != null)
+              + " next="
+              + (playing != null && playing.getNext() != null)
+              + " durUs="
+              + (playing != null ? playing.info.durationUs : -1L)
+              + " posUs="
+              + playbackInfo.positionUs
+              + " secAudio="
+              + secondaryAudioRendererIndex);
+    }
     if (playing == null || !audioFadeControl.isCrossFadeEnabled()) {
       return;
     }
