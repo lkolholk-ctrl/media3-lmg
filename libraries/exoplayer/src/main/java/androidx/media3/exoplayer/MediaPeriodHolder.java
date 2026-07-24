@@ -80,6 +80,13 @@ import java.io.IOException;
    */
   public boolean allRenderersInCorrectState;
 
+  /**
+   * LMG-fork (crossfade): индекс аудио-рендерера, назначенного этому периоду во
+   * время кроссфейда. {@link C#INDEX_UNSET}, пока период не участвует в переходе
+   * (играет через основной набор рендереров).
+   */
+  public int crossFadeRendererIndex = C.INDEX_UNSET;
+
   private final boolean[] mayRetainStreamFlags;
   private final RendererCapabilities[] rendererCapabilities;
   private final TrackSelector trackSelector;
@@ -146,6 +153,14 @@ import java.io.IOException;
   /** Returns the renderer time of the start of the period, in microseconds. */
   public long getRendererOffset() {
     return rendererPositionOffsetUs;
+  }
+
+  /**
+   * LMG-fork (crossfade): индекс аудио-рендерера, назначенного этому периоду для
+   * кроссфейда, или {@link C#INDEX_UNSET}. Используется {@link AudioFadeControl}.
+   */
+  public int getRendererIdx() {
+    return crossFadeRendererIndex;
   }
 
   /**
