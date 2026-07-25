@@ -14,13 +14,17 @@
  */
 package androidx.media3.exoplayer;
 
-/** Конфиг кроссфейда: тумблер + рецепт от ML-модели (AutoMix). */
+/** Конфиг кроссфейда: тумблер + параметры свода (длительность/кривая/точка входа). */
 public final class CrossfadeConfig {
 
-  /** Окно длительности свода, которое отдаёт модель (как в оффлайн-движке). */
-  public static final long MIN_XFADE_MS = 5_000L;
+  /**
+   * Окно длительности свода. Диапазон эпловский (1..12 c) — столько же отдаёт
+   * пользовательская настройка. ML-модель на стриминге себя не оправдала, и
+   * длительность задаётся вручную; оффлайн-движок (JUCE) сюда не ходит.
+   */
+  public static final long MIN_XFADE_MS = 1_000L;
 
-  public static final long MAX_XFADE_MS = 30_000L;
+  public static final long MAX_XFADE_MS = 12_000L;
 
   private static volatile boolean enabled = true;
   private static volatile long xfadeMs = MIN_XFADE_MS;
@@ -78,7 +82,7 @@ public final class CrossfadeConfig {
     return curveType;
   }
 
-  /** true, если текущие параметры пришли от модели (а не фолбэк). */
+  /** true, если параметры свода заданы (без них движок переключает треки как обычно). */
   public static boolean isFromModel() {
     return fromModel;
   }
