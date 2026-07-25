@@ -173,17 +173,16 @@ import java.util.HashMap;
                   / audioFadeTransition.getDurationUs())
               + MAX_VOLUME;
     } else {
-      // MANUAL: t = (startPositionUs - позиция_в_периоде) / длительность_фейда + 1.
+      // MANUAL: t = (startPositionUs - позиция_в_периоде) / длительность_фейда.
       //
-      // «+ MAX_VOLUME» здесь обязателен, ровно как в composer-ветке выше и в
-      // doFadeOut. Без него числитель неположителен (позиция в B только растёт
-      // от startPositionUs), t зажимается в 0, а calculateFadeInLevel(0) = 1 —
-      // то есть входящий трек звучал на ПОЛНОЙ громкости с первой же секунды
-      // свода: нарастания не было вовсе, слышалось только затухание уходящего.
+      // Здесь нет «+1», в отличие от composer-ветки выше и doFadeOut — так же и в
+      // оригинале (проверено по байткоду). Позиция приходит от часов fade-OUT
+      // рендерера, а офсет входящего периода = outOffset + outDuration - inStart,
+      // поэтому toPeriodTime(pos) меньше startPositionUs: числитель уже положителен
+      // и t идёт 1 → 0, что вместе с инвертированными кривыми даёт громкость 0 → 1.
       periodTime =
-          ((float) (mediaPeriodInfo.startPositionUs - fadeInPeriodHolder.toPeriodTime(rendererPositionUs))
-                  / audioFadeTransition.getDurationUs())
-              + MAX_VOLUME;
+          (float) (mediaPeriodInfo.startPositionUs - fadeInPeriodHolder.toPeriodTime(rendererPositionUs))
+              / audioFadeTransition.getDurationUs();
     }
     float level = calculateFadeInLevel(periodTime);
     setVolume(fadeInPeriodHolder.getRendererIdx(), level);
@@ -350,12 +349,10 @@ import java.util.HashMap;
     if (periodHolder == null || !periodHolder.prepared || transition == null) {
       return false;
     }
-    // Apple: durationUs >= 2 * fade. Для нашего окна 5–30 c это отсекало бы длинные
-    // своды (30 c потребовали бы трек >= 60 c), поэтому достаточно, чтобы фейд
-    // помещался в трек с небольшим запасом.
-    long minTrackUs = transition.getDurationUs() + 2_000_000L;
-    return periodHolder.info.durationUs == C.TIME_UNSET
-        || periodHolder.info.durationUs >= minTrackUs
+    // Как в оригинале: трек должен быть вдвое длиннее свода. Неизвестная
+    // длительность (TIME_UNSET) больше не проходит: на ней арифметика затухания
+    // разваливается (числитель уходит в мусор и трек мгновенно немеет).
+    return periodHolder.info.durationUs >= transition.getDurationUs() * 2L
         || getTransitionDataAvailable();
   }
 

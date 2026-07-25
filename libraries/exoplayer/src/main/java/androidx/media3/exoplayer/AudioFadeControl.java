@@ -48,7 +48,22 @@ package androidx.media3.exoplayer;
    */
   final class AudioFadeTransition {
 
-    private static final double DEFAULT_COEFFICIENT = 2.0d; // Apple: 2.0 (было 10.0 — давало резкую кривую и NaN при t>1.11)
+    /** Длительность по умолчанию, как в оригинале. */
+    private static final long DEFAULT_DURATION_US = 12_000_000L;
+
+    /** Коэффициент кривизны зависит от типа кривой (в оригинале — так же). */
+    private static double defaultCoefficient(FadeEffectType effectType) {
+      switch (effectType) {
+        case EXPONENTIAL:
+          return 10.0d;
+        case LOGARITHMIC:
+          return 2.0d;
+        case SIGMOID:
+          return 10.0d;
+        default:
+          return 0.0d;
+      }
+    }
 
     private final FadeEffectType effectType;
     private final long startUs;
@@ -56,16 +71,16 @@ package androidx.media3.exoplayer;
     private final double coefficient;
 
     public AudioFadeTransition() {
-      this(FadeEffectType.LINEAR, 0L, 0L, DEFAULT_COEFFICIENT);
+      this(FadeEffectType.LINEAR, 0L, DEFAULT_DURATION_US, defaultCoefficient(FadeEffectType.LINEAR));
     }
 
     public AudioFadeTransition(FadeEffectType effectType) {
-      this(effectType, 0L, 0L, DEFAULT_COEFFICIENT);
+      this(effectType, 0L, DEFAULT_DURATION_US, defaultCoefficient(effectType));
     }
 
     /** (тип, startUs, durationUs) — используется при заливке composer-кривых. */
     public AudioFadeTransition(FadeEffectType effectType, long startUs, long durationUs) {
-      this(effectType, startUs, durationUs, DEFAULT_COEFFICIENT);
+      this(effectType, startUs, durationUs, defaultCoefficient(effectType));
     }
 
     /** (тип, durationUs, coefficient) — используется при задании длительности из UI. */

@@ -2437,9 +2437,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
       // Рецепт модели применяем ДО расчёта окна арма: длительность свода и кривая
       // приходят на каждую пару треков отдельно (AutoMix), поэтому читаем их здесь,
       // а не один раз в конструкторе.
-      long recipeXfadeMs = CrossfadeConfig.getXfadeMs();
-      if (audioFadeControl.getCrossFadeDuration() * 1000L != recipeXfadeMs) {
-        audioFadeControl.setCrossFadeDuration((int) (recipeXfadeMs / 1000L));
+      int recipeXfadeSec = (int) (CrossfadeConfig.getXfadeMs() / 1000L);
+      if (audioFadeControl.getCrossFadeDuration() != recipeXfadeSec) {
+        audioFadeControl.setCrossFadeDuration(recipeXfadeSec);
       }
       applyRecipeCurveIfAny();
       long durationUs = playing.info.durationUs;
