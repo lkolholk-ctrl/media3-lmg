@@ -173,10 +173,17 @@ import java.util.HashMap;
                   / audioFadeTransition.getDurationUs())
               + MAX_VOLUME;
     } else {
-      // MANUAL: t = (startPositionUs - позиция_в_периоде) / длительность_фейда.
+      // MANUAL: t = (startPositionUs - позиция_в_периоде) / длительность_фейда + 1.
+      //
+      // «+ MAX_VOLUME» здесь обязателен, ровно как в composer-ветке выше и в
+      // doFadeOut. Без него числитель неположителен (позиция в B только растёт
+      // от startPositionUs), t зажимается в 0, а calculateFadeInLevel(0) = 1 —
+      // то есть входящий трек звучал на ПОЛНОЙ громкости с первой же секунды
+      // свода: нарастания не было вовсе, слышалось только затухание уходящего.
       periodTime =
-          (float) (mediaPeriodInfo.startPositionUs - fadeInPeriodHolder.toPeriodTime(rendererPositionUs))
-              / audioFadeTransition.getDurationUs();
+          ((float) (mediaPeriodInfo.startPositionUs - fadeInPeriodHolder.toPeriodTime(rendererPositionUs))
+                  / audioFadeTransition.getDurationUs())
+              + MAX_VOLUME;
     }
     float level = calculateFadeInLevel(periodTime);
     setVolume(fadeInPeriodHolder.getRendererIdx(), level);
