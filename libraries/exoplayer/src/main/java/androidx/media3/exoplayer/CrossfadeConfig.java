@@ -22,11 +22,8 @@ public final class CrossfadeConfig {
 
   public static final long MAX_XFADE_MS = 30_000L;
 
-  /** Длительность свода по умолчанию, когда рецепта от модели нет (фолбэк MANUAL). */
-  public static final long DEFAULT_XFADE_MS = 6_000L;
-
   private static volatile boolean enabled = true;
-  private static volatile long xfadeMs = DEFAULT_XFADE_MS;
+  private static volatile long xfadeMs = MIN_XFADE_MS;
   private static volatile long entryOffsetMs = 0L;
   private static volatile int curveType = -1; // -1 = кривая по умолчанию (log-in/exp-out)
   private static volatile boolean fromModel = false;
@@ -58,9 +55,12 @@ public final class CrossfadeConfig {
     fromModel = true;
   }
 
-  /** Сбрасывает рецепт — следующий переход пойдёт на фолбэк-длительности. */
+  /**
+   * Сбрасывает рецепт. Без рецепта свода НЕ БУДЕТ вовсе (как в оффлайн-движке:
+   * нет плана модели → обычное переключение треков), фиксированного фолбэка нет.
+   */
   public static void clearRecipe() {
-    xfadeMs = DEFAULT_XFADE_MS;
+    xfadeMs = MIN_XFADE_MS;
     curveType = -1;
     entryOffsetMs = 0L;
     fromModel = false;

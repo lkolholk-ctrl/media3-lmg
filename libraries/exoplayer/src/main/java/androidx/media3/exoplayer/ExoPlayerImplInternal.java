@@ -325,8 +325,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
     this.secondaryAudioRendererIndex = secondAudio;
     this.audioFadeControl = new PlayerAudioFadeControl(renderers);
     this.audioFadeControl.setRepeatMode(repeatMode);
-    // Длительность больше не хардкод: берётся из CrossfadeConfig (рецепт модели
-    // AutoMix в окне 5–30 c, либо фолбэк). Обновляется при каждом взводе фейда.
+    // Длительность приходит из рецепта модели при каждом взводе (окно 5–30 c).
+    // Здесь только стартовое значение; без рецепта свод вообще не армится.
     this.audioFadeControl.setCrossFadeDuration((int) (CrossfadeConfig.getXfadeMs() / 1000L));
     this.shouldStartCrossFade = false;
     this.shouldDisplayFadeInMetadata = false;
@@ -2380,7 +2380,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
               + " secAudio="
               + secondaryAudioRendererIndex);
     }
-    if (playing == null || !audioFadeControl.isCrossFadeEnabled() || !CrossfadeConfig.isEnabled()) {
+    // Свод делаем ТОЛЬКО по рецепту модели (как оффлайн-движок: нет плана —
+    // обычное переключение). Фиксированного фолбэка на N секунд нет.
+    if (playing == null
+        || !audioFadeControl.isCrossFadeEnabled()
+        || !CrossfadeConfig.isEnabled()
+        || !CrossfadeConfig.isFromModel()) {
       return;
     }
     // WATCHDOG: страховка от «музыка встала». Если фейд идёт дольше, чем
