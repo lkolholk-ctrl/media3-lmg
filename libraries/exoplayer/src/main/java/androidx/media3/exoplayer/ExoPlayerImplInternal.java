@@ -2473,12 +2473,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
       }
       return;
     }
-    if (audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.FADE_OUT) {
+    // ВАЖНО: после точки пересечения playing УЖЕ переключён на входящий трек.
+    // В MANUAL фаза считается по уровням и может откатиться в FADE_OUT — тогда
+    // ветка ниже вызвала бы doCrossFade(playing=B, next=C), то есть глушила бы
+    // ТОЛЬКО ЧТО НАЧАВШИЙСЯ трек B (симптом: «в начале песни всё затихает,
+    // музыка немая»). shouldDisplayFadeInMetadata взводится ровно в момент
+    // продвижения, поэтому после него всегда идём по ветке FADE_IN.
+    if (audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.FADE_OUT
+        && !shouldDisplayFadeInMetadata) {
       @Nullable MediaPeriodHolder next = playing.getNext();
       if (next != null) {
         audioFadeControl.doCrossFade(playing, next, rendererPositionUs);
       }
-    } else if (audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.FADE_IN) {
+    } else if (shouldDisplayFadeInMetadata
+        || audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.FADE_IN) {
       @Nullable MediaPeriodHolder prev = playing.getPrevious(); // защитный null-check
       if (prev != null) {
         audioFadeControl.doCrossFade(prev, playing, rendererPositionUs);
