@@ -1394,6 +1394,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     // maybeReleaseFadeOutPeriod(true) + reset + флаги на всех exit-путях; семантически один раз здесь).
     maybeReleaseFadeOutPeriod(/* force= */ true);
     audioFadeControl.reset();
+    audioFadeControl.restoreFullGain("SEEK"); // §6: seek/skip посреди свода не оставляет немую деку
     shouldStartCrossFade = false;
     shouldDisplayFadeInMetadata = false;
 
@@ -1692,6 +1693,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     // после disable всех рендереров). resetInternal без throws → оборачиваем в try/catch.
     try {
       audioFadeControl.reset();
+      audioFadeControl.restoreFullGain("RESET");
     } catch (ExoPlaybackException e) {
       Log.e(TAG, "Fade reset failed.", e);
     }
@@ -2410,6 +2412,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
           }
         }
         audioFadeControl.reset();
+        audioFadeControl.restoreFullGain("WATCHDOG");
         fadeStartedAtMs = C.TIME_UNSET;
         shouldStartCrossFade = false;
         shouldDisplayFadeInMetadata = false;
@@ -2417,6 +2420,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
       }
     } else {
       fadeStartedAtMs = C.TIME_UNSET;
+      // §6: вне свода приглушённых дек быть не может. Если есть — чиним и пишем.
+      if (audioFadeControl.hasDuckedRenderer()) {
+        audioFadeControl.restoreFullGain("IDLE_DUCKED");
+      }
     }
     audioFadeControl.maybeDoFadeOut(playing, rendererPositionUs);
     if (!audioFadeControl.isCrossFadeInProgress()) {
@@ -2461,6 +2468,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
         } else {
           Log.e(TAG, "xfade ARM ROLLBACK: fadeIn renderer not enabled → gapless");
           audioFadeControl.reset();
+          audioFadeControl.restoreFullGain("ARM_ROLLBACK");
         }
       }
       return;
@@ -2568,6 +2576,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
       disableRenderer(outgoingIdx);
     }
     audioFadeControl.reset();
+    audioFadeControl.restoreFullGain("DONE"); // §6: выживший рендерер всегда на 1.0
     fadeStartedAtMs = C.TIME_UNSET;
     fadeInOffsetShifted = false;
   }

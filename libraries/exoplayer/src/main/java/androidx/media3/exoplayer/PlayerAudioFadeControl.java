@@ -263,10 +263,46 @@ import java.util.HashMap;
     return level;
   }
 
+  /** Последний выставленный гейн по индексу рендерера (для инварианта §6). */
+  private final java.util.HashMap<Integer, Float> lastVolume = new java.util.HashMap<>();
+
   private void setVolume(int rendererIdx, float volume) throws ExoPlaybackException {
     if (rendererIdx >= 0 && rendererIdx < renderers.length) {
       renderers[rendererIdx].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(volume));
+      lastVolume.put(rendererIdx, volume);
     }
+  }
+
+  /**
+   * ИНВАРИАНТ: вне активного окна свода ни один аудио-рендерер не должен остаться
+   * с гейном < 1.0. Фейд-аут уводит гейн в 0, и если переход оборвался (skip, seek,
+   * pause, ошибка декодера, смена маршрута) — трек останется немым. Возвращаем
+   * гейн ПРИНУДИТЕЛЬНО, не «плавно», и логируем сам факт: такого состояния быть
+   * не должно.
+   */
+  public void restoreFullGain(String reason) {
+    for (int i = 0; i < renderers.length; i++) {
+      Float v = lastVolume.get(i);
+      if (v != null && v < MAX_VOLUME) {
+        try {
+          renderers[i].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(MAX_VOLUME));
+          lastVolume.put(i, MAX_VOLUME);
+          Log.e(TAG, "xfade GAIN RESTORE idx=" + i + " was=" + v + " reason=" + reason);
+        } catch (Exception e) {
+          Log.e(TAG, "xfade gain restore failed idx=" + i, e);
+        }
+      }
+    }
+  }
+
+  /** Есть ли рендерер с приглушённым гейном (для watchdog-лога вне свода). */
+  public boolean hasDuckedRenderer() {
+    for (Float v : lastVolume.values()) {
+      if (v != null && v < MAX_VOLUME) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // ── canFadeBetweenPeriods (Apple 1:1, адаптировано под отсутствие обёртки) ──
