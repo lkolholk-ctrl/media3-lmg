@@ -46,6 +46,7 @@ import androidx.media3.common.Player;
 import androidx.media3.common.Player.DiscontinuityReason;
 import androidx.media3.common.Player.PlaybackSuppressionReason;
 import androidx.media3.common.Player.RepeatMode;
+import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Timeline;
 import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.Clock;
@@ -2357,6 +2358,50 @@ import java.util.concurrent.atomic.AtomicBoolean;
   // =========================================================================================
 
   /** ДРАЙВЕР: взвод + тик фейда. Порт Apple maybeUpdateFadeInPeriod. */
+  /**
+   * Соседние треки одного альбома сводить нельзя: они смонтированы встык (живые
+   * записи, сюиты, DJ-миксы), и кроссфейд рвёт задуманный переход. В оригинале эту
+   * роль играет areSequentialItems, которому доступны метаданные трека; здесь
+   * берём их из MediaItem окна по periodUid.
+   */
+  private boolean areSequentialAlbumTracks(
+      @Nullable MediaPeriodHolder outHolder, @Nullable MediaPeriodHolder inHolder) {
+    if (outHolder == null || inHolder == null) {
+      return false;
+    }
+    @Nullable MediaMetadata outMeta = mediaMetadataForPeriod(outHolder.info.id.periodUid);
+    @Nullable MediaMetadata inMeta = mediaMetadataForPeriod(inHolder.info.id.periodUid);
+    if (outMeta == null || inMeta == null) {
+      return false;
+    }
+    if (outMeta.albumTitle == null
+        || inMeta.albumTitle == null
+        || !outMeta.albumTitle.toString().equals(inMeta.albumTitle.toString())) {
+      return false;
+    }
+    if (!Util.areEqual(outMeta.discNumber, inMeta.discNumber)) {
+      return false;
+    }
+    return outMeta.trackNumber != null
+        && inMeta.trackNumber != null
+        && inMeta.trackNumber == outMeta.trackNumber + 1;
+  }
+
+  @Nullable
+  private MediaMetadata mediaMetadataForPeriod(Object periodUid) {
+    Timeline timeline = playbackInfo.timeline;
+    if (timeline.isEmpty()) {
+      return null;
+    }
+    int periodIndex = timeline.getIndexOfPeriod(periodUid);
+    if (periodIndex == C.INDEX_UNSET) {
+      return null;
+    }
+    timeline.getPeriod(periodIndex, period);
+    timeline.getWindow(period.windowIndex, window);
+    return window.mediaItem.mediaMetadata;
+  }
+
   private void maybeUpdateFadeInPeriod() throws ExoPlaybackException {
     @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
     // Диагностика ДО всех early-return (раз в 2 c): видно, почему фейд не армится.
@@ -2446,8 +2491,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
       long fadeUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
       boolean nearEnd =
           durationUs != C.TIME_UNSET && (durationUs - playbackInfo.positionUs) <= fadeUs;
+      if (nearEnd && next != null && areSequentialAlbumTracks(playing, next)) {
+        Log.e(TAG, "xfade SKIP: соседние треки альбома — переход встык");
+      }
       if (nearEnd
           && next != null
+          && !areSequentialAlbumTracks(playing, next)
           && audioFadeControl.canFadeBetweenPeriods(playing, next)
           && audioFadeControl.maybeStartCrossFading(playing, next, rendererPositionUs)) {
         Log.e(
