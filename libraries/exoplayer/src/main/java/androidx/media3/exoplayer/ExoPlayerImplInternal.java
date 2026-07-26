@@ -2392,6 +2392,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
     }
   }
 
+  /**
+   * Сводить осмысленно только музыку. Подкасты и аудиокниги накладывать друг на
+   * друга нельзя — речь превращается в кашу; в оригинале для этого есть проверка
+   * типа элемента, у нас она была заглушкой «сводим всё».
+   */
+  private boolean isFadeableMediaType(@Nullable MediaPeriodHolder holder) {
+    if (holder == null) {
+      return false;
+    }
+    @Nullable MediaMetadata metadata = mediaMetadataForPeriod(holder.info.id.periodUid);
+    if (metadata == null || metadata.mediaType == null) {
+      return true; // тип не заявлен — не мешаем своду
+    }
+    int mediaType = metadata.mediaType;
+    return mediaType == MediaMetadata.MEDIA_TYPE_MUSIC
+        || mediaType == MediaMetadata.MEDIA_TYPE_MIXED;
+  }
+
   private boolean areSequentialAlbumTracks(
       @Nullable MediaPeriodHolder outHolder, @Nullable MediaPeriodHolder inHolder) {
     if (outHolder == null || inHolder == null) {
@@ -2519,9 +2537,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
       if (nearEnd && next != null && areSequentialAlbumTracks(playing, next)) {
         logXfade("xfade SKIP: соседние треки альбома — переход встык");
       }
+      if (nearEnd && next != null && (!isFadeableMediaType(playing) || !isFadeableMediaType(next))) {
+        logXfade("xfade SKIP: не музыка (подкаст/аудиокнига) — свод не делаем");
+      }
       if (nearEnd
           && next != null
           && !areSequentialAlbumTracks(playing, next)
+          && isFadeableMediaType(playing)
+          && isFadeableMediaType(next)
           && audioFadeControl.canFadeBetweenPeriods(playing, next)
           && audioFadeControl.maybeStartCrossFading(playing, next, rendererPositionUs)) {
         logXfade(

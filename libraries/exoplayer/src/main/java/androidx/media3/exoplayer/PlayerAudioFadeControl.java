@@ -88,68 +88,63 @@ import java.util.HashMap;
     this.repeatMode = repeatMode;
   }
 
-  // ── Кривая fade-IN (Apple calculateFadeInLevel 1:1) ──
-  private float calculateFadeInLevel(float fadeInTimeNormalized) {
-    AudioFadeTransition audioFadeTransition = transitionsMap.get(FadeType.FADE_IN);
-    if (audioFadeTransition == null) {
+  /**
+   * Уровень нарастающего трека по нормированному времени.
+   *
+   * <p>Вынесено отдельно от плеера намеренно: форма кривой определяет, как свод
+   * слышится, и дважды была источником регрессий (слишком быстрое затухание —
+   * свод «короче» заданного; недостижимый порог завершения — провал громкости в
+   * начале следующего трека). Чистая функция проверяется тестом.
+   *
+   * @param t нормированное время, идёт 1 → 0 по ходу свода.
+   */
+  static float fadeInCurveLevel(FadeEffectType effectType, float t, double coefficient) {
+    if (Float.isNaN(t)) {
       return MIN_VOLUME;
     }
-    // Защита: t вне [0,1] (позиция ещё/уже вне окна фейда) давала бы NaN в
-    // LOGARITHMIC (log отрицательного) и мусор в остальных кривых. NaN затем
-    // проходил бы Math.max/min и уходил в громкость.
-    if (Float.isNaN(fadeInTimeNormalized)) {
-      return MIN_VOLUME;
-    }
-    fadeInTimeNormalized = Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, fadeInTimeNormalized));
+    t = Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, t));
     float f;
-    FadeEffectType effectType = audioFadeTransition.getEffectType();
     switch (effectType) {
       case LINEAR:
-        f = 1 - fadeInTimeNormalized;
+        f = 1 - t;
         break;
       case CUBIC:
-        f = (float) Math.pow((double) 1 - (double) fadeInTimeNormalized, 3.0d);
+        f = (float) Math.pow((double) 1 - (double) t, 3.0d);
         break;
       case EXPONENTIAL:
-        {
-          double d = 1;
-          f =
-              (float)
-                  ((Math.pow(audioFadeTransition.getCoefficient(), d - (double) fadeInTimeNormalized)
-                          - d)
-                      / (audioFadeTransition.getCoefficient() - d));
-          break;
-        }
+        f = (float) ((Math.pow(coefficient, 1.0d - (double) t) - 1.0d) / (coefficient - 1.0d));
+        break;
       case LOGARITHMIC:
         f =
             (float)
-                (Math.log(
-                        audioFadeTransition.getCoefficient()
-                            + (((double) 1 - audioFadeTransition.getCoefficient())
-                                * (double) fadeInTimeNormalized))
-                    / Math.log(audioFadeTransition.getCoefficient()));
+                (Math.log(coefficient + ((1.0d - coefficient) * (double) t))
+                    / Math.log(coefficient));
         break;
       case CONSTANT_POWER:
-        f = (float) Math.sqrt((double) 1 - (double) fadeInTimeNormalized);
+        f = (float) Math.sqrt((double) 1 - (double) t);
         break;
       case SIGMOID:
-        {
-          double d = 1;
-          f =
-              (float)
-                  (d
-                      / (Math.exp(
-                              ((double) fadeInTimeNormalized - 0.5d)
-                                  * audioFadeTransition.getCoefficient())
-                          + d));
-          break;
-        }
+        f = (float) (1.0d / (Math.exp(((double) t - 0.5d) * coefficient) + 1.0d));
+        break;
       default:
         f = 1.0f;
         break;
     }
     return Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, f));
   }
+
+  // ── Кривая fade-IN ──
+  private float calculateFadeInLevel(float fadeInTimeNormalized) {
+    AudioFadeTransition audioFadeTransition = transitionsMap.get(FadeType.FADE_IN);
+    if (audioFadeTransition == null) {
+      return MIN_VOLUME;
+    }
+    return fadeInCurveLevel(
+        audioFadeTransition.getEffectType(),
+        fadeInTimeNormalized,
+        audioFadeTransition.getCoefficient());
+  }
+
 
   // ── doFadeIn (Apple 1:1; обе ветки сохранены, composer-ветка не исполняется) ──
   private float doFadeIn(@Nullable MediaPeriodHolder fadeInPeriodHolder, long rendererPositionUs)
@@ -371,14 +366,14 @@ import java.util.HashMap;
         && fadeOutPeriodHolder.uid.equals(fadeInPeriodHolder.uid);
   }
 
-  // TODO: media-type check недоступен без обёртки MediaPlayer/PlayerMediaItem
-  // (Apple: getPlayerMediaItemFromPeriodHolder(...).getType() == 1). Заглушка → true.
+  // Тип медиа проверяется в ExoPlayerImplInternal.isFadeableMediaType: там есть
+  // доступ к Timeline и метаданным элемента, здесь его нет. Оставлено true.
   private boolean isCorrectMediaType(@Nullable MediaPeriodHolder periodHolder) {
     return periodHolder != null;
   }
 
-  // TODO: album-check (areSequentialItems по albumSubscriptionStoreId/disc/track) недоступен
-  // без обёртки MediaPlayer/PlayerMediaItem. Заглушка → false (не блокирует кроссфейд).
+  // Альбомный gapless проверяется в ExoPlayerImplInternal.areSequentialAlbumTracks
+  // (там доступны метаданные элемента). Здесь оставлено false.
   private boolean areSequentialItems(
       @Nullable MediaPeriodHolder fadeOutPeriodHolder,
       @Nullable MediaPeriodHolder fadeInPeriodHolder) {

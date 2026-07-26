@@ -15,7 +15,7 @@ permissions:
 
 env:
   # Версия форка. Бампать при каждом изменении патча (…-lmg1, -lmg2, …).
-  RELEASE_VERSION: 1.5.1-lmg27
+  RELEASE_VERSION: 1.5.1-lmg28
 
 jobs:
   build:
@@ -39,6 +39,14 @@ jobs:
 
       - name: Set up Gradle (with cache)
         uses: gradle/actions/setup-gradle@v4
+
+      - name: Run crossfade unit tests
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace \
+            :lib-exoplayer:testReleaseUnitTest \
+            --tests 'androidx.media3.exoplayer.PlayerAudioFadeControlCurvesTest' \
+            --tests 'androidx.media3.exoplayer.CrossfadeConfigurationTest'
 
       - name: Publish media3 AARs to local maven repo
         run: |
