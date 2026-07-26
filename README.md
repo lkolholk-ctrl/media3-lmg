@@ -1,9 +1,10 @@
-> **Это модифицированная версия AndroidX Media3 (1.5.1), а не оригинал.**
-> Добавлен кроссфейд между треками; артефакты публикуются под группой
-> `com.liquidmusicglass.media3`.
-> Подключение и использование — [`README.LMG.md`](README.LMG.md),
-> перечень изменений — [`NOTICE.md`](NOTICE.md),
-> история версий — [`CHANGELOG.LMG.md`](CHANGELOG.LMG.md).
+> **This is a modified version of AndroidX Media3 (1.5.1), not the original.**
+> It adds crossfading between tracks; artifacts are published under the
+> `com.liquidmusicglass.media3` group.
+> Setup and usage — [`README.LMG.md`](README.LMG.md),
+> list of changes — [`NOTICE.md`](NOTICE.md),
+> version history — [`CHANGELOG.LMG.md`](CHANGELOG.LMG.md).
+> Русская документация — [`README.LMG.ru.md`](README.LMG.ru.md).
 
 # AndroidX Media
 

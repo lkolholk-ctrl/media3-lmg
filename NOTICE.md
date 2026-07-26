@@ -1,68 +1,78 @@
 # NOTICE
 
-Этот продукт — **модифицированная версия AndroidX Media3** (проект `androidx/media`,
-тег `1.5.1`).
+*[Русская версия](NOTICE.ru.md)*
 
-Оригинальный код: Copyright (C) The Android Open Source Project, лицензия
-Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE).
-Оригинальный проект: https://github.com/androidx/media
+This product is a **modified version of AndroidX Media3** (project `androidx/media`,
+tag `1.5.1`).
 
-Модификации: Copyright (C) 2026 LiquidMusicGlass. Распространяются на тех же
-условиях Apache License 2.0.
+Original code: Copyright (C) The Android Open Source Project, licensed under the
+Apache License 2.0 — full text in [`LICENSE`](LICENSE).
+Original project: https://github.com/androidx/media
 
-## Заявление об изменениях
+Modifications: Copyright (C) 2026 LiquidMusicGlass. Distributed under the same
+Apache License 2.0 terms.
 
-Согласно разделу 4(b) Apache License 2.0, ниже перечислены файлы, изменённые
-относительно апстрима `1.5.1`. Все изменения помечены в коде комментариями.
+## Statement of changes
 
-### Код плеера
+As required by section 4(b) of the Apache License 2.0, the files below were
+modified relative to upstream `1.5.1`. All changes are marked with comments in
+the code.
 
-| Файл | Характер изменений |
+### Player code
+
+| File | Nature of changes |
 |---|---|
-| `libraries/exoplayer/src/main/java/androidx/media3/exoplayer/AudioFadeControl.java` | **Новый файл.** Контракт управления фейдом: типы кривых, фазы свода, описание перехода. |
-| `.../exoplayer/PlayerAudioFadeControl.java` | **Новый файл.** Реализация: расчёт уровней громкости по кривым, тик свода, условия допуска пары треков, восстановление громкости. |
-| `.../exoplayer/CrossfadeConfig.java` | **Новый файл.** Тумблер отладочного лога свода. |
-| `.../exoplayer/ExoPlayer.java` | Добавлены `CrossfadeConfiguration` и методы `setCrossfadeConfiguration`/`getCrossfadeConfiguration`. |
-| `.../exoplayer/ExoPlayerImpl.java` | Хранение параметров свода и передача их в цикл воспроизведения. |
-| `.../exoplayer/ExoPlayerImplInternal.java` | Хуки свода в цикле воспроизведения: взвод, тик, освобождение уходящего периода, назначение рендереров, сторож зависания, пропуск свода между соседними треками альбома. |
-| `.../exoplayer/MediaPeriodHolder.java` | Индекс рендерера, на котором играет период, и ссылка на предыдущий период. |
-| `.../exoplayer/MediaPeriodQueue.java` | Смена играющего периода без освобождения предыдущего (нужно для наложения) и точка входа в следующий трек. |
-| `.../exoplayer/DefaultMediaClock.java` | Включение второго аудио-рендерера больше не считается ошибкой: при своде два аудио-рендерера работают одновременно. |
-| `.../exoplayer/DefaultRenderersFactory.java` | Создание второго аудио-рендерера. |
+| `libraries/exoplayer/src/main/java/androidx/media3/exoplayer/AudioFadeControl.java` | **New file.** Fade control contract: curve types, crossfade phases, transition description. |
+| `.../exoplayer/PlayerAudioFadeControl.java` | **New file.** Implementation: volume levels per curve, crossfade tick, eligibility rules for a track pair, gain restoration. |
+| `.../exoplayer/CrossfadeConfig.java` | **New file.** Verbose crossfade logging toggle. |
+| `.../exoplayer/ExoPlayer.java` | Added `CrossfadeConfiguration` plus `setCrossfadeConfiguration`/`getCrossfadeConfiguration`. |
+| `.../exoplayer/ExoPlayerImpl.java` | Stores crossfade settings and forwards them to the playback loop. |
+| `.../exoplayer/SimpleExoPlayer.java` | Delegates the new crossfade methods. |
+| `.../exoplayer/ExoPlayerImplInternal.java` | Crossfade hooks in the playback loop: arming, per-tick updates, releasing the outgoing period, renderer assignment, stuck-fade watchdog, skipping the fade between consecutive album tracks and for non-music content. |
+| `.../exoplayer/MediaPeriodHolder.java` | Index of the renderer a period plays on, plus a link to the previous period. |
+| `.../exoplayer/MediaPeriodQueue.java` | Advancing the playing period without releasing the previous one (required for overlap) and the entry offset into the next track. |
+| `.../exoplayer/DefaultMediaClock.java` | Enabling a second audio renderer is no longer treated as an error: during a crossfade two audio renderers run at once. |
+| `.../exoplayer/DefaultRenderersFactory.java` | Creates the second audio renderer. |
 
-### Сборка и публикация
+### Tests
 
-| Файл | Характер изменений |
+| File | Nature of changes |
 |---|---|
-| `build.gradle`, `common_library_config.gradle`, `publish.gradle` | Координаты артефактов изменены с `androidx.media3` на `com.liquidmusicglass.media3`; публикация не зависит от задач `lint`/`test`. |
-| `missing_aar_type_workaround.gradle` | Учитывает новую группу артефактов. |
-| `constants.gradle` | Версия релиза форка (`1.5.1-lmgN`). |
-| `settings.gradle` | Исключены demo-приложения, testapp и тест-онли модули: форк собирает только библиотечные AAR. |
-| `libraries/test_data` | Удалены тяжёлые медиа-ассеты для тестов. |
-| `.github/workflows/build-aars.yml` | **Новый файл.** Сборка AAR и публикация maven-репозитория в GitHub Release. |
+| `libraries/exoplayer/src/test/java/androidx/media3/exoplayer/PlayerAudioFadeControlCurvesTest.java` | **New file.** Curve shape tests. |
+| `.../exoplayer/CrossfadeConfigurationTest.java` | **New file.** Crossfade settings tests. |
 
-## Происхождение реализации кроссфейда
+### Build and publishing
 
-Логика свода в этом форке воспроизводит поведение кроссфейда плеера **Apple
-Music для Android**, изученное по клиенту приложения: порядок фаз перехода,
-работа двух одновременных аудио-рендереров, условия допуска пары треков к своду,
-формулы кривых громкости и условие завершения свода.
+| File | Nature of changes |
+|---|---|
+| `build.gradle`, `common_library_config.gradle`, `publish.gradle` | Artifact coordinates changed from `androidx.media3` to `com.liquidmusicglass.media3`; publishing no longer depends on `lint`/`test` tasks. |
+| `missing_aar_type_workaround.gradle` | Accounts for the new artifact group. |
+| `constants.gradle` | Fork release version (`1.5.1-lmgN`). |
+| `settings.gradle` | Demo apps, testapp and test-only modules excluded: the fork builds library AARs only. |
+| `libraries/test_data` | Heavy test media assets removed. |
+| `.github/workflows/build-aars.yml` | **New file.** Builds AARs, runs the crossfade unit tests and publishes a maven repository to a GitHub Release. |
 
-Apple не публикует эту реализацию в открытом виде — в открытом доступе её нет
-ни в составе ExoPlayer, ни в SDK. Авторские права на оригинальную реализацию
-принадлежат Apple Inc.
+## Origin of the crossfade implementation
 
-Этот проект **не аффилирован с Apple Inc., не одобрен и не поддерживается ею**.
-Apple Music — товарный знак Apple Inc.
+The crossfade logic in this fork reproduces the behaviour of the **Apple Music
+for Android** player, studied from the shipped application: the order of
+transition phases, the use of two simultaneous audio renderers, the eligibility
+rules for a track pair, the volume curve formulas and the fade completion
+condition.
 
-Настоящее уведомление не является и не заменяет разрешение правообладателя:
-оно лишь фиксирует происхождение, чтобы никто не принимал эту реализацию за
-собственную разработку авторов форка или за часть AndroidX Media3.
+Apple does not publish this implementation — it is available neither in ExoPlayer
+nor in any SDK. Copyright in the original implementation belongs to Apple Inc.
 
-## Важно о пакетах Java
+This project is **not affiliated with, endorsed by, or supported by Apple Inc.**
+Apple Music is a trademark of Apple Inc.
 
-Пакеты классов остались `androidx.media3.*` — изменены только координаты
-артефактов. Это значит, что форк и оригинальный `androidx.media3` **не могут
-сосуществовать** в одной сборке: попытка подключить оба приведёт к ошибке
-дублирующихся классов. Так сделано намеренно, чтобы подмена одного другим была
-видимой, а не молчаливой.
+This notice is not, and does not substitute for, permission from the rights
+holder: it records the origin so that nobody mistakes this implementation for
+original work by the fork's authors or for part of AndroidX Media3.
+
+## Note on Java packages
+
+Class packages remain `androidx.media3.*` — only the artifact coordinates
+changed. This means the fork and the original `androidx.media3` **cannot coexist**
+in one build: pulling in both fails with duplicate classes. That is intentional,
+so that substituting one for the other is visible rather than silent.

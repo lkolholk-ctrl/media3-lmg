@@ -1,25 +1,28 @@
-# media3 — форк LiquidMusicGlass (кроссфейд)
+# media3 — LiquidMusicGlass fork (crossfade)
 
-Форк [`androidx/media`](https://github.com/androidx/media) (тег **1.5.1**).
-Добавляет кроссфейд между треками — наложение уходящего и входящего трека с
-плавным переходом громкости, чего сток media3 не умеет: он переключает треки
-встык (gapless) и не играет два аудиопотока одновременно.
+*[Русская версия](README.LMG.ru.md)*
 
-Логика свода воспроизводит поведение кроссфейда плеера Apple Music для Android
-(Apple эту реализацию не публикует). Проект не аффилирован с Apple Inc. и не
-одобрен ею — подробнее в [`NOTICE.md`](NOTICE.md).
+A fork of [`androidx/media`](https://github.com/androidx/media) (tag **1.5.1**)
+that adds crossfading between tracks — overlapping the outgoing and incoming
+track with a smooth volume transition. Stock media3 cannot do this: it switches
+tracks back to back (gapless) and never plays two audio streams at once.
 
-Юридическая часть и полный перечень изменений — в [`NOTICE.md`](NOTICE.md).
-История версий — в [`CHANGELOG.LMG.md`](CHANGELOG.LMG.md).
+The crossfade logic reproduces the behaviour of the Apple Music for Android
+player (Apple does not publish that implementation). This project is not
+affiliated with or endorsed by Apple Inc. — see [`NOTICE.md`](NOTICE.md).
+
+Legal information and the full list of changes: [`NOTICE.md`](NOTICE.md).
+Version history: [`CHANGELOG.LMG.md`](CHANGELOG.LMG.md).
 
 ---
 
-## Подключение
+## Setup
 
-Артефакты публикуются под собственной группой `com.liquidmusicglass.media3`,
-чтобы Gradle не мог перепутать их с оригиналом и подставить сток вместо форка.
+Artifacts are published under their own group, `com.liquidmusicglass.media3`, so
+that Gradle cannot confuse them with the original and silently resolve stock
+media3 instead of the fork.
 
-**1. Скачать maven-репозиторий из релиза** (в CI — отдельным шагом):
+**1. Download the maven repository from a release** (a separate CI step):
 
 ```bash
 VER=1.5.1-lmg28
@@ -28,7 +31,7 @@ curl -sSL -o media3-m2.zip \
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
 ```
 
-**2. Подключить репозиторий** (`settings.gradle.kts`):
+**2. Register the repository** (`settings.gradle.kts`):
 
 ```kotlin
 dependencyResolutionManagement {
@@ -43,12 +46,13 @@ dependencyResolutionManagement {
 }
 ```
 
-**3. Зависимости** (`app/build.gradle.kts`):
+**3. Dependencies** (`app/build.gradle.kts`):
 
 ```kotlin
 configurations.configureEach {
-    // Форк живёт в тех же Java-пакетах, что и оригинал: две копии классов
-    // сборку не соберут. Отсекаем сток, если его притащит транзитивная зависимость.
+    // The fork lives in the same Java packages as the original: two copies of the
+    // classes will not build. Exclude stock media3 in case a transitive
+    // dependency pulls it in.
     exclude(group = "androidx.media3")
 }
 
@@ -57,106 +61,107 @@ dependencies {
     implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg28")
     implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg28")
     implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg28")
-    // при необходимости: media3-extractor, media3-exoplayer-hls,
-    // media3-common-ktx, media3-datasource, media3-decoder,
-    // media3-container, media3-database
+    // if needed: media3-extractor, media3-exoplayer-hls, media3-common-ktx,
+    // media3-datasource, media3-decoder, media3-container, media3-database
 }
 ```
 
-Импорты в коде **не меняются** — классы остались `androidx.media3.*`.
+Imports in your code **do not change** — classes are still `androidx.media3.*`.
 
 ---
 
-## Использование кроссфейда
+## Using the crossfade
 
-Параметры свода задаются на самом плеере — у каждого экземпляра свои:
+Crossfade settings belong to the player instance:
 
 ```kotlin
 import androidx.media3.exoplayer.ExoPlayer
 
 player.setCrossfadeConfiguration(
     ExoPlayer.CrossfadeConfiguration(
-        /* durationUs   = */ 9_000_000L,  // длительность свода; 0 — свод выключен
-        /* curveType    = */ ExoPlayer.CrossfadeConfiguration.CURVE_DEFAULT,
-        /* entryOffsetUs= */ 0L           // с какой позиции начинать следующий трек
+        /* durationUs    = */ 9_000_000L,  // fade length; 0 disables the crossfade
+        /* curveType     = */ ExoPlayer.CrossfadeConfiguration.CURVE_DEFAULT,
+        /* entryOffsetUs = */ 0L           // where the next track starts from
     )
 )
 ```
 
-Настройка применяется сразу, в том числе к уже играющему треку: свод взводится в
-последние `durationUs` микросекунд трека. Чтобы выключить свод, задайте
-`durationUs = 0` или `CrossfadeConfiguration.DEFAULT`.
+The setting takes effect immediately, including for the track already playing:
+the fade is armed during the last `durationUs` microseconds of the track. To turn
+crossfading off, pass `durationUs = 0` or `CrossfadeConfiguration.DEFAULT`.
 
-`curveType` задаёт форму кривой громкости:
+`curveType` selects the volume curve:
 
-| Константа | Кривая | Когда уместна |
+| Constant | Curve | When it fits |
 |---|---|---|
-| `CURVE_DEFAULT` | равная мощность | ровный свод: суммарная громкость не проваливается, перекрытие слышно всю длительность |
-| `CURVE_CONSTANT_POWER` | равная мощность | то же, явным указанием |
-| `CURVE_EXPONENTIAL` | экспонента | уходящий держится дольше, входящий вступает резче |
-| `CURVE_LINEAR` | линейная | ритм не «плывёт» |
+| `CURVE_DEFAULT` | constant power | even fade: total loudness never dips, the overlap is audible for the whole duration |
+| `CURVE_CONSTANT_POWER` | constant power | the same, stated explicitly |
+| `CURVE_EXPONENTIAL` | exponential | the outgoing track holds longer, the incoming one enters sharply |
+| `CURVE_LINEAR` | linear | keeps the beat steady |
 
-### Когда свода НЕ будет
+### When no crossfade happens
 
-- параметры не заданы (`clearRecipe`) или свод выключен;
-- следующий трек ещё не подготовлен — свод начнётся позже и выйдет короче
-  заданного; чтобы этого избежать, включите предзагрузку:
+- crossfading is disabled (`durationUs = 0`);
+- the next track is not prepared yet — the fade starts late and ends up shorter
+  than configured; to avoid this, enable preloading:
   `player.setPreloadConfiguration(ExoPlayer.PreloadConfiguration(30_000_000L))`;
-- трек короче удвоенной длительности свода;
-- длительность трека неизвестна;
-- следующий трек — соседний трек того же альбома (совпадает альбом и номер
-  диска, номер трека идёт следующим): такие переходы задуманы встык;
-- элемент заявлен как подкаст или аудиокнига: свод осмыслен только для музыки;
-- включён повтор одного трека.
+- the track is shorter than twice the fade duration;
+- the track duration is unknown;
+- the next track is the consecutive track of the same album (same album title and
+  disc number, track number follows): such transitions are meant to be gapless;
+- the item is declared as a podcast or an audiobook: crossfading only makes sense
+  for music;
+- repeat-one mode is on.
 
-### Диагностика
+### Diagnostics
 
-По умолчанию движок молчит: пишутся только аномалии (сторож зависшего свода и
-ошибки). Подробный лог включается тумблером:
+By default the engine stays quiet: only anomalies are logged (the stuck-fade
+watchdog and errors). Verbose logging is a toggle:
 
 ```kotlin
-CrossfadeConfig.setDebugLogging(true)   // уровни громкости на каждом тике, взвод, завершение
+CrossfadeConfig.setDebugLogging(true)   // per-tick volume levels, arming, completion
 ```
 
-Логи идут через `Log.e` намеренно: R8 в релизной сборке вырезает `Log.d`/`Log.v`,
-и диагностика исчезала бы именно там, где она нужна. Поэтому громкость лога
-регулируется этим флагом, а не уровнем логирования.
+Logs go through `Log.e` deliberately: R8 strips `Log.d`/`Log.v` in release builds,
+which is exactly where the diagnostics are needed. Volume of logging is therefore
+controlled by this flag rather than by log level.
 
-Фильтр — `xfade`:
+Filter by `xfade`:
 
-- `xfade ARM: remainingUs=… nextPrepared=…` — свод взведён: видно, за сколько до
-  конца трека это случилось и был ли готов следующий период;
-- `setFadeAudioEffect() new duration: …` — длительность, дошедшая до движка (мкс);
-- `doCrossFade() fadeOutLevel: … fadeInLevel: …` — текущие уровни громкости;
-- `xfade SKIP: соседние треки альбома` — свод намеренно пропущен;
-- `xfade WATCHDOG: …` — свод завис и был принудительно сброшен.
-
----
-
-## Как это устроено
-
-Сток media3 держит один аудио-рендерер и переключает периоды встык. Для
-наложения нужны два одновременно звучащих потока, поэтому:
-
-1. `DefaultRenderersFactory` создаёт **второй аудио-рендерер**;
-2. `DefaultMediaClock` перестаёт считать ошибкой включение второго
-   аудио-рендерера;
-3. в цикле воспроизведения (`ExoPlayerImplInternal`) появляются фазы свода:
-   взвод за N секунд до конца трека, тик с пересчётом громкостей, смена
-   играющего периода **без освобождения** предыдущего, освобождение уходящего
-   периода после завершения;
-4. `PlayerAudioFadeControl` на каждом тике считает громкость обоих треков по
-   выбранной кривой и выставляет её рендерерам сообщением `MSG_SET_VOLUME`.
-
-Момент старта свода — позиционный: последние N секунд трека, где N — заданная
-длительность.
+- `xfade ARM: remainingUs=… nextPrepared=…` — the fade was armed: shows how long
+  before the end of the track and whether the next period was ready;
+- `setFadeAudioEffect() new duration: …` — the duration that reached the engine (µs);
+- `doCrossFade() fadeOutLevel: … fadeInLevel: …` — current volume levels;
+- `xfade SKIP: …` — the fade was skipped on purpose (album gapless, non-music);
+- `xfade WATCHDOG: …` — the fade got stuck and was force-reset.
 
 ---
 
-## Сборка форка
+## How it works
 
-CI (`.github/workflows/build-aars.yml`) собирает 11 модулей, складывает их в
-maven-репозиторий и публикует его zip-архивом в GitHub Release `v<version>`:
+Stock media3 keeps a single audio renderer and switches periods back to back.
+Overlapping requires two simultaneously sounding streams, therefore:
+
+1. `DefaultRenderersFactory` creates a **second audio renderer**;
+2. `DefaultMediaClock` no longer treats enabling a second audio renderer as an
+   error;
+3. the playback loop (`ExoPlayerImplInternal`) gains crossfade phases: arming N
+   seconds before the end of the track, a per-tick volume update, advancing the
+   playing period **without releasing** the previous one, and releasing the
+   outgoing period once the fade completes;
+4. `PlayerAudioFadeControl` computes both volumes per tick from the selected
+   curve and applies them to the renderers via `MSG_SET_VOLUME`.
+
+The fade start is positional: the last N seconds of the track, where N is the
+configured duration.
+
+---
+
+## Building the fork
+
+CI (`.github/workflows/build-aars.yml`) runs the crossfade unit tests, builds 11
+modules into a maven repository and publishes it as a zip archive attached to the
+GitHub Release `v<version>`:
 
 ```
 media3-common, media3-common-ktx, media3-container, media3-database,
@@ -164,17 +169,26 @@ media3-datasource, media3-decoder, media3-extractor, media3-exoplayer,
 media3-exoplayer-hls, media3-session, media3-ui
 ```
 
-Версия задаётся **в двух местах, и они обязаны совпадать**:
+The version is defined **in two places, and they must match**:
 
-- `constants.gradle` → `releaseVersion` — версия артефактов;
-- `.github/workflows/build-aars.yml` → `RELEASE_VERSION` — имя релиза и архива.
+- `constants.gradle` → `releaseVersion` — the artifact version;
+- `.github/workflows/build-aars.yml` → `RELEASE_VERSION` — the release and
+  archive name.
 
-Если поднять только одну, релиз соберётся под именем старой версии, а артефакты
-внутри будут новой — подключение сломается с ошибкой «зависимость не найдена».
-Так уже случалось, см. `lmg19` в истории версий.
+Bumping only one of them produces a release named after the old version holding
+artifacts of the new one, and consumers fail with "dependency not found". This
+already happened once — see `lmg19` in the version history.
 
-Локальная сборка:
+Local build:
 
 ```bash
 ./gradlew publishAllPublicationsToLocalRepository
+```
+
+Running the tests:
+
+```bash
+./gradlew :lib-exoplayer:testReleaseUnitTest \
+  --tests 'androidx.media3.exoplayer.PlayerAudioFadeControlCurvesTest' \
+  --tests 'androidx.media3.exoplayer.CrossfadeConfigurationTest'
 ```

@@ -1,127 +1,131 @@
-# История версий форка
+# Fork version history
 
-Формат версии: `1.5.1-lmgN`, где `1.5.1` — базовая версия апстрима.
-Актуальная — **1.5.1-lmg28**.
+*[Русская версия](CHANGELOG.LMG.ru.md)*
+
+Version format: `1.5.1-lmgN`, where `1.5.1` is the upstream base version.
+Current: **1.5.1-lmg28**.
 
 ## 1.5.1-lmg28
-- Подкасты и аудиокниги больше не сводятся: свод осмыслен только для музыки, речь
-  при наложении превращается в кашу. Тип берётся из метаданных элемента; если тип
-  не заявлен, поведение прежнее.
-- Появились тесты на форму кривых и на параметры свода. Форма кривой дважды была
-  источником регрессий, которые ловились только на слух (свод «короче» заданного,
-  провал громкости в начале следующего трека) — теперь эти свойства проверяются
-  сборкой. Тесты гоняются в CI перед публикацией.
+- Podcasts and audiobooks are no longer crossfaded: overlapping speech turns it
+  into mush. The type is taken from the item metadata; when no type is declared,
+  behaviour is unchanged.
+- Added tests for curve shapes and crossfade settings. Curve shape caused two
+  regressions that could only be caught by ear (fade shorter than configured, and
+  a volume dip at the start of the next track) — those properties are now checked
+  by the build. Tests run in CI before publishing.
 
 ## 1.5.1-lmg27
-- Параметры свода переехали со статического холдера на сам плеер:
-  `ExoPlayer.setCrossfadeConfiguration(...)`. Раньше настройки были общими на весь
-  процесс — два плеера в одном приложении делили одни значения. `CrossfadeConfig`
-  остался только тумблером отладочного лога.
-- Длительность свода хранится в микросекундах вместо целых секунд: раньше 7500 мс
-  превращались в 7 c, и дробные значения из рецептов терялись.
+- Crossfade settings moved from a static holder onto the player itself:
+  `ExoPlayer.setCrossfadeConfiguration(...)`. They used to be process-wide, so two
+  players in one app shared the same values. `CrossfadeConfig` is now only the
+  verbose logging toggle.
+- Fade duration is stored in microseconds instead of whole seconds: 7500 ms used
+  to collapse to 7 s, losing fractional values from recipes.
 
 ## 1.5.1-lmg26
-Подробный лог свода выключен по умолчанию и включается через
-`CrossfadeConfig.setDebugLogging(true)`. Раньше движок писал уровни громкости на
-каждом тике — несколько строк в секунду в обычной работе. Всегда пишутся только
-аномалии: сторож зависшего свода и ошибки. Уровень `Log.e` сохранён намеренно —
-R8 вырезает `Log.d`/`Log.v` в релизной сборке.
+Verbose crossfade logging is off by default and enabled via
+`CrossfadeConfig.setDebugLogging(true)`. The engine used to log volume levels on
+every tick — several lines per second during normal playback. Only anomalies are
+always logged: the stuck-fade watchdog and errors. The `Log.e` level is kept
+deliberately — R8 strips `Log.d`/`Log.v` in release builds.
 
 ## 1.5.1-lmg25
-Свод завершается и по исчерпанию окна фейда, а не только по уровню громкости.
-Порог завершения («уходящий тише 0.05») зависит от формы кривой: у экспоненты он
-достигался к 93 % окна — задолго до конца трека, у равной мощности (lmg23) —
-только к 99.75 %, поэтому фаза свода не закрывалась. После смены играющего
-периода входящий трек оставался с недокрученной громкостью, и звук затухал в
-начале песни. Входящий рендерер теперь доводится до полной громкости сразу при
-завершении свода, не дожидаясь освобождения уходящего периода.
+The fade now also completes when the fade window elapses, not only by volume
+level. The completion threshold ("outgoing quieter than 0.05") depends on the
+curve: with an exponential curve it was reached by 93% of the window — well
+before the end of the track — while with constant power (lmg23) only by 99.75%,
+so the fade phase never closed. After the playing period advanced, the incoming
+track was left at a reduced volume and the sound dipped at the start of the song.
+The incoming renderer is now brought to full volume immediately on completion,
+without waiting for the outgoing period to be released.
 
 ## 1.5.1-lmg24
-Артефакты публикуются под группой `com.liquidmusicglass.media3` вместо
-`androidx.media3`. Gradle больше не может подставить оригинал вместо форка при
-разрешении версий. Java-пакеты остались прежними — см. `NOTICE.md`.
+Artifacts are published under the `com.liquidmusicglass.media3` group instead of
+`androidx.media3`. Gradle can no longer resolve the original in place of the fork.
+Java packages are unchanged — see `NOTICE.md`.
 
 ## 1.5.1-lmg23
-Кривая громкости по умолчанию — **равная мощность** в обе стороны. Прежние
-логарифм/экспонента роняли уходящий трек до 41 % громкости уже к середине окна
-и до 23 % к 70 %, поэтому свод на 12 c слышался как 6–7: длительность была
-честной, а слышимое перекрытие — вдвое короче. При равной мощности на середине
-оба трека звучат на 71 %, суммарная громкость не проваливается.
+The default volume curve is **constant power** in both directions. The previous
+logarithmic/exponential pair dropped the outgoing track to 41% of its volume by
+the middle of the window and to 23% by 70%, so a 12 s fade was heard as 6–7: the
+duration was honest, the audible overlap was half of it. With constant power both
+tracks sit at 71% at the midpoint and total loudness never dips.
 
 ## 1.5.1-lmg22
-- Соседние треки одного альбома больше не сводятся: совпадает альбом и номер
-  диска, а номер трека идёт следующим — переход остаётся встык.
-- Точка входа в следующий трек (`entryOffsetMs`) наконец читается движком:
-  входящий трек может начинаться со смещения. Применяется только при обычном
-  старте трека, при перемотке позиция не трогается.
+- Consecutive tracks of the same album are no longer crossfaded: same album title
+  and disc number with the track number following means the transition is meant to
+  be gapless.
+- The entry offset into the next track (`entryOffsetMs`) is finally honoured by
+  the engine: the incoming track can start from an offset. It only applies on a
+  normal track start; seeking positions are left alone.
 
 ## 1.5.1-lmg21
-Свод сверен с эталонным поведением и приведён к нему:
-- откат ошибочной правки нормировки времени в нарастании: с ней входящий трек
-  шёл с нулевой громкостью весь свод;
-- коэффициент кривизны берётся по типу кривой, а не единый для всех;
-- пара допускается к своду, только если трек вдвое длиннее свода; трек с
-  неизвестной длительностью больше не проходит — на нём разваливается
-  арифметика затухания;
-- длительность сравнивается в одних единицах и не переприменяется на каждом
-  тике.
+The fade was compared against the reference behaviour and aligned with it:
+- reverted an incorrect change to the time normalisation of the fade-in: with it,
+  the incoming track played at zero volume for the whole fade;
+- the curve coefficient is taken per curve type instead of one value for all;
+- a pair is eligible only if the track is at least twice the fade duration; tracks
+  with unknown duration no longer qualify — the fade-out maths falls apart on them;
+- duration is compared in consistent units and is no longer reapplied every tick.
 
 ## 1.5.1-lmg19
-Технический выпуск. Версию артефактов подняли в `constants.gradle`, а имя
-релиза в workflow — нет: релиз `lmg18` оказался перезаписан артефактами `lmg19`,
-и подключение сломалось. Поднимать нужно обе.
+Housekeeping release. The artifact version was bumped in `constants.gradle` but
+not the release name in the workflow: release `lmg18` ended up overwritten with
+`lmg19` artifacts and consumers broke. Both must be bumped.
 
 ## 1.5.1-lmg18
-Фаза свода больше не откатывается назад после точки пересечения. Из-за отката
-входящий трек глушился в собственном начале — «музыка стихает и пропадает».
+The fade phase no longer rolls back after the crossing point. The rollback muted
+the incoming track at its own beginning — "the music fades out and disappears".
 
 ## 1.5.1-lmg17
-Инвариант громкости: вне свода все рендереры возвращаются к полной громкости.
-Раньше приглушённый рендерер мог остаться таким и трек играл немым.
+Gain invariant: outside a fade every renderer returns to full volume. A ducked
+renderer could otherwise stay that way and the track played silent.
 
 ## 1.5.1-lmg16
-Убран фиксированный запасной свод в 6 c: без заданных параметров свода не
-происходит вовсе.
+Removed the fixed 6 s fallback fade: without configured parameters no fade happens
+at all.
 
 ## 1.5.1-lmg15
-Исправлена пропажа звука после паузы и перемотки: после свода трек играет на
-втором рендерере, и запуск рендереров это не учитывал.
+Fixed silence after pause and seek: after a fade the track plays on the second
+renderer, which starting the renderers did not account for.
 
 ## 1.5.1-lmg14
-Осмысленное сопоставление типа перехода с кривой громкости (тип перехода — это
-семантика, а не индекс кривой).
+Meaningful mapping from transition type to volume curve (the transition type is
+semantics, not a curve index).
 
 ## 1.5.1-lmg13
-Мост «приложение → движок» (`CrossfadeConfig`) вместо зашитых 6 секунд.
+An application-to-engine bridge (`CrossfadeConfig`) instead of a hardcoded 6
+seconds.
 
 ## 1.5.1-lmg12
-Исправлен сбой на передаче воспроизведения: событие разрыва позиции должно
-сообщаться всегда, а не только для последнего периода.
+Fixed a crash on playback handoff: the position discontinuity event must always be
+reported, not only for the last period.
 
 ## 1.5.1-lmg11
-Найдена причина зависания музыки за несколько секунд до конца трека: часы
-плеера считали включение второго аудио-рендерера ошибкой и бросали исключение.
+Found the cause of playback freezing a few seconds before the end of a track: the
+player clock treated enabling a second audio renderer as an error and threw.
 
 ## 1.5.1-lmg10
-Исправлено отсутствие перекрытия: входящий период начинался после конца
-уходящего. Добавлен сторож зависшего свода.
+Fixed the missing overlap: the incoming period started after the outgoing one had
+ended. Added the stuck-fade watchdog.
 
 ## 1.5.1-lmg9
-Безусловная диагностика свода в логе.
+Unconditional crossfade diagnostics in the log.
 
 ## 1.5.1-lmg8
-Откат к обычному переходу, если второй рендерер не включился.
+Fall back to a normal transition if the second renderer did not enable.
 
 ## 1.5.1-lmg7
-Взвод свода и позиционный гейт: свод начинается за N секунд до конца трека.
+Fade arming and the positional gate: the fade starts N seconds before the end of
+the track.
 
 ## 1.5.1-lmg5 … lmg6
-Реализация управления фейдом и первое включение свода.
+Fade control implementation and the first time the fade was switched on.
 
 ## 1.5.1-lmg2 … lmg4
-Каркас: контракт управления фейдом, индекс рендерера у периода, связка с ядром
-плеера. Свод по умолчанию выключен.
+Scaffolding: the fade control contract, the renderer index on a period, wiring
+into the player core. Crossfade off by default.
 
 ## 1.5.1-lmg1
-База форка: сборка и публикация AAR, уникальная версия, без demo-приложений и
-тяжёлых тестовых ассетов.
+Fork baseline: building and publishing AARs, a unique version, without demo apps
+and heavy test assets.
