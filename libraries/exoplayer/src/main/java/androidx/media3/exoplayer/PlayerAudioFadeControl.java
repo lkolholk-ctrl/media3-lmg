@@ -738,7 +738,7 @@ import java.util.HashMap;
 
   // ── Геттеры/состояние (Apple 1:1) ──
   @Override
-  public int getCrossFadeDuration() {
+  public long getCrossFadeDurationUs() {
     return this.crossFadeDurationUs;
   }
 

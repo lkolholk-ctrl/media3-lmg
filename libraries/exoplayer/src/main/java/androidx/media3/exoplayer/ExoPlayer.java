@@ -471,11 +471,6 @@ public interface ExoPlayer extends Player {
   @UnstableApi
   class CrossfadeConfiguration {
 
-    /** Кроссфейд выключен: треки переключаются встык. */
-    public static final CrossfadeConfiguration DEFAULT =
-        new CrossfadeConfiguration(
-            /* durationUs= */ 0L, /* curveType= */ CURVE_DEFAULT, /* entryOffsetUs= */ 0L);
-
     /** Форма кривой по умолчанию (равная мощность). */
     public static final int CURVE_DEFAULT = -1;
 
@@ -487,6 +482,11 @@ public interface ExoPlayer extends Player {
 
     /** Линейная: ритм не «плывёт». */
     public static final int CURVE_LINEAR = 2;
+
+    /** Кроссфейд выключен: треки переключаются встык. */
+    public static final CrossfadeConfiguration DEFAULT =
+        new CrossfadeConfiguration(
+            /* durationUs= */ 0L, /* curveType= */ CURVE_DEFAULT, /* entryOffsetUs= */ 0L);
 
     /** Длительность свода в микросекундах; 0 — свода не будет. */
     public final long durationUs;

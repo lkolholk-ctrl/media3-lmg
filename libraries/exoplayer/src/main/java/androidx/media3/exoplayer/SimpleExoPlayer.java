@@ -999,6 +999,18 @@ public class SimpleExoPlayer extends BasePlayer
   }
 
   @Override
+  public void setCrossfadeConfiguration(CrossfadeConfiguration crossfadeConfiguration) {
+    blockUntilConstructorFinished();
+    player.setCrossfadeConfiguration(crossfadeConfiguration);
+  }
+
+  @Override
+  public CrossfadeConfiguration getCrossfadeConfiguration() {
+    blockUntilConstructorFinished();
+    return player.getCrossfadeConfiguration();
+  }
+
+  @Override
   public PreloadConfiguration getPreloadConfiguration() {
     blockUntilConstructorFinished();
     return player.getPreloadConfiguration();
