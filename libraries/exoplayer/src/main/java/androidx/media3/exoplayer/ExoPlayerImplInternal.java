@@ -2600,7 +2600,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
         break;
     }
     if (curve == null) {
-      return; // дефолт Apple: fade-in LOGARITHMIC / fade-out EXPONENTIAL
+      return; // дефолт: equal-power в обе стороны (см. PlayerAudioFadeControl)
     }
     long durationUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
     audioFadeControl.setFadeAudioEffect(
