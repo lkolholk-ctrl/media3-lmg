@@ -540,11 +540,33 @@ import java.util.HashMap;
       }
       boolean isEnded = renderers[fadeOutPeriodHolder.getRendererIdx()].isEnded();
       boolean hasReadStreamToEnd = renderers[fadeOutPeriodHolder.getRendererIdx()].hasReadStreamToEnd();
+      // Завершение по уровням зависит от формы кривой: экспонента опускается ниже
+      // 0.05 уже к 93% окна, а равная мощность — только к 99.75%, то есть до конца
+      // трека фаза не закрывалась. Тогда после смены играющего периода входящий
+      // трек оставался с недокрученной громкостью — «затухание в начале песни».
+      // Поэтому свод завершаем и по исчерпанию самого окна фейда.
+      MediaPeriodInfo outInfo = fadeOutPeriodHolder.info;
+      boolean fadeWindowElapsed =
+          outInfo.durationUs != C.TIME_UNSET
+              && fadeOutPeriodHolder.toPeriodTime(fadeOutPositionUs)
+                  >= outInfo.startPositionUs + outInfo.durationUs - 100_000L;
       if ((this.fadeOutLevel < 0.05d && this.fadeInLevel > 0.95d)
+          || fadeWindowElapsed
           || (hasReadStreamToEnd && isEnded)) {
         Log.e(
             TAG,
-            "doCrossFade() complete. EOS: " + hasReadStreamToEnd + ", isEnded: " + isEnded);
+            "doCrossFade() complete. EOS: "
+                + hasReadStreamToEnd
+                + ", isEnded: "
+                + isEnded
+                + ", windowElapsed: "
+                + fadeWindowElapsed
+                + ", fadeInLevel: "
+                + this.fadeInLevel);
+        // Входящий трек мог остаться на 0.99: доводим до полной громкости здесь,
+        // не дожидаясь освобождения уходящего периода.
+        setVolume(fadeInPeriodHolder.getRendererIdx(), MAX_VOLUME);
+        this.fadeInLevel = MAX_VOLUME;
         this.fadePhase = FadePhase.COMPLETED;
       }
     }
