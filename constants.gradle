@@ -14,7 +14,7 @@
 project.ext {
     // LMG-fork: уникальная версия, чтобы не коллизить со стоковым media3 1.5.1
     // в кэше Gradle (иначе app мог бы подхватить оригинал по тому же GAV).
-    releaseVersion = '1.5.1-lmg23'
+    releaseVersion = '1.5.1-lmg24'
     releaseVersionCode = 1_005_001_3_01
     minSdkVersion = 21
     // See https://developer.android.com/training/cars/media/automotive-os#automotive-module

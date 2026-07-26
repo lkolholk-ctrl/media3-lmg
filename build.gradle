@@ -39,5 +39,5 @@ allprojects {
         }
         buildDir = "${externalBuildDir}/${project.name}"
     }
-    group = 'androidx.media3'
+    group = 'com.liquidmusicglass.media3'
 }
