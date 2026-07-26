@@ -21,7 +21,9 @@ Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE
 |---|---|
 | `libraries/exoplayer/src/main/java/androidx/media3/exoplayer/AudioFadeControl.java` | **Новый файл.** Контракт управления фейдом: типы кривых, фазы свода, описание перехода. |
 | `.../exoplayer/PlayerAudioFadeControl.java` | **Новый файл.** Реализация: расчёт уровней громкости по кривым, тик свода, условия допуска пары треков, восстановление громкости. |
-| `.../exoplayer/CrossfadeConfig.java` | **Новый файл.** Статический мост «приложение → движок»: тумблер, длительность, кривая, точка входа в следующий трек. |
+| `.../exoplayer/CrossfadeConfig.java` | **Новый файл.** Тумблер отладочного лога свода. |
+| `.../exoplayer/ExoPlayer.java` | Добавлены `CrossfadeConfiguration` и методы `setCrossfadeConfiguration`/`getCrossfadeConfiguration`. |
+| `.../exoplayer/ExoPlayerImpl.java` | Хранение параметров свода и передача их в цикл воспроизведения. |
 | `.../exoplayer/ExoPlayerImplInternal.java` | Хуки свода в цикле воспроизведения: взвод, тик, освобождение уходящего периода, назначение рендереров, сторож зависания, пропуск свода между соседними треками альбома. |
 | `.../exoplayer/MediaPeriodHolder.java` | Индекс рендерера, на котором играет период, и ссылка на предыдущий период. |
 | `.../exoplayer/MediaPeriodQueue.java` | Смена играющего периода без освобождения предыдущего (нужно для наложения) и точка входа в следующий трек. |

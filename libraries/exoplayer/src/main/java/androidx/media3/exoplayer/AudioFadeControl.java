@@ -115,13 +115,19 @@ package androidx.media3.exoplayer;
 
   // ── Конфигурация (из UI/сервиса) ──
   void setCrossFadeState(int crossFadeState); // 0=AUTOMATIC, 1=MANUAL, 2=OFF
-  void setCrossFadeDuration(int crossFadeDurationSeconds); // 1..12
+  /**
+   * Длительность свода в микросекундах.
+   *
+   * Раньше принимались целые секунды, из-за чего 7500 мс превращались в 7 c —
+   * дробные значения из рецептов терялись.
+   */
+  void setCrossFadeDurationUs(long crossFadeDurationUs);
 
   void setFadeAudioEffect(FadeType fadeType, AudioFadeTransition transition);
 
   int getCrossFadeState();
 
-  int getCrossFadeDuration();
+  long getCrossFadeDurationUs();
 
   boolean isCrossFadeEnabled();
 

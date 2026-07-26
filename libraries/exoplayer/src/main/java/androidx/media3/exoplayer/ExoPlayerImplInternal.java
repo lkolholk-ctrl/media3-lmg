@@ -163,6 +163,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private static final int MSG_UPDATE_MEDIA_SOURCES_WITH_MEDIA_ITEMS = 27;
   private static final int MSG_SET_PRELOAD_CONFIGURATION = 28;
   private static final int MSG_PREPARE = 29;
+  private static final int MSG_SET_CROSSFADE_CONFIGURATION = 30;
 
   private static final long BUFFERING_MAXIMUM_INTERVAL_MS =
       Util.usToMs(Renderer.DEFAULT_DURATION_TO_PROGRESS_US);
@@ -328,7 +329,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     this.audioFadeControl.setRepeatMode(repeatMode);
     // Длительность приходит из рецепта модели при каждом взводе (окно 5–30 c).
     // Здесь только стартовое значение; без рецепта свод вообще не армится.
-    this.audioFadeControl.setCrossFadeDuration((int) (CrossfadeConfig.getXfadeMs() / 1000L));
+    this.audioFadeControl.setCrossFadeDurationUs(crossfadeConfiguration.durationUs);
     this.shouldStartCrossFade = false;
     this.shouldDisplayFadeInMetadata = false;
     // Кроссфейд ВКЛЮЧЁН (MANUAL 6c) для теста модели Apple (advance-without-releasing).
@@ -428,6 +429,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
   public void setPreloadConfiguration(PreloadConfiguration preloadConfiguration) {
     handler.obtainMessage(MSG_SET_PRELOAD_CONFIGURATION, preloadConfiguration).sendToTarget();
+  }
+
+  public void setCrossfadeConfiguration(ExoPlayer.CrossfadeConfiguration crossfadeConfiguration) {
+    handler.obtainMessage(MSG_SET_CROSSFADE_CONFIGURATION, crossfadeConfiguration).sendToTarget();
   }
 
   public void seekTo(Timeline timeline, int windowIndex, long positionUs) {
@@ -616,6 +621,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
           break;
         case MSG_SET_PRELOAD_CONFIGURATION:
           setPreloadConfigurationInternal((PreloadConfiguration) msg.obj);
+          break;
+        case MSG_SET_CROSSFADE_CONFIGURATION:
+          setCrossfadeConfigurationInternal((ExoPlayer.CrossfadeConfiguration) msg.obj);
           break;
         case MSG_DO_SOME_WORK:
           doSomeWork();
@@ -2363,6 +2371,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
    * роль играет areSequentialItems, которому доступны метаданные трека; здесь
    * берём их из MediaItem окна по periodUid.
    */
+  /**
+   * Параметры свода этого плеера. Раньше жили в статическом холдере, то есть были
+   * общими на весь процесс — два плеера в одном приложении делили одни настройки.
+   */
+  private ExoPlayer.CrossfadeConfiguration crossfadeConfiguration =
+      ExoPlayer.CrossfadeConfiguration.DEFAULT;
+
+  private void setCrossfadeConfigurationInternal(
+      ExoPlayer.CrossfadeConfiguration crossfadeConfiguration) {
+    this.crossfadeConfiguration = crossfadeConfiguration;
+    audioFadeControl.setCrossFadeDurationUs(crossfadeConfiguration.durationUs);
+    queue.setCrossfadeEntryOffsetUs(crossfadeConfiguration.entryOffsetUs);
+  }
+
   /** Отладочный лог свода: молчит, пока не включён CrossfadeConfig.setDebugLogging. */
   private static void logXfade(String message) {
     if (CrossfadeConfig.isDebugLogging()) {
@@ -2436,8 +2458,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     // обычное переключение). Фиксированного фолбэка на N секунд нет.
     if (playing == null
         || !audioFadeControl.isCrossFadeEnabled()
-        || !CrossfadeConfig.isEnabled()
-        || !CrossfadeConfig.isFromModel()) {
+        || !crossfadeConfiguration.isEnabled()) {
       return;
     }
     // WATCHDOG: страховка от «музыка встала». Если фейд идёт дольше, чем
@@ -2445,7 +2466,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     // т.п.) — принудительно сбрасываем фейд, снимаем гейты и возвращаем полную
     // громкость. Хуже кроссфейда только тишина.
     if (audioFadeControl.isCrossFadeInProgress()) {
-      long fadeLimitMs = (long) audioFadeControl.getCrossFadeDuration() * 1000L + 3000L;
+      long fadeLimitMs = audioFadeControl.getCrossFadeDurationUs() / 1000L + 3000L;
       if (fadeStartedAtMs != C.TIME_UNSET && clock.elapsedRealtime() - fadeStartedAtMs > fadeLimitMs) {
         Log.e(TAG, "xfade WATCHDOG: fade stuck > " + fadeLimitMs + "ms → force reset");
         // Сначала гасим и выключаем fade-in рендерер: reset() вернул бы ОБОИМ
@@ -2487,13 +2508,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
       // Рецепт модели применяем ДО расчёта окна арма: длительность свода и кривая
       // приходят на каждую пару треков отдельно (AutoMix), поэтому читаем их здесь,
       // а не один раз в конструкторе.
-      int recipeXfadeSec = (int) (CrossfadeConfig.getXfadeMs() / 1000L);
-      if (audioFadeControl.getCrossFadeDuration() != recipeXfadeSec) {
-        audioFadeControl.setCrossFadeDuration(recipeXfadeSec);
+      if (audioFadeControl.getCrossFadeDurationUs() != crossfadeConfiguration.durationUs) {
+        audioFadeControl.setCrossFadeDurationUs(crossfadeConfiguration.durationUs);
       }
       applyRecipeCurveIfAny();
       long durationUs = playing.info.durationUs;
-      long fadeUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
+      long fadeUs = audioFadeControl.getCrossFadeDurationUs();
       boolean nearEnd =
           durationUs != C.TIME_UNSET && (durationUs - playbackInfo.positionUs) <= fadeUs;
       if (nearEnd && next != null && areSequentialAlbumTracks(playing, next)) {
@@ -2579,7 +2599,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
    * диапазона — оставляем дефолт Apple (fade-in LOGARITHMIC / fade-out EXPONENTIAL).
    */
   private void applyRecipeCurveIfAny() {
-    int type = CrossfadeConfig.getCurveType();
+    int type = crossfadeConfiguration.curveType;
     // ВАЖНО: transitionType модели — это СЕМАНТИКА перехода (0=smooth, 1=energy,
     // 2=beat_match, 3=hard_cut, 4=filter_sweep, 5=echo_out), а НЕ индекс кривой
     // громкости. Поэтому мапим осмысленно, а не values()[type]:
@@ -2606,7 +2626,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     if (curve == null) {
       return; // дефолт: equal-power в обе стороны (см. PlayerAudioFadeControl)
     }
-    long durationUs = (long) audioFadeControl.getCrossFadeDuration() * 1_000_000L;
+    long durationUs = audioFadeControl.getCrossFadeDurationUs();
     audioFadeControl.setFadeAudioEffect(
         AudioFadeControl.FadeType.FADE_IN,
         new AudioFadeControl.AudioFadeTransition(curve, 0L, durationUs));

@@ -15,6 +15,8 @@
  */
 package androidx.media3.exoplayer;
 
+import static java.lang.Math.max;
+
 import static androidx.annotation.RestrictTo.Scope.LIBRARY_GROUP;
 import static androidx.media3.common.util.Assertions.checkArgument;
 import static androidx.media3.common.util.Assertions.checkNotNull;
@@ -462,6 +464,70 @@ public interface ExoPlayer extends Player {
      */
     public PreloadConfiguration(long targetPreloadDurationUs) {
       this.targetPreloadDurationUs = targetPreloadDurationUs;
+    }
+  }
+
+  /** Настройки кроссфейда между соседними элементами плейлиста. */
+  @UnstableApi
+  class CrossfadeConfiguration {
+
+    /** Кроссфейд выключен: треки переключаются встык. */
+    public static final CrossfadeConfiguration DEFAULT =
+        new CrossfadeConfiguration(
+            /* durationUs= */ 0L, /* curveType= */ CURVE_DEFAULT, /* entryOffsetUs= */ 0L);
+
+    /** Форма кривой по умолчанию (равная мощность). */
+    public static final int CURVE_DEFAULT = -1;
+
+    /** Равная мощность: суммарная громкость по ходу свода не проваливается. */
+    public static final int CURVE_CONSTANT_POWER = 0;
+
+    /** Экспонента: уходящий трек держится дольше, входящий вступает резче. */
+    public static final int CURVE_EXPONENTIAL = 1;
+
+    /** Линейная: ритм не «плывёт». */
+    public static final int CURVE_LINEAR = 2;
+
+    /** Длительность свода в микросекундах; 0 — свода не будет. */
+    public final long durationUs;
+
+    /** Форма кривой громкости: одна из констант {@code CURVE_*}. */
+    public final int curveType;
+
+    /** Смещение, с которого начинать следующий трек (мкс); 0 — с начала. */
+    public final long entryOffsetUs;
+
+    public CrossfadeConfiguration(long durationUs, int curveType, long entryOffsetUs) {
+      this.durationUs = max(0L, durationUs);
+      this.curveType = curveType;
+      this.entryOffsetUs = max(0L, entryOffsetUs);
+    }
+
+    /** Свод включён, если задана ненулевая длительность. */
+    public boolean isEnabled() {
+      return durationUs > 0L;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof CrossfadeConfiguration)) {
+        return false;
+      }
+      CrossfadeConfiguration other = (CrossfadeConfiguration) o;
+      return durationUs == other.durationUs
+          && curveType == other.curveType
+          && entryOffsetUs == other.entryOffsetUs;
+    }
+
+    @Override
+    public int hashCode() {
+      int result = (int) (durationUs ^ (durationUs >>> 32));
+      result = 31 * result + curveType;
+      result = 31 * result + (int) (entryOffsetUs ^ (entryOffsetUs >>> 32));
+      return result;
     }
   }
 
@@ -1661,6 +1727,20 @@ public interface ExoPlayer extends Player {
   /** Returns the {@linkplain PreloadConfiguration preload configuration}. */
   @UnstableApi
   PreloadConfiguration getPreloadConfiguration();
+
+  /**
+   * Задаёт параметры кроссфейда для этого плеера.
+   *
+   * <p>Кроссфейд — наложение уходящего и входящего трека с плавным переходом
+   * громкости. Настройка применяется сразу, в том числе к текущему треку: свод
+   * взводится в последние {@code durationUs} микросекунд трека.
+   */
+  @UnstableApi
+  void setCrossfadeConfiguration(CrossfadeConfiguration crossfadeConfiguration);
+
+  /** Текущие параметры кроссфейда. */
+  @UnstableApi
+  CrossfadeConfiguration getCrossfadeConfiguration();
 
   /**
    * {@inheritDoc}

@@ -996,20 +996,18 @@ import java.util.List;
     // смещения (пропуск интро). Применяем только на честном старте нового окна —
     // при seek/продолжении позиция уже задана и трогать её нельзя.
     if (startPositionUs == 0 && contentPositionUs == C.TIME_UNSET && !periodId.isAd()) {
-      long entryOffsetUs = crossfadeEntryOffsetUs();
-      if (entryOffsetUs > 0) {
-        startPositionUs = entryOffsetUs;
+      if (crossfadeEntryOffsetUs > 0L) {
+        startPositionUs = crossfadeEntryOffsetUs;
       }
     }
     return getMediaPeriodInfo(timeline, periodId, contentPositionUs, startPositionUs);
   }
 
   /** Смещение входа в следующий трек, мкс; 0 — начинать с начала. */
-  private static long crossfadeEntryOffsetUs() {
-    if (!CrossfadeConfig.isEnabled() || !CrossfadeConfig.isFromModel()) {
-      return 0L;
-    }
-    return CrossfadeConfig.getEntryOffsetMs() * 1000L;
+  private long crossfadeEntryOffsetUs;
+
+  public void setCrossfadeEntryOffsetUs(long crossfadeEntryOffsetUs) {
+    this.crossfadeEntryOffsetUs = crossfadeEntryOffsetUs;
   }
 
   /**

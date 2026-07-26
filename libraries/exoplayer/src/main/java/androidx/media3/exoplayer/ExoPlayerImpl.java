@@ -194,6 +194,7 @@ import java.util.concurrent.TimeoutException;
   private SeekParameters seekParameters;
   private ShuffleOrder shuffleOrder;
   private PreloadConfiguration preloadConfiguration;
+  private CrossfadeConfiguration crossfadeConfiguration;
   private boolean pauseAtEndOfMediaItems;
   private Commands availableCommands;
   private MediaMetadata mediaMetadata;
@@ -298,6 +299,7 @@ import java.util.concurrent.TimeoutException;
       mediaSourceHolderSnapshots = new ArrayList<>();
       shuffleOrder = new ShuffleOrder.DefaultShuffleOrder(/* length= */ 0);
       preloadConfiguration = PreloadConfiguration.DEFAULT;
+      crossfadeConfiguration = CrossfadeConfiguration.DEFAULT;
       emptyTrackSelectorResult =
           new TrackSelectorResult(
               new RendererConfiguration[renderers.length],
@@ -892,6 +894,21 @@ import java.util.concurrent.TimeoutException;
   @Override
   public PreloadConfiguration getPreloadConfiguration() {
     return preloadConfiguration;
+  }
+
+  @Override
+  public void setCrossfadeConfiguration(CrossfadeConfiguration crossfadeConfiguration) {
+    verifyApplicationThread();
+    if (this.crossfadeConfiguration.equals(crossfadeConfiguration)) {
+      return;
+    }
+    this.crossfadeConfiguration = crossfadeConfiguration;
+    internalPlayer.setCrossfadeConfiguration(crossfadeConfiguration);
+  }
+
+  @Override
+  public CrossfadeConfiguration getCrossfadeConfiguration() {
+    return crossfadeConfiguration;
   }
 
   @Override

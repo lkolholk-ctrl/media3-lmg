@@ -60,7 +60,7 @@ import java.util.HashMap;
   private volatile boolean transitionDataAvailable = false;
 
   private int crossFadeState = 2; // OFF
-  private int crossFadeDuration; // секунды
+  private long crossFadeDurationUs;
   private FadePhase fadePhase = FadePhase.IDLE;
   private float crossingTimeUs = MIN_VOLUME; // всегда 0 в MANUAL (заполняется только композером)
   @Nullable private Boolean canFadeCached;
@@ -625,7 +625,7 @@ import java.util.HashMap;
     }
   }
 
-  // ── reset (Apple 1:1 + реинициализация durationUs через crossFadeDuration) ──
+  // ── reset (+ реинициализация длительности транзишенов) ──
   @Override
   public synchronized void reset() throws ExoPlaybackException {
     logDebug("reset()");
@@ -658,9 +658,9 @@ import java.util.HashMap;
     this.canFadeCached = null;
     // media3-адаптация: Apple после reset заново заполняет start/durationUs транзишенов через
     // композер (setAutomations). Композера нет → сами восстанавливаем durationUs из
-    // crossFadeDuration, иначе default-транзишены имеют durationUs=0 и следующий фейд сломается.
-    if (this.crossFadeDuration > 0) {
-      applyCrossFadeDurationToTransitions(this.crossFadeDuration);
+    // сохранённой длительности, иначе транзишены имеют durationUs=0 и фейд сломается.
+    if (this.crossFadeDurationUs > 0L) {
+      applyCrossFadeDurationToTransitions(this.crossFadeDurationUs);
     }
   }
 
@@ -675,13 +675,12 @@ import java.util.HashMap;
   // media3-адаптация: Apple setCrossFadeDuration лишь сохраняет поле (durationUs транзишенов
   // задаёт композер). Без композера мы обязаны здесь же залить durationUs в транзишены.
   @Override
-  public synchronized void setCrossFadeDuration(int crossFadeDuration) {
-    this.crossFadeDuration = crossFadeDuration;
-    applyCrossFadeDurationToTransitions(crossFadeDuration);
+  public synchronized void setCrossFadeDurationUs(long crossFadeDurationUs) {
+    this.crossFadeDurationUs = crossFadeDurationUs;
+    applyCrossFadeDurationToTransitions(crossFadeDurationUs);
   }
 
-  private void applyCrossFadeDurationToTransitions(int crossFadeDurationSeconds) {
-    long durationUs = (long) crossFadeDurationSeconds * US_PER_SECOND;
+  private void applyCrossFadeDurationToTransitions(long durationUs) {
     AudioFadeTransition in = transitionsMap.get(FadeType.FADE_IN);
     AudioFadeTransition out = transitionsMap.get(FadeType.FADE_OUT);
     if (in != null) {
@@ -740,7 +739,7 @@ import java.util.HashMap;
   // ── Геттеры/состояние (Apple 1:1) ──
   @Override
   public int getCrossFadeDuration() {
-    return this.crossFadeDuration;
+    return this.crossFadeDurationUs;
   }
 
   @Override

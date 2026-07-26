@@ -22,7 +22,7 @@
 **1. Скачать maven-репозиторий из релиза** (в CI — отдельным шагом):
 
 ```bash
-VER=1.5.1-lmg26
+VER=1.5.1-lmg27
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -53,10 +53,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg26")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg26")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg26")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg26")
+    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg27")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg27")
+    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg27")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg27")
     // при необходимости: media3-extractor, media3-exoplayer-hls,
     // media3-common-ktx, media3-datasource, media3-decoder,
     // media3-container, media3-database
@@ -69,36 +69,32 @@ dependencies {
 
 ## Использование кроссфейда
 
-Свод управляется статическим конфигом `androidx.media3.exoplayer.CrossfadeConfig`.
-Плеер читает его в момент взвода свода, поэтому параметры можно менять в любой
-момент до перехода.
+Параметры свода задаются на самом плеере — у каждого экземпляра свои:
 
 ```kotlin
-import androidx.media3.exoplayer.CrossfadeConfig
+import androidx.media3.exoplayer.ExoPlayer
 
-// Включить/выключить свод целиком.
-CrossfadeConfig.setEnabled(true)
-
-// Задать параметры перехода.
-CrossfadeConfig.applyRecipe(
-    /* crossfadeDurationMs = */ 9_000L,  // зажимается в [MIN_XFADE_MS, MAX_XFADE_MS] = [1 c, 12 c]
-    /* transitionType      = */ -1,      // -1 = кривая по умолчанию (равная мощность)
-    /* entryOffsetMsValue  = */ 0L       // с какой позиции начинать следующий трек
+player.setCrossfadeConfiguration(
+    ExoPlayer.CrossfadeConfiguration(
+        /* durationUs   = */ 9_000_000L,  // длительность свода; 0 — свод выключен
+        /* curveType    = */ ExoPlayer.CrossfadeConfiguration.CURVE_DEFAULT,
+        /* entryOffsetUs= */ 0L           // с какой позиции начинать следующий трек
+    )
 )
-
-// Убрать параметры: без них свода не будет — треки переключатся обычным образом.
-CrossfadeConfig.clearRecipe()
 ```
 
-`transitionType` задаёт форму кривой громкости:
+Настройка применяется сразу, в том числе к уже играющему треку: свод взводится в
+последние `durationUs` микросекунд трека. Чтобы выключить свод, задайте
+`durationUs = 0` или `CrossfadeConfiguration.DEFAULT`.
 
-| Значение | Кривая | Когда уместна |
+`curveType` задаёт форму кривой громкости:
+
+| Константа | Кривая | Когда уместна |
 |---|---|---|
-| `-1` | равная мощность (по умолчанию) | ровный свод: суммарная громкость не проваливается, перекрытие слышно всю длительность |
-| `0` | равная мощность | то же, явным указанием |
-| `1` | экспонента | уходящий держится дольше, входящий вступает резче |
-| `2` | линейная | ритм не «плывёт» |
-| прочие | по умолчанию | — |
+| `CURVE_DEFAULT` | равная мощность | ровный свод: суммарная громкость не проваливается, перекрытие слышно всю длительность |
+| `CURVE_CONSTANT_POWER` | равная мощность | то же, явным указанием |
+| `CURVE_EXPONENTIAL` | экспонента | уходящий держится дольше, входящий вступает резче |
+| `CURVE_LINEAR` | линейная | ритм не «плывёт» |
 
 ### Когда свода НЕ будет
 
