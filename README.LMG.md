@@ -22,7 +22,7 @@
 **1. Скачать maven-репозиторий из релиза** (в CI — отдельным шагом):
 
 ```bash
-VER=1.5.1-lmg24
+VER=1.5.1-lmg25
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -53,10 +53,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg24")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg24")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg24")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg24")
+    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg25")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg25")
+    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg25")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg25")
     // при необходимости: media3-extractor, media3-exoplayer-hls,
     // media3-common-ktx, media3-datasource, media3-decoder,
     // media3-container, media3-database
