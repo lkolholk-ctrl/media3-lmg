@@ -95,23 +95,35 @@ public class PlayerAudioFadeControlCurvesTest {
   }
 
   /**
-   * Порог завершения свода («уходящий тише 0.05») достигается у разных кривых в
-   * разные моменты: у экспоненты — задолго до конца окна, у равной мощности —
-   * практически в самом конце. Из-за этого свод переставал закрываться вовремя, и
-   * следующий трек начинался с недокрученной громкостью. Тест фиксирует факт,
-   * чтобы завершение свода не опиралось на один лишь уровень громкости.
+   * Экспонента и равная мощность ведут себя противоположно, и это слышно.
+   *
+   * <p>У экспоненты входящий трек на середине окна звучит всего на 0.24, тогда
+   * как уходящий уже упал до тех же 0.24: суммарная мощность в середине свода
+   * проваливается примерно до 0.12 вместо единицы — переход звучит как дырка, и
+   * заданная длительность воспринимается вдвое короче. У равной мощности сумма
+   * мощностей постоянна, поэтому она и стоит по умолчанию.
    */
   @Test
-  public void completionThreshold_dependsOnCurveShape() {
-    float exponentialAtHalf =
+  public void exponentialCurve_dipsInTheMiddle_constantPowerDoesNot() {
+    float exponentialIn =
         PlayerAudioFadeControl.fadeInCurveLevel(
             FadeEffectType.EXPONENTIAL, /* t= */ 0.5f, COEFFICIENT_EXPONENTIAL);
-    float constantPowerAtHalf =
+    float constantPowerIn =
         PlayerAudioFadeControl.fadeInCurveLevel(
             FadeEffectType.CONSTANT_POWER, /* t= */ 0.5f, COEFFICIENT_NONE);
-    // На середине окна экспонента уже почти вывела входящий трек на полную
-    // громкость, а равная мощность — только на 0.71.
-    assertThat(exponentialAtHalf).isGreaterThan(constantPowerAtHalf);
+    assertThat(exponentialIn).isLessThan(constantPowerIn);
+
+    // Уходящий трек в тот же момент: для обеих кривых это зеркальное значение.
+    float exponentialOut =
+        (float)
+            ((Math.pow(COEFFICIENT_EXPONENTIAL, 0.5d) - 1.0d) / (COEFFICIENT_EXPONENTIAL - 1.0d));
+    float constantPowerOut = (float) Math.sqrt(0.5d);
+
+    float exponentialPower = exponentialIn * exponentialIn + exponentialOut * exponentialOut;
+    float constantPowerTotal =
+        constantPowerIn * constantPowerIn + constantPowerOut * constantPowerOut;
+    assertThat(exponentialPower).isLessThan(0.3f);
+    assertThat(constantPowerTotal).isWithin(0.001f).of(1f);
   }
 
   private static double coefficientFor(FadeEffectType type) {
