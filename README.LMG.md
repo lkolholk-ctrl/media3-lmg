@@ -25,7 +25,7 @@ media3 instead of the fork.
 **1. Download the maven repository from a release** (a separate CI step):
 
 ```bash
-VER=1.5.1-lmg28
+VER=1.5.1-lmg29
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -57,10 +57,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg28")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg28")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg28")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg28")
+    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg29")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg29")
+    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg29")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg29")
     // if needed: media3-extractor, media3-exoplayer-hls, media3-common-ktx,
     // media3-datasource, media3-decoder, media3-container, media3-database
 }
@@ -94,10 +94,29 @@ crossfading off, pass `durationUs = 0` or `CrossfadeConfiguration.DEFAULT`.
 
 | Constant | Curve | When it fits |
 |---|---|---|
-| `CURVE_DEFAULT` | constant power | even fade: total loudness never dips, the overlap is audible for the whole duration |
-| `CURVE_CONSTANT_POWER` | constant power | the same, stated explicitly |
+| `CURVE_DEFAULT` | logarithmic in / exponential out | audible transition: the outgoing track drops while the incoming one rises |
+| `CURVE_CONSTANT_POWER` | constant power | even overlap: total power stays constant, but the transition is heard as both tracks playing at once |
 | `CURVE_EXPONENTIAL` | exponential | the outgoing track holds longer, the incoming one enters sharply |
 | `CURVE_LINEAR` | linear | keeps the beat steady |
+
+### Why these curves
+
+The default is a logarithmic fade-in with an exponential fade-out — the same pair
+the reference player uses. It produces an *audible transition*: the outgoing track
+noticeably drops while the incoming one rises.
+
+The obvious alternative, constant power, was the default in `lmg23`–`lmg28`. It is
+mathematically nicer: both tracks sit at 0.71 at the midpoint, so total power stays
+constant and loudness never dips. In practice listeners described it as "both
+tracks just play at full volume" — the crossfade is heard as an overlap rather than
+as a transition.
+
+The trade-off is real and worth stating plainly: with the default curves total
+power in the middle of the fade drops to roughly 0.12 instead of 1.0, i.e. the mix
+gets quieter halfway through. That dip is what made a 12-second fade feel like 6–7
+seconds. It is compensated by fade length rather than by curve shape — which is why
+the duration range goes up to 18 seconds. If you prefer the even overlap, pass
+`CURVE_CONSTANT_POWER` explicitly.
 
 ### When no crossfade happens
 

@@ -3,7 +3,16 @@
 *[Русская версия](CHANGELOG.LMG.ru.md)*
 
 Version format: `1.5.1-lmgN`, where `1.5.1` is the upstream base version.
-Current: **1.5.1-lmg28**.
+Current: **1.5.1-lmg29**.
+
+## 1.5.1-lmg29
+Default curves are back to logarithmic fade-in with exponential fade-out. Constant
+power (the default since lmg23) keeps total loudness flat, but listeners hear it as
+"both tracks playing at full volume" — an overlap rather than a transition. The
+known downside of the default pair is a dip in the middle of the fade (total power
+around 0.12 instead of 1.0); it is compensated by fade length, not by curve shape,
+which is why durations now go up to 18 seconds. Pass `CURVE_CONSTANT_POWER`
+explicitly for the even overlap. See "Why these curves" in the README.
 
 ## 1.5.1-lmg28
 - Podcasts and audiobooks are no longer crossfaded: overlapping speech turns it

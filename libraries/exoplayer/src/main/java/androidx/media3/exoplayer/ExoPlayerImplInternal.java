@@ -2647,7 +2647,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
         break;
     }
     if (curve == null) {
-      return; // дефолт: equal-power в обе стороны (см. PlayerAudioFadeControl)
+      return; // дефолт: логарифм на вход, экспонента на выход (см. PlayerAudioFadeControl)
     }
     long durationUs = audioFadeControl.getCrossFadeDurationUs();
     audioFadeControl.setFadeAudioEffect(

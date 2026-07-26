@@ -24,7 +24,7 @@
 **1. Скачать maven-репозиторий из релиза** (в CI — отдельным шагом):
 
 ```bash
-VER=1.5.1-lmg28
+VER=1.5.1-lmg29
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -55,10 +55,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg28")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg28")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg28")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg28")
+    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg29")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg29")
+    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg29")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg29")
     // при необходимости: media3-extractor, media3-exoplayer-hls,
     // media3-common-ktx, media3-datasource, media3-decoder,
     // media3-container, media3-database
@@ -94,9 +94,28 @@ player.setCrossfadeConfiguration(
 | Константа | Кривая | Когда уместна |
 |---|---|---|
 | `CURVE_DEFAULT` | равная мощность | ровный свод: суммарная громкость не проваливается, перекрытие слышно всю длительность |
-| `CURVE_CONSTANT_POWER` | равная мощность | то же, явным указанием |
+| `CURVE_CONSTANT_POWER` | равная мощность | ровное перекрытие: суммарная мощность постоянна, но на слух играют оба сразу |
 | `CURVE_EXPONENTIAL` | экспонента | уходящий держится дольше, входящий вступает резче |
 | `CURVE_LINEAR` | линейная | ритм не «плывёт» |
+
+### Почему такие кривые
+
+По умолчанию — логарифм на нарастание и экспонента на затухание, та же пара, что
+у эталонного плеера. Она даёт *слышимый переход*: громкость уходящего заметно
+убывает, а входящего — прибавляется.
+
+Очевидная альтернатива, равная мощность, стояла по умолчанию в `lmg23`–`lmg28`.
+Математически она аккуратнее: на середине оба трека звучат на 0.71, суммарная
+мощность постоянна, громкость нигде не проваливается. На слух же это описывают
+как «оба трека просто играют на полной громкости» — свод воспринимается как
+наложение, а не как переход.
+
+Цена решения реальна, и её стоит назвать прямо: с кривыми по умолчанию суммарная
+мощность в середине свода падает примерно до 0.12 вместо 1.0 — то есть в середине
+перехода звук становится тише. Именно этот провал делал 12-секундный свод похожим
+на 6–7 секунд. Компенсируется он длительностью, а не формой кривой — поэтому
+диапазон настройки поднят до 18 секунд. Если нужен ровный свод без провала,
+задайте `CURVE_CONSTANT_POWER` явно.
 
 ### Когда свода НЕ будет
 

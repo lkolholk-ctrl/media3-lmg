@@ -74,13 +74,14 @@ import java.util.HashMap;
     // Дефолт-кривые (как в Apple reset() и по ТЗ): fade-in LOGARITHMIC, fade-out EXPONENTIAL.
     // Примечание: Apple-конструктор кладёт new AudioFadeTransition() (LINEAR) и полагается
     // на композер; у нас композера нет, поэтому сразу ставим LOG/EXP (совпадает с reset()).
-    // Кривая равной мощности в обе стороны. Оригинальные логарифм/экспонента
-    // роняют уходящий трек до ~1/4 громкости уже к середине окна, поэтому свод
-    // на 12 c слышится как 6-7: длительность честная, а слышимое перекрытие вдвое
-    // короче. С equal-power на середине оба трека звучат на 0.71 (сумма мощностей
-    // постоянна) — перекрытие слышно всю заданную длительность.
-    transitionsMap.put(FadeType.FADE_IN, new AudioFadeTransition(FadeEffectType.CONSTANT_POWER));
-    transitionsMap.put(FadeType.FADE_OUT, new AudioFadeTransition(FadeEffectType.CONSTANT_POWER));
+    // Логарифм на нарастание, экспонента на затухание — слышимый переход, а не
+    // наложение. Равная мощность (была по умолчанию в lmg23-lmg28) держит оба
+    // трека на 0.71 в середине окна: суммарная громкость не проваливается, но на
+    // слух это «играют оба сразу», перехода не слышно. Здесь громкость уходящего
+    // заметно убывает, а входящего — нарастает; провал в середине компенсируется
+    // длительностью свода, которую задаёт пользователь.
+    transitionsMap.put(FadeType.FADE_IN, new AudioFadeTransition(FadeEffectType.LOGARITHMIC));
+    transitionsMap.put(FadeType.FADE_OUT, new AudioFadeTransition(FadeEffectType.EXPONENTIAL));
   }
 
   /** media3-адаптация: прокидывается из ExoPlayerImplInternal (замена MediaPlayer.getRepeatMode). */
@@ -641,13 +642,14 @@ import java.util.HashMap;
     this.fadeInLevel = MIN_VOLUME;
     this.isComputeTransitionJobExecuted = false;
     this.transitionDataAvailable = false;
-    // Кривая равной мощности в обе стороны. Оригинальные логарифм/экспонента
-    // роняют уходящий трек до ~1/4 громкости уже к середине окна, поэтому свод
-    // на 12 c слышится как 6-7: длительность честная, а слышимое перекрытие вдвое
-    // короче. С equal-power на середине оба трека звучат на 0.71 (сумма мощностей
-    // постоянна) — перекрытие слышно всю заданную длительность.
-    transitionsMap.put(FadeType.FADE_IN, new AudioFadeTransition(FadeEffectType.CONSTANT_POWER));
-    transitionsMap.put(FadeType.FADE_OUT, new AudioFadeTransition(FadeEffectType.CONSTANT_POWER));
+    // Логарифм на нарастание, экспонента на затухание — слышимый переход, а не
+    // наложение. Равная мощность (была по умолчанию в lmg23-lmg28) держит оба
+    // трека на 0.71 в середине окна: суммарная громкость не проваливается, но на
+    // слух это «играют оба сразу», перехода не слышно. Здесь громкость уходящего
+    // заметно убывает, а входящего — нарастает; провал в середине компенсируется
+    // длительностью свода, которую задаёт пользователь.
+    transitionsMap.put(FadeType.FADE_IN, new AudioFadeTransition(FadeEffectType.LOGARITHMIC));
+    transitionsMap.put(FadeType.FADE_OUT, new AudioFadeTransition(FadeEffectType.EXPONENTIAL));
     this.fadePhase = FadePhase.IDLE;
     this.crossingTimeUs = MIN_VOLUME;
     this.canFadeCached = null;
