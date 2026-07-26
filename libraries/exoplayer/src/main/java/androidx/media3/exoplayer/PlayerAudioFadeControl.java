@@ -298,7 +298,7 @@ import java.util.HashMap;
         try {
           renderers[i].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(MAX_VOLUME));
           lastVolume.put(i, MAX_VOLUME);
-          Log.e(TAG, "xfade GAIN RESTORE idx=" + i + " was=" + v + " reason=" + reason);
+          logDebug("xfade GAIN RESTORE idx=" + i + " was=" + v + " reason=" + reason);
         } catch (Exception e) {
           Log.e(TAG, "xfade gain restore failed idx=" + i, e);
         }
@@ -398,7 +398,7 @@ import java.util.HashMap;
       @Nullable MediaPeriodHolder fadeOutPeriodHolder,
       @Nullable MediaPeriodHolder fadeInPeriodHolder)
       throws ExoPlaybackException {
-    Log.e(TAG, "prepareForCrossFade()");
+    logDebug("prepareForCrossFade()");
     if (fadeOutPeriodHolder == null || fadeInPeriodHolder == null) {
       return;
     }
@@ -470,7 +470,7 @@ import java.util.HashMap;
     if (this.fadePhase != FadePhase.IDLE) {
       this.fadePhase = FadePhase.FADE_OUT;
     }
-    Log.e(TAG, "maybeStartCrossFading() ARMED phase=" + this.fadePhase);
+    logDebug("maybeStartCrossFading() ARMED phase=" + this.fadePhase);
     return this.fadePhase != FadePhase.IDLE;
   }
 
@@ -514,8 +514,7 @@ import java.util.HashMap;
     if (this.fadePhase != FadePhase.IDLE && !this.paused) {
       this.fadeInLevel = doFadeIn(fadeInPeriodHolder, fadeOutPositionUs);
       this.fadeOutLevel = doFadeOut(fadeOutPeriodHolder, fadeOutPositionUs);
-      Log.e(
-          TAG,
+      logDebug(
           "doCrossFade() fadeOutLevel: "
               + this.fadeOutLevel
               + " fadeInLevel: "
@@ -553,8 +552,7 @@ import java.util.HashMap;
       if ((this.fadeOutLevel < 0.05d && this.fadeInLevel > 0.95d)
           || fadeWindowElapsed
           || (hasReadStreamToEnd && isEnded)) {
-        Log.e(
-            TAG,
+        logDebug(
             "doCrossFade() complete. EOS: "
                 + hasReadStreamToEnd
                 + ", isEnded: "
@@ -630,7 +628,7 @@ import java.util.HashMap;
   // ── reset (Apple 1:1 + реинициализация durationUs через crossFadeDuration) ──
   @Override
   public synchronized void reset() throws ExoPlaybackException {
-    Log.e(TAG, "reset()");
+    logDebug("reset()");
     try {
       if (this.fadeInPeriodHolder != null) {
         setVolume(this.fadeInPeriodHolder.getRendererIdx(), MAX_VOLUME);
@@ -663,6 +661,13 @@ import java.util.HashMap;
     // crossFadeDuration, иначе default-транзишены имеют durationUs=0 и следующий фейд сломается.
     if (this.crossFadeDuration > 0) {
       applyCrossFadeDurationToTransitions(this.crossFadeDuration);
+    }
+  }
+
+  /** Отладочный лог свода: молчит, пока не включён CrossfadeConfig.setDebugLogging. */
+  private static void logDebug(String message) {
+    if (CrossfadeConfig.isDebugLogging()) {
+      logDebug(message);
     }
   }
 
@@ -725,8 +730,7 @@ import java.util.HashMap;
                 (transition.getDurationUs() / MILLIS_PER_SECOND) / ((long) NUM_MESSAGES),
                 MAX_MS_BETWEEN_MESSAGES),
             MIN_MS_BETWEEN_MESSAGES);
-    Log.e(
-        TAG,
+    logDebug(
         "setFadeAudioEffect() new duration: "
             + transition.getDurationUs()
             + " msBetweenMsg: "

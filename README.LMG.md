@@ -22,7 +22,7 @@
 **1. Скачать maven-репозиторий из релиза** (в CI — отдельным шагом):
 
 ```bash
-VER=1.5.1-lmg25
+VER=1.5.1-lmg26
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -53,10 +53,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg25")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg25")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg25")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg25")
+    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg26")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg26")
+    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg26")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg26")
     // при необходимости: media3-extractor, media3-exoplayer-hls,
     // media3-common-ktx, media3-datasource, media3-decoder,
     // media3-container, media3-database
@@ -114,8 +114,18 @@ CrossfadeConfig.clearRecipe()
 
 ### Диагностика
 
-Движок пишет ключевые события через `Log.e` — они переживают вырезание логов в
-релизной сборке. Фильтр — `xfade`:
+По умолчанию движок молчит: пишутся только аномалии (сторож зависшего свода и
+ошибки). Подробный лог включается тумблером:
+
+```kotlin
+CrossfadeConfig.setDebugLogging(true)   // уровни громкости на каждом тике, взвод, завершение
+```
+
+Логи идут через `Log.e` намеренно: R8 в релизной сборке вырезает `Log.d`/`Log.v`,
+и диагностика исчезала бы именно там, где она нужна. Поэтому громкость лога
+регулируется этим флагом, а не уровнем логирования.
+
+Фильтр — `xfade`:
 
 - `xfade ARM: remainingUs=… nextPrepared=…` — свод взведён: видно, за сколько до
   конца трека это случилось и был ли готов следующий период;

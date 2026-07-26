@@ -342,8 +342,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     for (int i = 0; i < renderers.length; i++) {
       rendererTypes.append(i).append(':').append(renderers[i].getTrackType()).append(' ');
     }
-    Log.e(
-        TAG,
+    logXfade(
         "xfade INIT: renderers="
             + renderers.length
             + " types=["
@@ -2364,6 +2363,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
    * роль играет areSequentialItems, которому доступны метаданные трека; здесь
    * берём их из MediaItem окна по periodUid.
    */
+  /** Отладочный лог свода: молчит, пока не включён CrossfadeConfig.setDebugLogging. */
+  private static void logXfade(String message) {
+    if (CrossfadeConfig.isDebugLogging()) {
+      Log.e(TAG, message);
+    }
+  }
+
   private boolean areSequentialAlbumTracks(
       @Nullable MediaPeriodHolder outHolder, @Nullable MediaPeriodHolder inHolder) {
     if (outHolder == null || inHolder == null) {
@@ -2408,8 +2414,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     long nowDiagMs = clock.elapsedRealtime();
     if (nowDiagMs - lastFadeDiagLogMs > 2000) {
       lastFadeDiagLogMs = nowDiagMs;
-      Log.e(
-          TAG,
+      logXfade(
           "xfade DIAG: enabled="
               + audioFadeControl.isCrossFadeEnabled()
               + " state="
@@ -2492,15 +2497,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
       boolean nearEnd =
           durationUs != C.TIME_UNSET && (durationUs - playbackInfo.positionUs) <= fadeUs;
       if (nearEnd && next != null && areSequentialAlbumTracks(playing, next)) {
-        Log.e(TAG, "xfade SKIP: соседние треки альбома — переход встык");
+        logXfade("xfade SKIP: соседние треки альбома — переход встык");
       }
       if (nearEnd
           && next != null
           && !areSequentialAlbumTracks(playing, next)
           && audioFadeControl.canFadeBetweenPeriods(playing, next)
           && audioFadeControl.maybeStartCrossFading(playing, next, rendererPositionUs)) {
-        Log.e(
-            TAG,
+        logXfade(
             "xfade ARM: remainingUs="
                 + (durationUs - playbackInfo.positionUs)
                 + " playingIdx="
@@ -2515,7 +2519,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
           fadeStartedAtMs = clock.elapsedRealtime(); // watchdog
           audioFadeControl.prepareForCrossFade(playing, next);
         } else {
-          Log.e(TAG, "xfade ARM ROLLBACK: fadeIn renderer not enabled → gapless");
+          logXfade("xfade ARM ROLLBACK: fadeIn renderer not enabled → gapless");
           audioFadeControl.reset();
           audioFadeControl.restoreFullGain("ARM_ROLLBACK");
         }
@@ -2646,12 +2650,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
       throws ExoPlaybackException {
     @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
     if (playing == null || fadeInHolder == null || fadeInHolder == playing) {
-      Log.e(TAG, "xfade: updateFadeInPeriodRenderers FAIL playing/fadeIn null/same");
+      logXfade("xfade: updateFadeInPeriodRenderers FAIL playing/fadeIn null/same");
       return false;
     }
     if (primaryAudioRendererIndex == C.INDEX_UNSET
         || secondaryAudioRendererIndex == C.INDEX_UNSET) {
-      Log.e(TAG, "xfade: FAIL no two audio renderers");
+      logXfade("xfade: FAIL no two audio renderers");
       return false;
     }
     // Свободный аудио-рендерер = не тот, на котором играет уходящий playing (чередование).
@@ -2667,8 +2671,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     @Nullable RendererConfiguration config = tsr.rendererConfigurations[sourceAudioIdx];
     @Nullable ExoTrackSelection selection = tsr.selections[sourceAudioIdx];
     if (audioStream == null || config == null || selection == null) {
-      Log.e(
-          TAG,
+      logXfade(
           "xfade: FAIL fadeIn not renderable — stream="
               + (audioStream != null)
               + " config="
@@ -2725,8 +2728,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
       }
     }
     fadeInHolder.setRendererIdx(freeIdx);
-    Log.e(
-        TAG,
+    logXfade(
         "xfade: fadeIn renderer ENABLED freeIdx="
             + freeIdx
             + " state="

@@ -31,6 +31,7 @@ public final class CrossfadeConfig {
   private static volatile long entryOffsetMs = 0L;
   private static volatile int curveType = -1; // -1 = кривая по умолчанию (log-in/exp-out)
   private static volatile boolean fromModel = false;
+  private static volatile boolean debugLogging = false;
 
   private CrossfadeConfig() {}
 
@@ -80,6 +81,22 @@ public final class CrossfadeConfig {
 
   public static int getCurveType() {
     return curveType;
+  }
+
+  /**
+   * Подробный лог свода: уровни громкости на каждом тике, взвод, завершение.
+   *
+   * По умолчанию выключен — движок пишет только аномалии (сторож зависания и
+   * ошибки). Логи идут через {@code Log.e} намеренно: R8 в релизной сборке
+   * вырезает {@code Log.d}/{@code Log.v}, и диагностика исчезала бы именно там,
+   * где нужна. Поэтому громкость лога регулируется этим флагом, а не уровнем.
+   */
+  public static void setDebugLogging(boolean value) {
+    debugLogging = value;
+  }
+
+  public static boolean isDebugLogging() {
+    return debugLogging;
   }
 
   /** true, если параметры свода заданы (без них движок переключает треки как обычно). */
