@@ -1,3 +1,10 @@
+> **Это модифицированная версия AndroidX Media3 (1.5.1), а не оригинал.**
+> Добавлен кроссфейд между треками; артефакты публикуются под группой
+> `com.liquidmusicglass.media3`.
+> Подключение и использование — [`README.LMG.md`](README.LMG.md),
+> перечень изменений — [`NOTICE.md`](NOTICE.md),
+> история версий — [`CHANGELOG.LMG.md`](CHANGELOG.LMG.md).
+
 # AndroidX Media
 
 AndroidX Media is a collection of libraries for implementing media use cases on
