@@ -125,6 +125,12 @@ package androidx.media3.exoplayer;
 
   void setFadeAudioEffect(FadeType fadeType, AudioFadeTransition transition);
 
+  /** Текущая форма кривой для этого направления свода. */
+  FadeEffectType getFadeEffectType(FadeType fadeType);
+
+  /** Текущая длительность окна свода для этого направления, мкс. */
+  long getFadeDurationUs(FadeType fadeType);
+
   int getCrossFadeState();
 
   long getCrossFadeDurationUs();

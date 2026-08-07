@@ -73,9 +73,9 @@ public class PlayerAudioFadeControlCurvesTest {
   }
 
   /**
-   * Кривая равной мощности — та, что стоит по умолчанию: на середине свода оба
-   * трека звучат примерно на 0.71, а сумма мощностей постоянна. Именно это делает
-   * перекрытие слышимым всю заданную длительность.
+   * Кривая равной мощности (передаётся как {@code CURVE_CONSTANT_POWER}): на
+   * середине свода оба трека звучат примерно на 0.71, а сумма мощностей
+   * постоянна. Именно это делает перекрытие ровным всю заданную длительность.
    */
   @Test
   public void constantPowerCurve_keepsTotalPowerConstant() {
@@ -100,8 +100,9 @@ public class PlayerAudioFadeControlCurvesTest {
    * <p>У экспоненты входящий трек на середине окна звучит всего на 0.24, тогда
    * как уходящий уже упал до тех же 0.24: суммарная мощность в середине свода
    * проваливается примерно до 0.12 вместо единицы — переход звучит как дырка, и
-   * заданная длительность воспринимается вдвое короче. У равной мощности сумма
-   * мощностей постоянна, поэтому она и стоит по умолчанию.
+   * заданная длительность воспринимается вдвое короче. Это осознанный компромисс
+   * дефолта (см. «Why these curves» в README): провал компенсируется длительностью
+   * свода. У равной мощности сумма мощностей постоянна — её выбирают явно.
    */
   @Test
   public void exponentialCurve_dipsInTheMiddle_constantPowerDoesNot() {
@@ -136,5 +137,77 @@ public class PlayerAudioFadeControlCurvesTest {
       default:
         return COEFFICIENT_NONE;
     }
+  }
+
+  // ── Окно затухания: база отсчёта конца периода ──
+
+  private static final long FADE_US = 9_000_000L;
+
+  private static final long TRACK_US = 180_000_000L;
+
+  /** В начале окна затухания уходящий трек ещё на полной громкости (нормированное время = 1). */
+  @Test
+  public void fadeOutWindow_atStartOfFade_isFullVolume() {
+    float t =
+        PlayerAudioFadeControl.fadeOutTimeNormalized(
+            /* periodTimeUs= */ TRACK_US - FADE_US, TRACK_US, FADE_US);
+    assertThat(t).isWithin(0.001f).of(1f);
+  }
+
+  /** К концу трека нормированное время доходит до нуля — то есть трек затухает полностью. */
+  @Test
+  public void fadeOutWindow_atEndOfTrack_reachesZero() {
+    float t =
+        PlayerAudioFadeControl.fadeOutTimeNormalized(
+            /* periodTimeUs= */ TRACK_US, TRACK_US, FADE_US);
+    assertThat(t).isWithin(0.001f).of(0f);
+  }
+
+  /**
+   * Регрессия: конец периода — это {@code info.durationUs}, а не {@code startPositionUs +
+   * durationUs}.
+   *
+   * <p>Трек, в который вошли со смещением (точка входа {@code entryOffsetUs}), имеет
+   * ненулевой {@code startPositionUs}. Пока окно затухания считалось со сложением,
+   * оно уезжало за конец трека: к последней микросекунде нормированное время
+   * оставалось сильно больше нуля, то есть уходящий трек обрывался на слышимом
+   * уровне вместо тишины. Позиция внутри периода от {@code startPositionUs} не
+   * зависит, поэтому результат обязан быть тем же, что и для трека без смещения.
+   */
+  @Test
+  public void fadeOutWindow_withEntryOffset_stillReachesZeroAtEndOfTrack() {
+    // Трек той же длительности, но проигрывание началось с 30-й секунды.
+    long entryOffsetUs = 30_000_000L;
+    float atEnd =
+        PlayerAudioFadeControl.fadeOutTimeNormalized(
+            /* periodTimeUs= */ TRACK_US, TRACK_US, FADE_US);
+    float atEndWithOffsetBaseline =
+        PlayerAudioFadeControl.fadeOutTimeNormalized(
+            /* periodTimeUs= */ TRACK_US, TRACK_US + entryOffsetUs, FADE_US);
+    assertThat(atEnd).isWithin(0.001f).of(0f);
+    // Со старой (ошибочной) базой отсчёта в конце трека оставалось ~3.3 вместо 0.
+    assertThat(atEndWithOffsetBaseline).isGreaterThan(3f);
+  }
+
+  /** Нормированное время монотонно убывает по ходу трека. */
+  @Test
+  public void fadeOutWindow_decreasesMonotonically() {
+    float previous = Float.MAX_VALUE;
+    for (int step = 0; step <= 20; step++) {
+      long periodTimeUs = TRACK_US - FADE_US + (FADE_US * step) / 20L;
+      float t = PlayerAudioFadeControl.fadeOutTimeNormalized(periodTimeUs, TRACK_US, FADE_US);
+      assertThat(t).isLessThan(previous);
+      previous = t;
+    }
+  }
+
+  /** Нулевая длительность свода не должна давать деление на ноль. */
+  @Test
+  public void fadeOutWindow_zeroFadeDuration_isFullVolume() {
+    float t =
+        PlayerAudioFadeControl.fadeOutTimeNormalized(
+            /* periodTimeUs= */ TRACK_US, TRACK_US, /* fadeDurationUs= */ 0L);
+    assertThat(Float.isNaN(t)).isFalse();
+    assertThat(t).isEqualTo(1f);
   }
 }

@@ -402,6 +402,12 @@ import java.util.List;
       oldFrontPeriodWindowSequenceNumber = playing.info.id.windowSequenceNumber;
     }
     playing = playing.getNext();
+    // LMG-fork (crossfade): старый playing освобождён — обрываем back-link, иначе
+    // живой holder держит ссылку на released MediaPeriod (утечка буферов), а
+    // фейд-путь мог бы выставить уровни на освобождённый период.
+    if (playing != null) {
+      playing.setPrevious(null);
+    }
     notifyQueueUpdate();
     return playing;
   }
@@ -453,6 +459,8 @@ import java.util.List;
         removedReading = true;
       }
       mediaPeriodHolder.release();
+      // LMG-fork (crossfade): период освобождён — снимаем back-link на него.
+      mediaPeriodHolder.setPrevious(null);
       length--;
     }
     checkNotNull(loading).setNext(null);
@@ -499,6 +507,8 @@ import java.util.List;
     oldFrontPeriodWindowSequenceNumber = front.info.id.windowSequenceNumber;
     while (front != null) {
       front.release();
+      // LMG-fork (crossfade): рвём back-link, чтобы released-периоды не держали друг друга.
+      front.setPrevious(null);
       front = front.getNext();
     }
     playing = null;

@@ -164,6 +164,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
   private static final int MSG_SET_PRELOAD_CONFIGURATION = 28;
   private static final int MSG_PREPARE = 29;
   private static final int MSG_SET_CROSSFADE_CONFIGURATION = 30;
+  private static final int MSG_SET_PLAYER_VOLUME = 31;
 
   private static final long BUFFERING_MAXIMUM_INTERVAL_MS =
       Util.usToMs(Renderer.DEFAULT_DURATION_TO_PROGRESS_US);
@@ -327,8 +328,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
     this.secondaryAudioRendererIndex = secondAudio;
     this.audioFadeControl = new PlayerAudioFadeControl(renderers);
     this.audioFadeControl.setRepeatMode(repeatMode);
-    // Длительность приходит из рецепта модели при каждом взводе (окно 5–30 c).
-    // Здесь только стартовое значение; без рецепта свод вообще не армится.
+    // Длительность задаёт приложение через setCrossfadeConfiguration; сверху она не
+    // ограничивается, но свод не сработает на треке короче двух длительностей
+    // (см. isMediaPeriodReady). Здесь только стартовое значение: при durationUs = 0
+    // свод не армится вообще.
     this.audioFadeControl.setCrossFadeDurationUs(crossfadeConfiguration.durationUs);
     this.shouldStartCrossFade = false;
     this.shouldDisplayFadeInMetadata = false;
@@ -337,8 +340,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
     if (secondaryAudioRendererIndex != C.INDEX_UNSET) {
       this.audioFadeControl.setCrossFadeState(/* MANUAL= */ 1);
     }
-    // БЕЗУСЛОВНАЯ диагностика: выполняется всегда при создании плеера. Если этой
-    // строки нет в логе — значит играет НЕ наш форкнутый ExoPlayer.
+    // Диагностика состава рендереров: печатается при включённом
+    // CrossfadeConfig.setDebugLogging(true). Если строки нет в логе с включённым
+    // флагом — значит играет НЕ наш форкнутый ExoPlayer.
     StringBuilder rendererTypes = new StringBuilder();
     for (int i = 0; i < renderers.length; i++) {
       rendererTypes.append(i).append(':').append(renderers[i].getTrackType()).append(' ');
@@ -433,6 +437,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
   public void setCrossfadeConfiguration(ExoPlayer.CrossfadeConfiguration crossfadeConfiguration) {
     handler.obtainMessage(MSG_SET_CROSSFADE_CONFIGURATION, crossfadeConfiguration).sendToTarget();
+  }
+
+  /**
+   * LMG-fork (crossfade): сообщает движку текущую громкость плеера (уже с множителем
+   * аудиофокуса). Уровни свода — множитель поверх неё, иначе кроссфейд затирает
+   * {@code setVolume()} приложения и ducking.
+   */
+  public void setPlayerVolume(float volume) {
+    handler.obtainMessage(MSG_SET_PLAYER_VOLUME, Float.valueOf(volume)).sendToTarget();
   }
 
   public void seekTo(Timeline timeline, int windowIndex, long positionUs) {
@@ -624,6 +637,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
           break;
         case MSG_SET_CROSSFADE_CONFIGURATION:
           setCrossfadeConfigurationInternal((ExoPlayer.CrossfadeConfiguration) msg.obj);
+          break;
+        case MSG_SET_PLAYER_VOLUME:
+          audioFadeControl.setPlayerVolume((Float) msg.obj);
           break;
         case MSG_DO_SOME_WORK:
           doSomeWork();
@@ -1237,7 +1253,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
         // the next stream or is waiting for the next stream. This is to avoid getting stuck if
         // tracks in the current period have uneven durations and are still being read by another
         // renderer. See: https://github.com/google/ExoPlayer/issues/1874.
-        boolean isReadingAhead = playingPeriodHolder.sampleStreams[i] != renderer.getStream();
+        boolean isReadingAhead = expectedStreamFor(playingPeriodHolder, i) != renderer.getStream();
         boolean isWaitingForNextStream = !isReadingAhead && renderer.hasReadStreamToEnd();
         boolean allowsPlayback =
             isReadingAhead || isWaitingForNextStream || renderer.isReady() || renderer.isEnded();
@@ -1294,7 +1310,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
     if (playbackInfo.playbackState == Player.STATE_BUFFERING) {
       for (int i = 0; i < renderers.length; i++) {
         if (isRendererEnabled(renderers[i])
-            && renderers[i].getStream() == playingPeriodHolder.sampleStreams[i]) {
+            && renderers[i].getStream() == expectedStreamFor(playingPeriodHolder, i)) {
           maybeThrowRendererStreamError(/* rendererIndex= */ i);
         }
       }
@@ -2310,6 +2326,39 @@ import java.util.concurrent.atomic.AtomicBoolean;
     return maxReadPositionUs;
   }
 
+  /**
+   * LMG-fork (crossfade): поток, который для этого рендерера считается «текущим».
+   *
+   * <p>Штатно это {@code playingPeriodHolder.sampleStreams[rendererIndex]}. Но
+   * фейд-рендерер включается ВРУЧНУЮ ({@link #updateFadeInPeriodRenderers}) и в
+   * TrackSelectorResult играющего периода не входит, поэтому его ячейка в
+   * {@code sampleStreams} равна null (непустая ячейка бывает только у рендерера,
+   * выбранного трек-селектором — см. MediaPeriodHolder.selectTracks). Со стоковой
+   * формулой сравнение {@code null != renderer.getStream()} всегда истинно →
+   * рендерер считался «читающим вперёд» → {@code allowsPlayback} для него всегда
+   * true. После свода играющий трек живёт именно на таком рендерере, и плеер
+   * ПЕРЕСТАВАЛ замечать, что у него кончились данные: вместо честного перехода в
+   * BUFFERING звук просто пропадал на несколько секунд и возвращался с той же
+   * позиции.
+   *
+   * <p>Поэтому для периода, играющего на назначенном ему фейд-рендерере, берём
+   * поток из ячейки основного аудио-рендерера — там его положил трек-селектор.
+   */
+  @Nullable
+  private SampleStream expectedStreamFor(MediaPeriodHolder holder, int rendererIndex) {
+    @Nullable SampleStream stream = holder.sampleStreams[rendererIndex];
+    if (stream != null) {
+      return stream;
+    }
+    if (rendererIndex == holder.getRendererIdx()
+        && primaryAudioRendererIndex != C.INDEX_UNSET
+        && rendererIndex != primaryAudioRendererIndex
+        && renderers[rendererIndex].getTrackType() == C.TRACK_TYPE_AUDIO) {
+      return holder.sampleStreams[primaryAudioRendererIndex];
+    }
+    return null;
+  }
+
   private void updatePeriods() throws ExoPlaybackException {
     if (playbackInfo.timeline.isEmpty() || !mediaSourceList.isPrepared()) {
       // No periods available.
@@ -2650,6 +2699,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
       return; // дефолт: логарифм на вход, экспонента на выход (см. PlayerAudioFadeControl)
     }
     long durationUs = audioFadeControl.getCrossFadeDurationUs();
+    // Метод зовётся на каждом тике doSomeWork до арма свода. Пересобираем транзишены
+    // только при фактическом расхождении, иначе это две аллокации плюс перерасчёт
+    // троттлинга несколько раз в секунду на playback-потоке. Сверяемся с реальным
+    // состоянием фейд-контроля, а не с кэшем: reset() возвращает кривые к дефолту,
+    // и кэш бы рассинхронился.
+    if (audioFadeControl.getFadeEffectType(AudioFadeControl.FadeType.FADE_IN) == curve
+        && audioFadeControl.getFadeEffectType(AudioFadeControl.FadeType.FADE_OUT) == curve
+        && audioFadeControl.getFadeDurationUs(AudioFadeControl.FadeType.FADE_IN) == durationUs) {
+      return;
+    }
     audioFadeControl.setFadeAudioEffect(
         AudioFadeControl.FadeType.FADE_IN,
         new AudioFadeControl.AudioFadeTransition(curve, 0L, durationUs));
@@ -2674,6 +2733,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
     int outgoingIdx = previous.getRendererIdx();
     int playingIdx = playing.getRendererIdx();
     previous.release();
+    // LMG-fork (crossfade): уходящий период освобождён — рвём back-link, иначе
+    // ветка doCrossFade(playing.getPrevious(), ...) могла бы выставить уровни на
+    // released-период, а живой holder держал бы его буферы.
+    playing.setPrevious(null);
     if (outgoingIdx != C.INDEX_UNSET
         && outgoingIdx != playingIdx
         && isRendererEnabled(renderers[outgoingIdx])) {

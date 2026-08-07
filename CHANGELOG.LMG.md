@@ -3,7 +3,46 @@
 *[Русская версия](CHANGELOG.LMG.ru.md)*
 
 Version format: `1.5.1-lmgN`, where `1.5.1` is the upstream base version.
-Current: **1.5.1-lmg29**.
+Current: **1.5.1-lmg30**.
+
+## 1.5.1-lmg30
+Bug fixes, no new features.
+
+- **Playback could go silent for a few seconds and then resume on its own.** After a
+  crossfade the playing track lives on the second audio renderer, which is enabled
+  manually and is therefore absent from the playing period's `TrackSelectorResult` —
+  its `sampleStreams` slot is null. The stock readiness check compares that slot
+  against the renderer's stream, so `null != stream` always held, the renderer was
+  treated as "reading ahead" and its `allowsPlayback` was permanently true. The
+  player thus stopped noticing that the renderer had run out of data: instead of
+  entering BUFFERING it just went quiet and picked up later from the same position.
+  Stream errors were swallowed the same way while buffering.
+- **Verbose logging crashed the playback thread.** `logDebug` called itself instead
+  of `Log.e`, so `CrossfadeConfig.setDebugLogging(true)` killed playback with a
+  `StackOverflowError` on the first fade — the diagnostics documented in the README
+  were unusable. Introduced in lmg26.
+- **The crossfade no longer overrides player volume.** Fade levels are now a
+  multiplier on top of the player volume instead of absolute values, and the
+  end-of-fade restore returns that volume rather than a hard `1.0`. Previously one
+  crossfade left the deck at 100%: `ExoPlayer.setVolume()` had cached the old value,
+  so setting it again was a no-op, and ducking from audio focus (calls, navigation)
+  was wiped as well.
+- **The second audio renderer now honours `buildAudioSink()`.** It used to build a
+  raw `DefaultAudioSink`, bypassing the overridable factory method — so an app that
+  inserts its own `AudioProcessor` chain (equaliser, loudness normalisation,
+  effects) lost that chain for the incoming track until the outgoing period was
+  released. Note that `buildAudioSink()` is now called twice per player.
+- **End of period is `info.durationUs`, not `startPositionUs + durationUs`.** With
+  an entry offset (`entryOffsetUs`) the fade-out window ran past the end of the
+  track: the outgoing track was cut off at an audible level instead of silence, and
+  the "fade window elapsed" completion guard from lmg25 never fired. The window
+  maths is now a pure function covered by tests.
+- **No more dangling `previous` links.** The back-link to the outgoing period is
+  cleared on every release path, so a released `MediaPeriod` is no longer reachable
+  from a live holder (leaked buffers, and a path that could apply fade levels to a
+  released period).
+- Curve recipes are no longer rebuilt on every playback tick (two allocations plus a
+  throttle recalculation several times per second).
 
 ## 1.5.1-lmg29
 Default curves are back to logarithmic fade-in with exponential fade-out. Constant

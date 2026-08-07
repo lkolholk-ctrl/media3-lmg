@@ -191,15 +191,37 @@ import java.util.HashMap;
   }
 
   // ── doFadeOut (Apple 1:1; обе ветки сохранены, composer-ветка не исполняется) ──
+  /**
+   * Нормированное время затухания по позиции внутри периода: идёт 1 → 0 по ходу
+   * свода.
+   *
+   * <p>Вынесено в чистую функцию, потому что здесь дважды ошибались с базой
+   * отсчёта конца периода. Конец периода в media3 — это {@code info.durationUs}
+   * (эквивалент endPositionUs), а НЕ {@code startPositionUs + durationUs}: при
+   * входе в трек со смещением ({@code entryOffsetUs}) сложение уводило окно
+   * затухания за конец трека, и уходящий трек обрывался на слышимом уровне.
+   *
+   * @param periodTimeUs позиция внутри периода, мкс.
+   * @param periodDurationUs длительность (= конец) периода, мкс.
+   * @param fadeDurationUs длительность окна свода, мкс.
+   */
+  static float fadeOutTimeNormalized(
+      long periodTimeUs, long periodDurationUs, long fadeDurationUs) {
+    if (fadeDurationUs <= 0L) {
+      return MAX_VOLUME;
+    }
+    float numerator = (periodDurationUs - fadeDurationUs) - periodTimeUs;
+    return (numerator / fadeDurationUs) + MAX_VOLUME;
+  }
+
   private float doFadeOut(@Nullable MediaPeriodHolder fadeOutPeriodHolder, long rendererPositionUs)
       throws ExoPlaybackException {
-    float numerator;
-    long durationDenom;
     AudioFadeTransition audioFadeTransition = transitionsMap.get(FadeType.FADE_OUT);
     if (fadeOutPeriodHolder == null || audioFadeTransition == null) {
       return MIN_VOLUME;
     }
     MediaPeriodInfo mediaPeriodInfo = fadeOutPeriodHolder.info;
+    float fExp;
     if (getTransitionDataAvailable()) {
       // AUTOMATIC (composer) — не исполняется (transitionDataAvailable == false).
       long periodTime = fadeOutPeriodHolder.toPeriodTime(rendererPositionUs);
@@ -210,17 +232,17 @@ import java.util.HashMap;
         setVolume(fadeOutPeriodHolder.getRendererIdx(), MIN_VOLUME);
         return MIN_VOLUME;
       }
-      numerator = audioFadeTransition.getStartUs() - periodTime;
-      durationDenom = audioFadeTransition.getDurationUs();
+      float numerator = audioFadeTransition.getStartUs() - periodTime;
+      long durationDenom = audioFadeTransition.getDurationUs();
+      fExp = (numerator / durationDenom) + MAX_VOLUME; // x: 1→0 по ходу фейда
     } else {
       // MANUAL: фейд начинается за durationUs до конца периода.
-      numerator =
-          ((mediaPeriodInfo.startPositionUs + mediaPeriodInfo.durationUs)
-                  - audioFadeTransition.getDurationUs())
-              - fadeOutPeriodHolder.toPeriodTime(rendererPositionUs);
-      durationDenom = audioFadeTransition.getDurationUs();
+      fExp =
+          fadeOutTimeNormalized(
+              fadeOutPeriodHolder.toPeriodTime(rendererPositionUs),
+              mediaPeriodInfo.durationUs,
+              audioFadeTransition.getDurationUs());
     }
-    float fExp = (numerator / durationDenom) + MAX_VOLUME; // x: 1→0 по ходу фейда
     FadeEffectType effectType = audioFadeTransition.getEffectType();
     switch (effectType) {
       case LINEAR:
@@ -273,9 +295,35 @@ import java.util.HashMap;
   /** Последний выставленный гейн по индексу рендерера (для инварианта §6). */
   private final java.util.HashMap<Integer, Float> lastVolume = new java.util.HashMap<>();
 
+  /**
+   * Громкость плеера (уже с множителем аудиофокуса), на которую масштабируются
+   * уровни свода.
+   *
+   * <p>Свод раньше писал в рендерер АБСОЛЮТНЫЙ уровень 0..1 и по завершении
+   * возвращал жёсткую 1.0. Из-за этого один кроссфейд затирал и
+   * {@code ExoPlayer.setVolume()} (поле {@code volume} в ExoPlayerImpl оставалось
+   * прежним, поэтому повторная установка того же значения была no-op — громкость
+   * залипала на 100%), и ducking по аудиофокусу во время звонка или навигатора.
+   * Теперь уровни кривой — это МНОЖИТЕЛЬ поверх громкости плеера.
+   */
+  private volatile float playerVolume = MAX_VOLUME;
+
+  /** media3-адаптация: прокидывается из ExoPlayerImplInternal при смене громкости/фокуса. */
+  public void setPlayerVolume(float playerVolume) {
+    this.playerVolume = Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, playerVolume));
+  }
+
+  /**
+   * Ставит рендереру уровень свода, масштабированный на громкость плеера.
+   *
+   * <p>В {@link #lastVolume} кладётся НЕ масштабированное значение, а сам уровень
+   * кривой: инвариант «вне свода гейн не приглушён» — про фейд, а не про
+   * громкость, выставленную приложением.
+   */
   private void setVolume(int rendererIdx, float volume) throws ExoPlaybackException {
     if (rendererIdx >= 0 && rendererIdx < renderers.length) {
-      renderers[rendererIdx].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(volume));
+      renderers[rendererIdx].handleMessage(
+          Renderer.MSG_SET_VOLUME, Float.valueOf(volume * playerVolume));
       lastVolume.put(rendererIdx, volume);
     }
   }
@@ -292,7 +340,10 @@ import java.util.HashMap;
       Float v = lastVolume.get(i);
       if (v != null && v < MAX_VOLUME) {
         try {
-          renderers[i].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(MAX_VOLUME));
+          // Возвращаем ГРОМКОСТЬ ПЛЕЕРА, а не жёсткую 1.0: иначе свод затирал
+          // setVolume() приложения и duck по аудиофокусу — трек после перехода
+          // играл на 100% независимо от настроек.
+          renderers[i].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(playerVolume));
           lastVolume.put(i, MAX_VOLUME);
           logDebug("xfade GAIN RESTORE idx=" + i + " was=" + v + " reason=" + reason);
         } catch (Exception e) {
@@ -541,10 +592,13 @@ import java.util.HashMap;
       // трек оставался с недокрученной громкостью — «затухание в начале песни».
       // Поэтому свод завершаем и по исчерпанию самого окна фейда.
       MediaPeriodInfo outInfo = fadeOutPeriodHolder.info;
+      // Конец периода — info.durationUs (эквивалент endPositionUs), без сложения
+      // с startPositionUs: иначе при входе со смещением (entryOffsetUs) порог
+      // оказывался за концом трека и эта страховка не срабатывала никогда.
       boolean fadeWindowElapsed =
           outInfo.durationUs != C.TIME_UNSET
               && fadeOutPeriodHolder.toPeriodTime(fadeOutPositionUs)
-                  >= outInfo.startPositionUs + outInfo.durationUs - 100_000L;
+                  >= outInfo.durationUs - 100_000L;
       if ((this.fadeOutLevel < 0.05d && this.fadeInLevel > 0.95d)
           || fadeWindowElapsed
           || (hasReadStreamToEnd && isEnded)) {
@@ -664,7 +718,9 @@ import java.util.HashMap;
   /** Отладочный лог свода: молчит, пока не включён CrossfadeConfig.setDebugLogging. */
   private static void logDebug(String message) {
     if (CrossfadeConfig.isDebugLogging()) {
-      logDebug(message);
+      // Именно Log.e, а не logDebug: рекурсивный вызов здесь ронял playback-поток
+      // по StackOverflowError при включённом отладочном логе (см. lmg26).
+      Log.e(TAG, message);
     }
   }
 
@@ -734,6 +790,18 @@ import java.util.HashMap;
   }
 
   // ── Геттеры/состояние (Apple 1:1) ──
+  @Override
+  public synchronized FadeEffectType getFadeEffectType(FadeType fadeType) {
+    AudioFadeTransition transition = transitionsMap.get(fadeType);
+    return transition != null ? transition.getEffectType() : FadeEffectType.LINEAR;
+  }
+
+  @Override
+  public synchronized long getFadeDurationUs(FadeType fadeType) {
+    AudioFadeTransition transition = transitionsMap.get(fadeType);
+    return transition != null ? transition.getDurationUs() : 0L;
+  }
+
   @Override
   public long getCrossFadeDurationUs() {
     return this.crossFadeDurationUs;

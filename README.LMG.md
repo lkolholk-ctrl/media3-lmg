@@ -25,7 +25,7 @@ media3 instead of the fork.
 **1. Download the maven repository from a release** (a separate CI step):
 
 ```bash
-VER=1.5.1-lmg29
+VER=1.5.1-lmg30
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -57,10 +57,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg29")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg29")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg29")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg29")
+    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg30")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg30")
+    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg30")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg30")
     // if needed: media3-extractor, media3-exoplayer-hls, media3-common-ktx,
     // media3-datasource, media3-decoder, media3-container, media3-database
 }
@@ -124,7 +124,9 @@ the duration range goes up to 18 seconds. If you prefer the even overlap, pass
 - the next track is not prepared yet — the fade starts late and ends up shorter
   than configured; to avoid this, enable preloading:
   `player.setPreloadConfiguration(ExoPlayer.PreloadConfiguration(30_000_000L))`;
-- the track is shorter than twice the fade duration;
+- the track is shorter than twice the fade duration — note that the duration is
+  not capped from above, so an 18-second fade silently does nothing on tracks
+  shorter than 36 seconds;
 - the track duration is unknown;
 - the next track is the consecutive track of the same album (same album title and
   disc number, track number follows): such transitions are meant to be gapless;

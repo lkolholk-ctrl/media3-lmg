@@ -2796,6 +2796,10 @@ import java.util.concurrent.TimeoutException;
   private void sendVolumeToRenderers() {
     float scaledVolume = volume * audioFocusManager.getVolumeMultiplier();
     sendRendererMessage(TRACK_TYPE_AUDIO, MSG_SET_VOLUME, scaledVolume);
+    // LMG-fork (crossfade): уровни свода — множитель поверх громкости плеера.
+    // Без этого один кроссфейд затирал setVolume()/ducking, и трек оставался на
+    // 100% (повторная установка того же значения выше — no-op).
+    internalPlayer.setPlayerVolume(scaledVolume);
   }
 
   private void updatePlayWhenReady(

@@ -474,16 +474,28 @@ public class DefaultRenderersFactory implements RenderersFactory {
     // громкость каждого ramp'ится независимо. Вне кроссфейда трек-селектор его не
     // выбирает → рендерер отключён, свой AudioTrack не открывается (нулевая
     // стоимость). См. AudioFadeControl / ExoPlayerImplInternal.
-    MediaCodecAudioRenderer secondaryAudioRenderer =
-        new MediaCodecAudioRenderer(
-            context,
-            getCodecAdapterFactory(),
-            mediaCodecSelector,
-            enableDecoderFallback,
-            eventHandler,
-            eventListener,
-            new androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context).build());
-    out.add(secondaryAudioRenderer);
+    //
+    // Синк берём через buildAudioSink(), а НЕ через прямой
+    // new DefaultAudioSink.Builder(context).build(): подклассы переопределяют
+    // buildAudioSink(), чтобы вставить свои AudioProcessor'ы (эквалайзер,
+    // нормализация громкости, эффекты). При прямом создании второй рендерер
+    // играл БЕЗ этой цепочки — после свода трек звучал иначе, чем до него, а
+    // обработка, применённая приложением, молча исчезала.
+    @Nullable
+    AudioSink secondaryAudioSink =
+        buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams);
+    if (secondaryAudioSink != null) {
+      MediaCodecAudioRenderer secondaryAudioRenderer =
+          new MediaCodecAudioRenderer(
+              context,
+              getCodecAdapterFactory(),
+              mediaCodecSelector,
+              enableDecoderFallback,
+              eventHandler,
+              eventListener,
+              secondaryAudioSink);
+      out.add(secondaryAudioRenderer);
+    }
 
     if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) {
       return;
