@@ -2582,7 +2582,7 @@ public final class MediaPeriodQueueTest {
   }
 
   @Test
-  public void crossfadeVolumeChange_preservesSilentIncomingDeckAndRestoresPlayerVolume()
+  public void crossfadeReset_restoresPlayerVolume()
       throws Exception {
     setupTimelines(CONTENT_TIMELINE);
     MediaPeriodHolder outgoing = createCrossfadeAudioHolder();
@@ -2596,10 +2596,6 @@ public final class MediaPeriodQueueTest {
     org.mockito.Mockito.clearInvocations(first, second);
 
     control.setPlayerVolume(0.2f);
-    control.reapplyVolume();
-    org.mockito.Mockito.verify(first).handleMessage(Renderer.MSG_SET_VOLUME, 0.2f);
-    org.mockito.Mockito.verify(second).handleMessage(Renderer.MSG_SET_VOLUME, 0f);
-    org.mockito.Mockito.clearInvocations(first, second);
     control.reset();
     org.mockito.Mockito.verify(first).handleMessage(Renderer.MSG_SET_VOLUME, 0.2f);
     org.mockito.Mockito.verify(second).handleMessage(Renderer.MSG_SET_VOLUME, 0.2f);

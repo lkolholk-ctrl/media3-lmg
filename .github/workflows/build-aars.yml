@@ -99,7 +99,16 @@ jobs:
         run: |
           TAG="v${RELEASE_VERSION}"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; keeping its published assets unchanged."
+            PUBLISHED_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
+            if [ "$RELEASE_VERSION" = "1.11.0-lmg31" ] && [ "$PUBLISHED_SHA" = "91fe8407d493f089f039228c6496ac3249b43bf8" ]; then
+              # One-time correction requested for lmg31; run only after tests and AAR publishing.
+              gh release upload "$TAG" "media3-${RELEASE_VERSION}-m2.zip" --clobber
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+                -f sha="$GITHUB_SHA" -F force=true
+              gh release edit "$TAG" --notes "Media3 1.11.0, исправление lmg31: исходный контроллер и правила свода восстановлены из lmg30. Maven zip заменён после проверки на GitHub. Commit: $GITHUB_SHA. Требуется обновить локальную копию media3-m2."
+            else
+              echo "Release $TAG already exists; keeping its published assets unchanged."
+            fi
             exit 0
           fi
           gh release create "$TAG" \

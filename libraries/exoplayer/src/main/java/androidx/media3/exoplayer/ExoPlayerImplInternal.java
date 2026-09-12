@@ -226,7 +226,7 @@ import java.util.Objects;
   private final int secondaryAudioRendererIndex;
   private long lastFadeDiagLogMs;
   private long fadeStartedAtMs = C.TIME_UNSET;
-  private long fadePausedAtMs = C.TIME_UNSET;
+  private boolean fadeInOffsetShifted;
   // LMG-fork (crossfade): флаги машины состояний Apple. Порт ExoPlayerImplInternal.
   private boolean shouldStartCrossFade;
   private boolean shouldDisplayFadeInMetadata;
@@ -385,7 +385,7 @@ import java.util.Objects;
     }
     this.primaryAudioRendererIndex = firstAudio;
     this.secondaryAudioRendererIndex = secondAudio;
-    this.audioFadeControl = new PlayerAudioFadeControl(renderers, clock);
+    this.audioFadeControl = new PlayerAudioFadeControl(renderers);
     this.audioFadeControl.setRepeatMode(repeatMode);
     // Длительность задаёт приложение через setCrossfadeConfiguration; сверху она не
     // ограничивается, но свод не сработает на треке короче двух длительностей
@@ -531,7 +531,6 @@ import java.util.Objects;
   public void setCrossfadeConfiguration(ExoPlayer.CrossfadeConfiguration crossfadeConfiguration) {
     handler.obtainMessage(MSG_SET_CROSSFADE_CONFIGURATION, crossfadeConfiguration).sendToTarget();
   }
-
 
   public void seekTo(Timeline timeline, int windowIndex, long positionUs) {
     handler
@@ -1224,9 +1223,8 @@ import java.util.Objects;
     for (RendererHolder renderer : renderers) {
       renderer.setVolume(scaledVolume);
     }
-    // LMG: apply fade gains after Google updates player volume and audio-focus ducking.
+    // LMG: forward Google 1.11 playback-thread volume/focus to the original controller.
     audioFadeControl.setPlayerVolume(scaledVolume);
-    audioFadeControl.reapplyVolume();
   }
 
   private void setAudioSessionIdInternal(int audioSessionId) throws ExoPlaybackException {
@@ -1346,7 +1344,6 @@ import java.util.Objects;
 
   private void setRepeatModeInternal(@Player.RepeatMode int repeatMode)
       throws ExoPlaybackException {
-    cancelCrossfade("REPEAT_MODE");
     this.repeatMode = repeatMode;
     audioFadeControl.setRepeatMode(repeatMode);
     @MediaPeriodQueue.UpdatePeriodQueueResult
@@ -1361,7 +1358,6 @@ import java.util.Objects;
 
   private void setShuffleModeEnabledInternal(boolean shuffleModeEnabled)
       throws ExoPlaybackException {
-    cancelCrossfade("SHUFFLE_MODE");
     this.shuffleModeEnabled = shuffleModeEnabled;
     @MediaPeriodQueue.UpdatePeriodQueueResult
     int result = queue.updateShuffleModeEnabled(playbackInfo.timeline, shuffleModeEnabled);
@@ -1416,10 +1412,6 @@ import java.util.Objects;
     // (isRendererEnabled по TSR) его не поднимал — после паузы/перемотки звук
     // пропадал совсем. Поднимаем ещё и фактический рендерер playing-периода.
     int playingIdx = playingPeriodHolder.getRendererIdx();
-    if (fadePausedAtMs != C.TIME_UNSET && fadeStartedAtMs != C.TIME_UNSET) {
-      fadeStartedAtMs += clock.elapsedRealtime() - fadePausedAtMs;
-    }
-    fadePausedAtMs = C.TIME_UNSET;
     for (int i = 0; i < renderers.length; i++) {
       if (!trackSelectorResult.isRendererEnabled(i)
           && i != fadeInIdx && i != fadeOutIdx && i != playingIdx) {
@@ -1437,9 +1429,6 @@ import java.util.Objects;
     mediaClock.stop();
     for (RendererHolder rendererHolder : renderers) {
       rendererHolder.stop();
-    }
-    if (audioFadeControl.isCrossFadeInProgress() && fadePausedAtMs == C.TIME_UNSET) {
-      fadePausedAtMs = clock.elapsedRealtime();
     }
     // LMG-fork (crossfade): порт Apple stopRenderers — приостанавливаем fade-out при pause.
     if (audioFadeControl.isCrossFadeInProgress()) {
@@ -1793,7 +1782,13 @@ import java.util.Objects;
     }
     playbackInfoUpdate.incrementPendingOperationAcks(/* operationAcks= */ 1);
 
-    cancelCrossfade("SEEK");
+    // LMG-fork (crossfade), §8а: сброс фейда в начале seek (порт Apple seekToInternal —
+    // maybeReleaseFadeOutPeriod(true) + reset + флаги на всех exit-путях; семантически один раз здесь).
+    maybeReleaseFadeOutPeriod(/* force= */ true);
+    audioFadeControl.reset();
+    audioFadeControl.restoreFullGain("SEEK"); // §6: seek/skip посреди свода не оставляет немую деку
+    shouldStartCrossFade = false;
+    shouldDisplayFadeInMetadata = false;
 
     MediaPeriodId periodId;
     long periodPositionUs;
@@ -1944,7 +1939,6 @@ import java.util.Objects;
       boolean forceDisableRenderers,
       boolean forceBufferingState)
       throws ExoPlaybackException {
-    cancelCrossfade("INTERNAL_SEEK");
     stopRenderers();
     updateRebufferingState(/* isRebuffering= */ false, /* resetLastRebufferRealtimeMs= */ true);
     if (forceBufferingState || playbackInfo.playbackState == Player.STATE_READY) {
@@ -2211,8 +2205,6 @@ import java.util.Objects;
       }
     }
     enabledRendererCount = 0;
-    releaseDetachedCrossfadePeriod();
-    fadeStartedAtMs = C.TIME_UNSET;
 
     // LMG-fork (crossfade), §8а: сброс фейда (порт Apple resetInternal — audioFadeControl.reset()
     // после disable всех рендереров). resetInternal без throws → оборачиваем в try/catch.
@@ -2519,7 +2511,6 @@ import java.util.Objects;
   }
 
   private void reselectTracksInternal() throws ExoPlaybackException {
-    cancelCrossfade("TRACK_SELECTION");
     float playbackSpeed = mediaClock.getPlaybackParameters().speed;
     // Reselect tracks on each period in turn, until the selection changes.
     MediaPeriodHolder periodHolder = queue.getPlayingPeriod();
@@ -2712,9 +2703,6 @@ import java.util.Objects;
 
   private void handleMediaSourceListInfoRefreshed(Timeline timeline, boolean isSourceRefresh)
       throws ExoPlaybackException {
-    if (!timeline.equals(playbackInfo.timeline)) {
-      cancelCrossfade("TIMELINE");
-    }
     PositionUpdateForPlaylistChange positionUpdate =
         resolvePositionForPlaylistChange(
             timeline,
@@ -2878,8 +2866,6 @@ import java.util.Objects;
       return;
     }
     boolean loadingPeriodChanged = maybeUpdateLoadingPeriod();
-    // LMG: claim the overlap window before stock read-ahead can replace its streams.
-    maybeUpdateFadeInPeriod();
     if (!audioFadeControl.isCrossFadeInProgress()) {
       if (!perStreamMediaProgressionEnabled) {
         maybeUpdatePrewarmingPeriod();
@@ -2892,7 +2878,8 @@ import java.util.Objects;
         maybeUpdateReadingRenderersPerStream();
       }
     }
-    // LMG: handoff and release follow the overlap tick.
+    // LMG: original lmg30 order — reading, fade tick, handoff, release, playing.
+    maybeUpdateFadeInPeriod();
     maybeUpdateFadeOutPeriod();
     maybeReleaseFadeOutPeriod(/* force= */ false);
     maybeUpdatePlayingPeriod();
@@ -2952,10 +2939,7 @@ import java.util.Objects;
       ExoPlayer.CrossfadeConfiguration.DEFAULT;
 
   private void setCrossfadeConfigurationInternal(
-      ExoPlayer.CrossfadeConfiguration crossfadeConfiguration) throws ExoPlaybackException {
-    if (!crossfadeConfiguration.equals(this.crossfadeConfiguration)) {
-      cancelCrossfade("CONFIGURATION");
-    }
+      ExoPlayer.CrossfadeConfiguration crossfadeConfiguration) {
     this.crossfadeConfiguration = crossfadeConfiguration;
     audioFadeControl.setCrossFadeDurationUs(crossfadeConfiguration.durationUs);
     queue.setCrossfadeEntryOffsetUs(crossfadeConfiguration.entryOffsetUs);
@@ -3024,22 +3008,6 @@ import java.util.Objects;
     return window.mediaItem.mediaMetadata;
   }
 
-  private boolean isCrossfadeAudioPeriod(@Nullable MediaPeriodHolder holder) {
-    if (holder == null || !holder.prepared || holder.info.id.isAd()
-        || holder.getSelectedAudioRendererIndex() == C.INDEX_UNSET) {
-      return false;
-    }
-    TrackSelectorResult tracks = holder.getTrackSelectorResult();
-    for (int i = 0; i < tracks.length; i++) {
-      if (tracks.isRendererEnabled(i) && renderers[i].getTrackType() != C.TRACK_TYPE_AUDIO) {
-        return false;
-      }
-    }
-    playbackInfo.timeline.getPeriodByUid(holder.uid, period);
-    playbackInfo.timeline.getWindow(period.windowIndex, window);
-    return !window.isLive() && !window.isDynamic;
-  }
-
   private void maybeUpdateFadeInPeriod() throws ExoPlaybackException {
     @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
     // Диагностика ДО всех early-return (раз в 2 c): видно, почему фейд не армится.
@@ -3077,10 +3045,26 @@ import java.util.Objects;
     // громкость. Хуже кроссфейда только тишина.
     if (audioFadeControl.isCrossFadeInProgress()) {
       long fadeLimitMs = audioFadeControl.getCrossFadeDurationUs() / 1000L + 3000L;
-      if (fadePausedAtMs == C.TIME_UNSET && fadeStartedAtMs != C.TIME_UNSET
-          && clock.elapsedRealtime() - fadeStartedAtMs > fadeLimitMs) {
+      if (fadeStartedAtMs != C.TIME_UNSET && clock.elapsedRealtime() - fadeStartedAtMs > fadeLimitMs) {
         Log.e(TAG, "xfade WATCHDOG: fade stuck > " + fadeLimitMs + "ms → force reset");
-        cancelCrossfade("WATCHDOG");
+        // Сначала гасим и выключаем fade-in рендерер: reset() вернул бы ОБОИМ
+        // полную громкость, и два трека заиграли бы одновременно на 100%.
+        int stuckFadeInIdx = audioFadeControl.getFadeInRendererIndex();
+        if (stuckFadeInIdx != C.INDEX_UNSET
+            && stuckFadeInIdx < renderers.length
+            && (crossfadeRenderers[stuckFadeInIdx].getState() != Renderer.STATE_DISABLED)) {
+          try {
+            crossfadeRenderers[stuckFadeInIdx].handleMessage(Renderer.MSG_SET_VOLUME, 0f);
+            disableRenderer(stuckFadeInIdx);
+          } catch (RuntimeException e) {
+            Log.e(TAG, "xfade WATCHDOG: disable fadeIn failed", e);
+          }
+        }
+        audioFadeControl.reset();
+        audioFadeControl.restoreFullGain("WATCHDOG");
+        fadeStartedAtMs = C.TIME_UNSET;
+        shouldStartCrossFade = false;
+        shouldDisplayFadeInMetadata = false;
         return;
       }
     } else {
@@ -3089,9 +3073,6 @@ import java.util.Objects;
       if (audioFadeControl.hasDuckedRenderer()) {
         audioFadeControl.restoreFullGain("IDLE_DUCKED");
       }
-    }
-    if (playing.getRendererIdx() == C.INDEX_UNSET) {
-      playing.setRendererIdx(playing.getSelectedAudioRendererIndex());
     }
     audioFadeControl.maybeDoFadeOut(playing, rendererPositionUs);
     if (!audioFadeControl.isCrossFadeInProgress()) {
@@ -3122,16 +3103,6 @@ import java.util.Objects;
       if (nearEnd
           && next != null
           && !areSequentialAlbumTracks(playing, next)
-          && shouldPlayWhenReady()
-          && playbackInfo.playbackState == Player.STATE_READY
-          && !pendingPauseAtEndOfPeriod
-          && !scrubbingModeEnabled
-          && isCrossfadeAudioPeriod(playing)
-          && isCrossfadeAudioPeriod(next)
-          && renderers[playing.getRendererIdx()].isReadingFromPeriod(playing)
-          && queue.getReadingPeriod(playing.getRendererIdx()) == playing
-          && !renderers[primaryAudioRendererIndex].hasSecondary()
-          && !renderers[secondaryAudioRendererIndex].hasSecondary()
           && isFadeableMediaType(playing)
           && isFadeableMediaType(next)
           && audioFadeControl.canFadeBetweenPeriods(playing, next)
@@ -3149,7 +3120,6 @@ import java.util.Objects;
         if (updateFadeInPeriodRenderers(next)) {
           shouldStartCrossFade = true;
           fadeStartedAtMs = clock.elapsedRealtime(); // watchdog
-          fadePausedAtMs = C.TIME_UNSET;
           audioFadeControl.prepareForCrossFade(playing, next);
         } else {
           logXfade("xfade ARM ROLLBACK: fadeIn renderer not enabled → gapless");
@@ -3263,46 +3233,35 @@ import java.util.Objects;
         new AudioFadeControl.AudioFadeTransition(curve, 0L, durationUs));
   }
 
-  /** LMG: release the retained outgoing period even when paused or resetting. */
-  private void releaseDetachedCrossfadePeriod() {
-    MediaPeriodHolder playing = queue.getPlayingPeriod();
-    if (playing != null && playing.getPrevious() != null) {
-      MediaPeriodHolder previous = playing.getPrevious();
-      playing.setPrevious(null);
-      previous.release();
-    }
-  }
-
-  /** Cancel only the non-playing deck; never mute the survivor after metadata handoff. */
-  private void cancelCrossfade(String reason) throws ExoPlaybackException {
-    if (!audioFadeControl.isCrossFadeInProgress() && !shouldDisplayFadeInMetadata) {
-      return;
-    }
-    MediaPeriodHolder playing = queue.getPlayingPeriod();
-    int survivor = playing == null ? C.INDEX_UNSET : playing.getRendererIdx();
-    int incoming = audioFadeControl.getFadeInRendererIndex();
-    int outgoing = audioFadeControl.getFadeOutRendererIndex();
-    for (int index : new int[] {incoming, outgoing}) {
-      if (index != C.INDEX_UNSET && index != survivor) {
-        disableRenderer(index);
-      }
-    }
-    // A was removed from the queue at the handoff and must be released separately.
-    audioFadeControl.reset();
-    audioFadeControl.restoreFullGain(reason);
-    releaseDetachedCrossfadePeriod();
-    shouldStartCrossFade = false;
-    shouldDisplayFadeInMetadata = false;
-    fadeStartedAtMs = C.TIME_UNSET;
-    fadePausedAtMs = C.TIME_UNSET;
-  }
-
   /** Release the outgoing deck only after overlap completes. */
   private void maybeReleaseFadeOutPeriod(boolean force) throws ExoPlaybackException {
     if (!shouldReleaseFadeOutPeriod(force)) {
       return;
     }
-    cancelCrossfade("DONE");
+    shouldDisplayFadeInMetadata = false;
+    shouldStartCrossFade = false;
+    MediaPeriodHolder playing = checkNotNull(queue.getPlayingPeriod()); // B
+    MediaPeriodHolder previous = checkNotNull(playing.getPrevious()); // A (fade-out)
+    // [Вариант B — адаптация против спеки §5.5] Apple глушит рендерер по playing.trackSel
+    // (там PlayerTrackSelector включает secondary для B). У нас trackSel B включает primary,
+    // поэтому глушим ЯВНО рендерер уходящего периода previous.getRendererIdx(), а B доигрывает
+    // на своём playing.getRendererIdx().
+    int outgoingIdx = previous.getRendererIdx();
+    int playingIdx = playing.getRendererIdx();
+    previous.release();
+    // LMG-fork (crossfade): уходящий период освобождён — рвём back-link, иначе
+    // ветка doCrossFade(playing.getPrevious(), ...) могла бы выставить уровни на
+    // released-период, а живой holder держал бы его буферы.
+    playing.setPrevious(null);
+    if (outgoingIdx != C.INDEX_UNSET
+        && outgoingIdx != playingIdx
+        && (crossfadeRenderers[outgoingIdx].getState() != Renderer.STATE_DISABLED)) {
+      disableRenderer(outgoingIdx);
+    }
+    audioFadeControl.reset();
+    audioFadeControl.restoreFullGain("DONE"); // §6: выживший рендерер всегда на 1.0
+    fadeStartedAtMs = C.TIME_UNSET;
+    fadeInOffsetShifted = false;
   }
 
   /**
@@ -3456,7 +3415,9 @@ import java.util.Objects;
 
   /** Порт Apple shouldReleaseFadeOutPeriod. */
   private boolean shouldReleaseFadeOutPeriod(boolean force) {
-    if (audioFadeControl.isCrossFadeInProgress()) {
+    if (shouldPlayWhenReady()
+        && audioFadeControl.isCrossFadeEnabled()
+        && audioFadeControl.isCrossFadeInProgress()) {
       @Nullable MediaPeriodHolder playing = queue.getPlayingPeriod();
       if (playing != null && playing.getPrevious() != null && shouldDisplayFadeInMetadata) {
         return force || audioFadeControl.getCrossFadePhase() == AudioFadeControl.FadePhase.COMPLETED;
@@ -3467,7 +3428,7 @@ import java.util.Objects;
 
   /** Порт Apple shouldLoadNextMediaPeriodWithCrossFade. */
   private boolean shouldLoadNextMediaPeriodWithCrossFade() {
-    if (!audioFadeControl.isCrossFadeEnabled() || !crossfadeConfiguration.isEnabled()) {
+    if (!audioFadeControl.isCrossFadeEnabled()) {
       return true;
     }
     int length = queue.getLength();

@@ -1,128 +1,27 @@
-# Перенос LMG на Media3 1.11.0
+# Media3 1.11.0 / lmg31 — restoration from lmg30
 
-Версия: **1.11.0-lmg31**. Собраны 11 AAR, пройдены 136 JVM-тестов.
-Это перенос на новую базу Google с сохранением кривых LMG, а не исправление
-подтверждённой неисправности рабочего lmg30. Исходный проект lmg30 сохранён.
-Эмулятор, тесты на устройстве и проверка звучания не запускались.
+Original source: `09b577b01a731885f1ee8707f9008de64badf223`.
+Google source: `91fd5df7ab6b5c2f1a589fbdee5ee8deeae97f02` (1.11.0).
 
-## Точные исходные версии
+`AudioFadeControl.java`, `CrossfadeConfig.java`, and `PlayerAudioFadeControl.java`
+are copied byte for byte from lmg30, including the original wall-clock throttling.
+The original arming conditions, recipe handling, watchdog, seek/reset, release,
+loading rules and ordering of fade processing are restored in the playback loop.
+Additional cancellation on configuration, timeline, selection, repeat and shuffle
+changes and the audio-only eligibility restriction have been removed.
 
-- Google 1.11.0: `91fd5df7ab6b5c2f1a589fbdee5ee8deeae97f02`.
-- Google 1.5.1: `795ee2df9bdbce7461dd07b9d9a75fabe6d79208`.
-- LMG 1.5.1-lmg30: `09b577b01a731885f1ee8707f9008de64badf223`.
-- Официальный релиз 1.11.0 от 5 августа 2026:
-  https://developer.android.com/jetpack/androidx/releases/media3#1.11.0
+Google 1.11 integration still requires RendererHolder lifecycle calls, per-renderer
+queue pointers, audio stream/track-selection routing, the new notification signature,
+and forwarding playback-thread volume/audio focus to the original controller.
+These integration files are not byte-identical to lmg30. They must not be described
+as a literal restoration of the entire old player.
 
-Исходный форк сохранён в `/root/media3-lmg-review`; перенос находится в отдельном
-worktree `/root/media3-lmg-1.11`, ветка `upgrade/media3-1.11.0`. Исходный патч
-кроссфейда относительно Google 1.5.1 дополнительно сохранён в
-`/root/media3-lmg-crossfade-lmg30.patch`. Эти пути относятся к текущему серверу.
+GitHub runs the original curve/configuration tests and the integration tests before
+publishing AARs. The integration tests include consecutive overlaps and an 18-second
+overlap with a metadata track and a recipe update. They use paced fake renderers so
+production timing code remains unchanged. No emulator is used. Successful tests and
+an app debug build do not validate audible output on a real device.
 
-Импортированы библиотеки, тесты, ресурсы и новая система сборки официального тега,
-а не отдельные выборочные исправления. Demo-приложения, docsamples, testapps и
-настройки IDE не импортированы. Исходники вспомогательных тестовых приложений
-в `libraries/` сохранены, но standalone test-app модули не включены в settings.
-Google перенесла тестовые медиа в `test_data/src/test/assets`; они сохранены для
-будущих регрессионных проверок и не добавлены к main assets приложения.
-
-## Граница кроссфейда
-
-Сохранены публичные `CrossfadeConfiguration`, `set/getCrossfadeConfiguration`,
-тип кривой, длительность и entry offset в микросекундах. Математика нарастания,
-затухания, точки передачи метаданных и завершения в `PlayerAudioFadeControl`
-сохранена из lmg30. Новый `reapplyVolume()` повторно применяет текущие уровни
-при изменении громкости/ducking. Для ограничения частоты обновлений используется
-`Clock.elapsedRealtime()` ExoPlayer вместо `System.currentTimeMillis()`: часы
-свода и watchdog согласованы, JVM-тесты могут ускорять время. В четырёх старых
-методах изменён только источник времени; остальные 37 тел методов совпадают
-с lmg30. Формулы, коэффициенты и длительности переходов не изменены. Автоматический LevelComposer Apple не добавлен.
-
-Изменения интеграции с Google 1.11:
-
-1. Google использует `RendererHolder`, который управляет состоянием и сбросом
-   рендереров. Входящий поток включается через holder; фейд-контроллер по-прежнему
-   управляет двумя аудиорендерерами и их независимыми AudioSink.
-2. `MediaPeriodHolder.routeAudioForCrossfade` вместе с `CrossfadeTrackRouting`
-   переносит уже существующий SampleStream, конфигурацию и выбор трека в одну
-   фактическую ячейку. Буферизация, ошибки потока, resetPosition и чтение следующего
-   периода теперь используют штатную логику Google. Старая заплатка
-   `expectedStreamFor` больше не нужна. Повторный выбор треков сохраняет маршрут.
-3. В очереди обновляются все `readingPeriods` и `prewarmingPeriods` при передаче
-   playing-периода. Уходящий период удерживается до конца свода; затем ссылка
-   previous снимается и период освобождается. Обычное продвижение Google сохранено.
-4. Громкость и аудиофокус Google теперь обрабатываются в playback-потоке.
-   После их изменения применяются сохранённые множители свода, чтобы входящий
-   трек не получал полную громкость между тиками. Отдельное старое сообщение
-   LMG для громкости удалено; номер сообщения конфигурации не конфликтует с Google.
-5. Seek, смена конфигурации, выбор треков, изменение timeline, repeat/shuffle и
-   watchdog отменяют лишнюю деку относительно фактически играющего периода.
-   После передачи метаданных сохраняется входящая дека. Пауза/буферизация не
-   расходуют время watchdog; stop/reset освобождает вынесенный из очереди период.
-6. Свободный рендерер по-прежнему получает AudioSink через переопределяемую
-   фабрику — цепочка AudioProcessor приложения создаётся для обеих дек.
-7. Перекрытие включается для подготовленных музыкальных VOD-периодов с единственным
-   выбранным аудиопотоком. Видео, live, реклама, scrubbing и audio prewarming с
-   дополнительным renderer внутри holder остаются на обычном пути Google. Старые
-   исключения для речи, повторения одного трека и соседних треков альбома сохранены.
-   При выключенном своде не ограничивается новая предзагрузка Google.
-
-Обход часов второго рендерера сохранён из lmg30. Это собственный механизм LMG;
-его не следует заменять механизмом Google для предварительного прогрева видео.
-
-## Сборочная инфраструктура
-
-Google 1.11 использует Kotlin DSL, Gradle 9.1.0, AGP 9.0.1, Kotlin 2.2.0,
-compileSdk 36 и minSdk 23. Минимальный SDK приложения LMG VK — 29.
-Версия форка задаётся в `gradle/libs.versions.toml`. Workflow читает её оттуда,
-поэтому версия артефактов и имя архива не могут разойтись из-за двух констант.
-Maven-группа `com.liquidmusicglass.media3` сохранена в публикации, project group,
-composite substitution и обработке POM/AAR; Java-пакеты остаются `androidx.media3`.
-
-Workflow по-прежнему выпускает 11 используемых библиотечных AAR. SNAPSHOT
-загружается как CI artifact; GitHub Release для SNAPSHOT не создаётся.
-Для локальной валидации и CI используется JDK 21. Опубликованный релиз
-не перезаписывается при повторном запуске workflow.
-
-## Проверки и оставшаяся валидация
-
-Сравнение с upstream и проверка сохранения математики записаны в
-`UPSTREAM-AUDIT.json`. Локально пройдены 136 JVM-тестов, без пропусков:
-
-| Набор | Тестов |
-| --- | ---: |
-| PlayerAudioFadeControlCurvesTest | 11 |
-| CrossfadeConfigurationTest | 7 |
-| CrossfadeTrackRoutingTest | 2 |
-| MediaPeriodQueueTest | 61 |
-| DefaultMediaClockTest | 33 |
-| ExoPlayerTest.renderersLifecycle* | 20 |
-| ExoPlayerCrossfadeTest | 2 |
-
-`ExoPlayerCrossfadeTest` использует генерируемые потоки и независимые аудиочасы
-двух дек. Проверяет два свода подряд, повторное использование рендереров,
-переход до конца уходящего трека, завершение очереди и отключение свода после
-передачи метаданных с сохранением входящей деки и громкости. Это проверка
-playback-потока, а не измерение качества звука настоящих AudioTrack.
-
-Основная команда тестов и список 11 публикаций находятся в
-`.github/workflows/build-aars.yml`. Локальная сборка выполнялась последовательно:
-один Gradle worker, heap Gradle 2 ГБ, heap JVM-тестов 1 ГБ, два доступных Java
-процессора. Для конфигурации библиотек использован установленный NDK 27.
-Логи на текущем сервере: `/tmp/media3-1.11-unit-final.log`,
-`/tmp/media3-lmg31-publish.log`.
-
-Maven-репозиторий: `m2/`. Архив для релиза:
-`media3-1.11.0-lmg31-m2.zip`. Реальные зависимости в POM и Gradle Module
-Metadata используют группу `com.liquidmusicglass.media3` и версию `1.11.0-lmg31`.
-Google constraints на опциональные неопубликованные native-модули сохранены;
-все необходимые зависимости этих 11 AAR входят в архив.
-
-Для проверки потребителя создана отдельная копия текущих исходников приложения:
-`/root/LMG-VK-media3-1.11-check`. Рабочие AAR и зависимости в `/root/LMG-VK`
-остаются на lmg30. Эта промежуточная сборка остановлена по просьбе пользователя. Окончательное
-подключение выполняется в основном LMG VK после сборки релиза на GitHub.
-
-На физическом устройстве ещё нужно проверить звучание нескольких сводов подряд,
-паузу/ребуферинг до и после передачи метаданных, seek/skip, смену очереди,
-repeat/shuffle, громкость/ducking, AudioProcessor на обеих деках, обычный gapless
-и плавность текстов при передаче playback clock. Эмулятор не требуется.
+This corrects the already published `1.11.0-lmg31`. The release tag and Maven zip
+are replaced only after GitHub checks succeed. Consumers must replace their old
+local Maven copy; the coordinates alone do not distinguish the corrected binaries.

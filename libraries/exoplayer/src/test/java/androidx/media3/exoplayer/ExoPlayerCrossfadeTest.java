@@ -7,6 +7,7 @@ import static com.google.common.truth.Truth.assertThat;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.Player;
+import androidx.media3.common.MimeTypes;
 import androidx.media3.common.util.Clock;
 import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
 import androidx.media3.test.utils.ExoPlayerTestRunner;
@@ -69,7 +70,7 @@ public final class ExoPlayerCrossfadeTest {
       player.setMediaSources(ImmutableList.of(source(), source(), source()));
       player.prepare();
       player.play();
-      advance(player).untilState(Player.STATE_ENDED);
+      advance(player).withTimeoutMs(60_000).untilState(Player.STATE_ENDED);
 
       assertThat(player.getPlayerError()).isNull();
       assertThat(transitionPositions).hasSize(2);
@@ -88,26 +89,37 @@ public final class ExoPlayerCrossfadeTest {
   }
 
   @Test
-  public void disableAfterMetadataHandoff_preservesIncomingDeckAndPlayerVolume() throws Exception {
+  public void eighteenSecondOverlap_withMetadataAndRecipeRefresh_keepsOriginalFade() throws Exception {
     VolumeRenderer first = new VolumeRenderer(clock);
     VolumeRenderer second = new VolumeRenderer(clock);
-    ExoPlayer player = createPlayer(first, second);
+    ExoPlayer player = new TestExoPlayerBuilder(ApplicationProvider.getApplicationContext())
+        .setClock(clock)
+        .setRenderers(first, second, new FakeRenderer(C.TRACK_TYPE_METADATA))
+        .build();
+    ExoPlayer.CrossfadeConfiguration recipe = new ExoPlayer.CrossfadeConfiguration(
+        18_000_000, ExoPlayer.CrossfadeConfiguration.CURVE_DEFAULT, 0);
+    player.setCrossfadeConfiguration(recipe);
     try {
-      player.setMediaSources(ImmutableList.of(source(), source()));
+      Format metadata = new Format.Builder().setSampleMimeType(MimeTypes.APPLICATION_ID3).build();
+      player.setMediaSources(ImmutableList.of(
+          source(40_000_000, ExoPlayerTestRunner.AUDIO_FORMAT, metadata),
+          source(40_000_000, ExoPlayerTestRunner.AUDIO_FORMAT, metadata)));
       player.prepare();
       player.play();
-      advance(player)
+      advance(player).withTimeoutMs(60_000)
           .untilPositionDiscontinuityWithReason(Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
       assertThat(player.getCurrentMediaItemIndex()).isEqualTo(1);
       assertThat(second.sawPartialGain).isTrue();
+      assertThat((first.audioClock.getPositionUs() - first.streamStartPositionUs) / 1000)
+          .isLessThan(39_500L);
 
-      player.setVolume(0.3f);
-      player.setCrossfadeConfiguration(ExoPlayer.CrossfadeConfiguration.DEFAULT);
-      advance(player).untilState(Player.STATE_ENDED);
-
+      // lmg30 applies a new pair recipe without cancelling the overlap already in progress.
+      player.setCrossfadeConfiguration(new ExoPlayer.CrossfadeConfiguration(
+          18_000_000, ExoPlayer.CrossfadeConfiguration.CURVE_DEFAULT, 500_000));
+      advance(player).withTimeoutMs(60_000).untilState(Player.STATE_ENDED);
       assertThat(player.getPlayerError()).isNull();
-      assertThat(second.volume).isEqualTo(0.3f);
-      assertThat(second.sampleBufferReadCount).isGreaterThan(300);
+      assertThat(first.volume).isEqualTo(1f);
+      assertThat(second.volume).isEqualTo(1f);
     } finally {
       player.release();
     }
@@ -125,13 +137,17 @@ public final class ExoPlayerCrossfadeTest {
   }
 
   private static FakeMediaSource source() {
+    return source(TRACK_DURATION_US, ExoPlayerTestRunner.AUDIO_FORMAT);
+  }
+
+  private static FakeMediaSource source(long durationUs, Format... formats) {
     return new FakeMediaSource.Builder()
         .setTimeline(new FakeTimeline(new TimelineWindowDefinition.Builder()
             .setWindowPositionInFirstPeriodUs(0)
-            .setDurationUs(TRACK_DURATION_US).build()))
-        .setFormats(ExoPlayerTestRunner.AUDIO_FORMAT)
+            .setDurationUs(durationUs).build()))
+        .setFormats(formats)
         .setTrackDataFactory(TrackDataFactory.samplesWithRateDurationAndKeyframeInterval(
-            0, 20, TRACK_DURATION_US, 1))
+            0, 20, durationUs, 1))
         .build();
   }
 
@@ -177,6 +193,14 @@ public final class ExoPlayerCrossfadeTest {
 
     @Override
     public void render(long positionUs, long elapsedRealtimeUs) throws ExoPlaybackException {
+      // The unmodified lmg30 controller throttles with System.currentTimeMillis().
+      // Pace the test's accelerated playback instead of changing production timekeeping.
+      try {
+        Thread.sleep(2);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException(e);
+      }
       // Each sink continues on its own clock when the player's master changes at the handoff.
       super.render(audioClock.getPositionUs(), elapsedRealtimeUs);
     }
