@@ -40,6 +40,21 @@ public class SessionCommandTest {
   private static final ImmutableList<String> PREFIX_COMMAND_CODES =
       ImmutableList.of("COMMAND_CODE_SESSION_", "COMMAND_CODE_LIBRARY_");
 
+  @Test
+  public void sessionCommandsBuilder_addAllPredefinedCommands_addsAllPredefinedCommands()
+      throws Exception {
+    SessionCommands sessionCommands =
+        new SessionCommands.Builder().addAllPredefinedCommands().build();
+    for (Field field : SessionCommand.class.getFields()) {
+      if (field.getName().startsWith("COMMAND_CODE_") && field.getType() == int.class) {
+        int commandCode = field.getInt(null);
+        if (commandCode != SessionCommand.COMMAND_CODE_CUSTOM) {
+          assertThat(sessionCommands.contains(commandCode)).isTrue();
+        }
+      }
+    }
+  }
+
   /** Test possible typos in naming */
   @Test
   public void codes_name() {
@@ -90,8 +105,8 @@ public class SessionCommandTest {
                     + (values.get(j - 1) + 1)
                     + " in "
                     + PREFIX_COMMAND_CODES.get(i))
-            .that((int) values.get(j))
-            .isEqualTo(((int) values.get(j - 1)) + 1);
+            .that(values.get(j))
+            .isEqualTo(values.get(j - 1) + 1);
       }
     }
   }

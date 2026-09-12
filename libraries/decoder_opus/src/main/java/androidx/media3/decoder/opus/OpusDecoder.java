@@ -16,11 +16,12 @@
 package androidx.media3.decoder.opus;
 
 import static androidx.annotation.VisibleForTesting.PACKAGE_PRIVATE;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static java.lang.Math.max;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.C;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.decoder.CryptoConfig;
@@ -56,7 +57,6 @@ public final class OpusDecoder
   private final int preSkipSamples;
   private final int seekPreRollSamples;
   private final long nativeDecoderContext;
-  private boolean experimentalDiscardPaddingEnabled;
 
   private int skipSamples;
 
@@ -107,12 +107,9 @@ public final class OpusDecoder
       throw new OpusDecoderException("Invalid header length");
     }
     channelCount = getChannelCount(headerBytes);
-    if (channelCount > 8) {
-      throw new OpusDecoderException("Invalid channel count: " + channelCount);
-    }
     int gain = readSignedLittleEndian16(headerBytes, 16);
 
-    byte[] streamMap = new byte[8];
+    byte[] streamMap = new byte[max(channelCount, 8)];
     int numStreams;
     int numCoupled;
     if (headerBytes[18] == 0) { // Channel mapping
@@ -144,16 +141,6 @@ public final class OpusDecoder
     if (outputFloat) {
       opusSetFloatOutput();
     }
-  }
-
-  /**
-   * Sets whether discard padding is enabled. When enabled, discard padding samples (provided as
-   * supplemental data on the input buffer) will be removed from the end of the decoder output.
-   *
-   * <p>This method is experimental, and will be renamed or removed in a future release.
-   */
-  public void experimentalSetDiscardPaddingEnabled(boolean enabled) {
-    this.experimentalDiscardPaddingEnabled = enabled;
   }
 
   @Override
@@ -199,8 +186,8 @@ public final class OpusDecoder
                 SAMPLE_RATE,
                 cryptoConfig,
                 cryptoInfo.mode,
-                Assertions.checkNotNull(cryptoInfo.key),
-                Assertions.checkNotNull(cryptoInfo.iv),
+                checkNotNull(cryptoInfo.key),
+                checkNotNull(cryptoInfo.iv),
                 cryptoInfo.numSubSamples,
                 cryptoInfo.numBytesOfClearData,
                 cryptoInfo.numBytesOfEncryptedData)
@@ -235,7 +222,7 @@ public final class OpusDecoder
         skipSamples = 0;
         outputData.position(skipBytes);
       }
-    } else if (experimentalDiscardPaddingEnabled && inputBuffer.hasSupplementalData()) {
+    } else if (inputBuffer.hasSupplementalData()) {
       int discardPaddingSamples = getDiscardPaddingSamples(inputBuffer.supplementalData);
       if (discardPaddingSamples > 0) {
         int discardBytes = samplesToBytes(discardPaddingSamples, channelCount, outputFloat);

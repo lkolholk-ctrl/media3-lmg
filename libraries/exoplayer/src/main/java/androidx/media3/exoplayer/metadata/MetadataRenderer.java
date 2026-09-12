@@ -15,8 +15,9 @@
  */
 package androidx.media3.exoplayer.metadata;
 
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.common.util.Util.castNonNull;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.os.Handler;
 import android.os.Handler.Callback;
@@ -26,13 +27,13 @@ import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.Metadata;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.BaseRenderer;
 import androidx.media3.exoplayer.FormatHolder;
 import androidx.media3.exoplayer.RendererCapabilities;
 import androidx.media3.exoplayer.source.MediaSource;
+import androidx.media3.exoplayer.source.SampleStream;
 import androidx.media3.exoplayer.source.SampleStream.ReadDataResult;
 import androidx.media3.extractor.metadata.MetadataDecoder;
 import androidx.media3.extractor.metadata.MetadataInputBuffer;
@@ -51,6 +52,13 @@ public final class MetadataRenderer extends BaseRenderer implements Callback {
 
   private static final String TAG = "MetadataRenderer";
   private static final int MSG_INVOKE_RENDERER = 1;
+
+  /**
+   * Maximum duration to read ahead from the current playback position in microseconds. Limiting the
+   * read ahead ensures the samples are not consumed too early to allow player changes affecting
+   * these samples (e.g. duration changes).
+   */
+  private static final long MAX_READ_AHEAD_DURATION_US = C.MICROS_PER_SECOND;
 
   private final MetadataDecoderFactory decoderFactory;
   private final MetadataOutput output;
@@ -116,10 +124,10 @@ public final class MetadataRenderer extends BaseRenderer implements Callback {
       MetadataDecoderFactory decoderFactory,
       boolean outputMetadataEarly) {
     super(C.TRACK_TYPE_METADATA);
-    this.output = Assertions.checkNotNull(output);
+    this.output = checkNotNull(output);
     this.outputHandler =
         outputLooper == null ? null : Util.createHandler(outputLooper, /* callback= */ this);
-    this.decoderFactory = Assertions.checkNotNull(decoderFactory);
+    this.decoderFactory = checkNotNull(decoderFactory);
     this.outputMetadataEarly = outputMetadataEarly;
     buffer = new MetadataInputBuffer();
     outputStreamOffsetUs = C.TIME_UNSET;
@@ -156,7 +164,8 @@ public final class MetadataRenderer extends BaseRenderer implements Callback {
   }
 
   @Override
-  protected void onPositionReset(long positionUs, boolean joining) {
+  protected void onPositionReset(
+      long positionUs, boolean joining, boolean sampleStreamIsResetToKeyFrame) {
     pendingMetadata = null;
     inputStreamEnded = false;
     outputStreamEnded = false;
@@ -166,7 +175,7 @@ public final class MetadataRenderer extends BaseRenderer implements Callback {
   public void render(long positionUs, long elapsedRealtimeUs) {
     boolean working = true;
     while (working) {
-      readMetadata();
+      readMetadata(positionUs);
       working = outputMetadata(positionUs);
     }
   }
@@ -183,8 +192,7 @@ public final class MetadataRenderer extends BaseRenderer implements Callback {
         MetadataDecoder wrappedMetadataDecoder =
             decoderFactory.createDecoder(wrappedMetadataFormat);
         // wrappedMetadataFormat != null so wrappedMetadataBytes must be non-null too.
-        byte[] wrappedMetadataBytes =
-            Assertions.checkNotNull(metadata.get(i).getWrappedMetadataBytes());
+        byte[] wrappedMetadataBytes = checkNotNull(metadata.get(i).getWrappedMetadataBytes());
         buffer.clear();
         buffer.ensureSpaceForWrite(wrappedMetadataBytes.length);
         castNonNull(buffer.data).put(wrappedMetadataBytes);
@@ -230,11 +238,32 @@ public final class MetadataRenderer extends BaseRenderer implements Callback {
     }
   }
 
-  private void readMetadata() {
+  private void readMetadata(long positionUs) {
     if (!inputStreamEnded && pendingMetadata == null) {
       buffer.clear();
       FormatHolder formatHolder = getFormatHolder();
-      @ReadDataResult int result = readSource(formatHolder, buffer, /* readFlags= */ 0);
+      @ReadDataResult
+      int result =
+          readSource(
+              formatHolder, buffer, SampleStream.FLAG_PEEK | SampleStream.FLAG_OMIT_SAMPLE_DATA);
+      if (result == C.RESULT_NOTHING_READ && !buffer.isEndOfStream()) {
+        // Nothing to consume yet.
+        return;
+      } else if (result == C.RESULT_BUFFER_READ && !buffer.isEndOfStream()) {
+        // New buffer available, only consume if close enough to the current position.
+        if (!outputMetadataEarly && positionUs < buffer.timeUs - MAX_READ_AHEAD_DURATION_US) {
+          return;
+        }
+      } else if (result == C.RESULT_BUFFER_READ || result == C.RESULT_NOTHING_READ) {
+        // EOS signal available, only consume if close enough to the stream duration.
+        long streamEndPositionUs = getStreamEndPositionUs();
+        long positionInPeriodUs = positionUs - getStreamOffsetUs();
+        if (streamEndPositionUs == C.TIME_UNSET
+            || positionInPeriodUs < streamEndPositionUs - MAX_READ_AHEAD_DURATION_US) {
+          return;
+        }
+      }
+      result = readSource(formatHolder, buffer, /* readFlags= */ 0);
       if (result == C.RESULT_BUFFER_READ) {
         if (buffer.isEndOfStream()) {
           inputStreamEnded = true;
@@ -254,7 +283,7 @@ public final class MetadataRenderer extends BaseRenderer implements Callback {
           }
         }
       } else if (result == C.RESULT_FORMAT_READ) {
-        subsampleOffsetUs = Assertions.checkNotNull(formatHolder.format).subsampleOffsetUs;
+        subsampleOffsetUs = checkNotNull(formatHolder.format).subsampleOffsetUs;
       }
     }
   }

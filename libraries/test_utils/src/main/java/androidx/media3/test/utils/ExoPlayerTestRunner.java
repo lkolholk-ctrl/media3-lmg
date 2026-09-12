@@ -15,7 +15,7 @@
  */
 package androidx.media3.test.utils;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static junit.framework.TestCase.assertFalse;
@@ -70,6 +70,7 @@ public final class ExoPlayerTestRunner implements Player.Listener, ActionSchedul
   public static final Format AUDIO_FORMAT =
       new Format.Builder()
           .setSampleMimeType(MimeTypes.AUDIO_AAC)
+          .setCodecs("mp4a.40.2")
           .setAverageBitrate(100_000)
           .setChannelCount(2)
           .setSampleRate(44100)
@@ -341,6 +342,19 @@ public final class ExoPlayerTestRunner implements Player.Listener, ActionSchedul
     @CanIgnoreReturnValue
     public Builder setAnalyticsListener(AnalyticsListener analyticsListener) {
       this.analyticsListener = analyticsListener;
+      return this;
+    }
+
+    /**
+     * Sets whether {@link ExoPlayer} will enable per-stream media period progression.
+     *
+     * @param perStreamMediaProgressionEnabled Whether {@link ExoPlayer} will enable per-stream
+     *     media period progression.
+     * @return This builder.
+     */
+    @CanIgnoreReturnValue
+    public Builder setPerStreamMediaProgressionEnabled(boolean perStreamMediaProgressionEnabled) {
+      testPlayerBuilder.setPerStreamMediaProgressionEnabled(perStreamMediaProgressionEnabled);
       return this;
     }
 

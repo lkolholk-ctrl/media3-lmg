@@ -16,7 +16,6 @@
 
 package androidx.media3.effect;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.createArgb8888BitmapFromFocusedGlFramebuffer;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.createGlTextureFromBitmap;
@@ -24,6 +23,7 @@ import static androidx.media3.test.utils.BitmapPixelTestUtil.getBitmapAveragePix
 import static androidx.media3.test.utils.BitmapPixelTestUtil.maybeSaveTestBitmap;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.readBitmap;
 import static androidx.test.core.app.ApplicationProvider.getApplicationContext;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.content.Context;
@@ -288,7 +288,10 @@ public class SingleColorLutPixelTest {
       for (int g = 0; g < length; g++) {
         for (int b = 0; b < length; b++) {
           lut[r][g][b] =
-              Color.rgb(/* red= */ r * scale, /* green= */ g * scale, /* blue= */ b * scale);
+              Color.rgb(
+                  /* red= */ Math.round(r * scale * 255),
+                  /* green= */ Math.round(g * scale * 255),
+                  /* blue= */ Math.round(b * scale * 255));
         }
       }
     }

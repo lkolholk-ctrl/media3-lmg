@@ -15,7 +15,6 @@
  */
 package androidx.media3.effect;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.createGlTextureFromBitmap;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.createUnpremultipliedArgb8888BitmapFromFocusedGlFramebuffer;
@@ -23,6 +22,7 @@ import static androidx.media3.test.utils.BitmapPixelTestUtil.getBitmapAveragePix
 import static androidx.media3.test.utils.BitmapPixelTestUtil.maybeSaveTestBitmap;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.readBitmapUnpremultipliedAlpha;
 import static androidx.test.core.app.ApplicationProvider.getApplicationContext;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.content.Context;
@@ -116,7 +116,9 @@ public final class AlphaScaleShaderProgramPixelTest {
 
   @Test
   public void noOpAlpha_matchesGoldenFile() throws Exception {
-    alphaScaleShaderProgram = new AlphaScale(1.0f).toGlShaderProgram(context, /* useHdr= */ false);
+    alphaScaleShaderProgram =
+        (AlphaScaleShaderProgram)
+            new AlphaScale(1.0f).toGlShaderProgram(context, /* useHdr= */ false);
     Size outputSize = alphaScaleShaderProgram.configure(inputWidth, inputHeight);
     Bitmap expectedBitmap = readBitmapUnpremultipliedAlpha(ORIGINAL_PNG_ASSET_PATH);
     maybeSaveTestBitmap(testId, /* bitmapLabel= */ "input", expectedBitmap, /* path= */ null);
@@ -135,7 +137,9 @@ public final class AlphaScaleShaderProgramPixelTest {
 
   @Test
   public void zeroAlpha_matchesGoldenFile() throws Exception {
-    alphaScaleShaderProgram = new AlphaScale(0.0f).toGlShaderProgram(context, /* useHdr= */ false);
+    alphaScaleShaderProgram =
+        (AlphaScaleShaderProgram)
+            new AlphaScale(0.0f).toGlShaderProgram(context, /* useHdr= */ false);
     Size outputSize = alphaScaleShaderProgram.configure(inputWidth, inputHeight);
     Bitmap expectedBitmap = readBitmapUnpremultipliedAlpha(ZERO_ALPHA_PNG_ASSET_PATH);
 
@@ -153,7 +157,9 @@ public final class AlphaScaleShaderProgramPixelTest {
 
   @Test
   public void decreaseAlpha_matchesGoldenFile() throws Exception {
-    alphaScaleShaderProgram = new AlphaScale(0.5f).toGlShaderProgram(context, /* useHdr= */ false);
+    alphaScaleShaderProgram =
+        (AlphaScaleShaderProgram)
+            new AlphaScale(0.5f).toGlShaderProgram(context, /* useHdr= */ false);
     Size outputSize = alphaScaleShaderProgram.configure(inputWidth, inputHeight);
     Bitmap expectedBitmap = readBitmapUnpremultipliedAlpha(DECREASE_ALPHA_PNG_ASSET_PATH);
 
@@ -171,7 +177,9 @@ public final class AlphaScaleShaderProgramPixelTest {
 
   @Test
   public void increaseAlpha_matchesGoldenFile() throws Exception {
-    alphaScaleShaderProgram = new AlphaScale(1.5f).toGlShaderProgram(context, /* useHdr= */ false);
+    alphaScaleShaderProgram =
+        (AlphaScaleShaderProgram)
+            new AlphaScale(1.5f).toGlShaderProgram(context, /* useHdr= */ false);
     Size outputSize = alphaScaleShaderProgram.configure(inputWidth, inputHeight);
     Bitmap expectedBitmap = readBitmapUnpremultipliedAlpha(INCREASE_ALPHA_PNG_ASSET_PATH);
 

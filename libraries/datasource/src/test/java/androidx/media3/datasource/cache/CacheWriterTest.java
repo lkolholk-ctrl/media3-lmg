@@ -22,42 +22,33 @@ import static org.junit.Assert.assertThrows;
 import android.net.Uri;
 import androidx.media3.common.C;
 import androidx.media3.common.util.Util;
+import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DataSpec;
 import androidx.media3.datasource.FileDataSource;
+import androidx.media3.datasource.TransferListener;
 import androidx.media3.test.utils.FailOnCloseDataSink;
 import androidx.media3.test.utils.FakeDataSet;
 import androidx.media3.test.utils.FakeDataSource;
+import androidx.media3.test.utils.InMemoryDatabaseRule;
 import androidx.media3.test.utils.TestUtil;
-import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
-import java.io.File;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.MockitoAnnotations;
 
 /** Unit tests for {@link CacheWriter}. */
 @RunWith(AndroidJUnit4.class)
 public final class CacheWriterTest {
 
-  private File tempFolder;
+  @Rule public final InMemoryDatabaseRule cacheRule = InMemoryDatabaseRule.create();
   private SimpleCache cache;
 
   @Before
   public void setUp() throws Exception {
-    MockitoAnnotations.initMocks(this);
-    tempFolder =
-        Util.createTempDirectory(ApplicationProvider.getApplicationContext(), "ExoPlayerTest");
-    cache =
-        new SimpleCache(tempFolder, new NoOpCacheEvictor(), TestUtil.getInMemoryDatabaseProvider());
-  }
-
-  @After
-  public void tearDown() {
-    Util.recursiveDelete(tempFolder);
+    this.cache = cacheRule.createSimpleCache();
   }
 
   @Test
@@ -261,6 +252,119 @@ public final class CacheWriterTest {
 
     counters.assertValues(0, 300, 300);
     assertCachedData(cache, fakeDataSet);
+  }
+
+  @Test
+  public void cache_ioExceptionDuringOpen_closesDataSource() {
+    FakeDataSet fakeDataSet = new FakeDataSet().newData("test_data").appendReadData(1).endData();
+    FakeDataSource dataSource = new FakeDataSource(fakeDataSet);
+    dataSource.addTransferListener(
+        new TransferListener() {
+          @Override
+          public void onTransferInitializing(
+              DataSource source, DataSpec dataSpec, boolean isNetwork) {
+            Util.sneakyThrow(new IOException());
+          }
+
+          @Override
+          public void onTransferStart(DataSource source, DataSpec dataSpec, boolean isNetwork) {}
+
+          @Override
+          public void onBytesTransferred(
+              DataSource source, DataSpec dataSpec, boolean isNetwork, int bytesTransferred) {}
+
+          @Override
+          public void onTransferEnd(DataSource source, DataSpec dataSpec, boolean isNetwork) {}
+        });
+    CacheWriter cacheWriter =
+        new CacheWriter(
+            new CacheDataSource(cache, dataSource),
+            new DataSpec(Uri.parse("test_data")),
+            /* temporaryBuffer= */ null,
+            new CachingCounters());
+
+    assertThrows(IOException.class, cacheWriter::cache);
+
+    assertThat(dataSource.isOpened()).isFalse();
+  }
+
+  @Test
+  public void cache_ioExceptionDuringRead_closesDataSource() {
+    FakeDataSet fakeDataSet =
+        new FakeDataSet()
+            .newData("test_data")
+            .appendReadError(new IOException())
+            .appendReadData(1)
+            .endData();
+    FakeDataSource dataSource = new FakeDataSource(fakeDataSet);
+    CacheWriter cacheWriter =
+        new CacheWriter(
+            new CacheDataSource(cache, dataSource),
+            new DataSpec(Uri.parse("test_data")),
+            /* temporaryBuffer= */ null,
+            new CachingCounters());
+
+    assertThrows(IOException.class, cacheWriter::cache);
+
+    assertThat(dataSource.isOpened()).isFalse();
+  }
+
+  @Test
+  public void cache_nonIoExceptionDuringOpen_closesDataSource() {
+    FakeDataSet fakeDataSet = new FakeDataSet().newData("test_data").appendReadData(1).endData();
+    FakeDataSource dataSource = new FakeDataSource(fakeDataSet);
+    dataSource.addTransferListener(
+        new TransferListener() {
+          @Override
+          public void onTransferInitializing(
+              DataSource source, DataSpec dataSpec, boolean isNetwork) {
+            throw new IllegalStateException();
+          }
+
+          @Override
+          public void onTransferStart(DataSource source, DataSpec dataSpec, boolean isNetwork) {}
+
+          @Override
+          public void onBytesTransferred(
+              DataSource source, DataSpec dataSpec, boolean isNetwork, int bytesTransferred) {}
+
+          @Override
+          public void onTransferEnd(DataSource source, DataSpec dataSpec, boolean isNetwork) {}
+        });
+    CacheWriter cacheWriter =
+        new CacheWriter(
+            new CacheDataSource(cache, dataSource),
+            new DataSpec(Uri.parse("test_data")),
+            /* temporaryBuffer= */ null,
+            new CachingCounters());
+
+    assertThrows(IllegalStateException.class, cacheWriter::cache);
+
+    assertThat(dataSource.isOpened()).isFalse();
+  }
+
+  @Test
+  public void cache_nonIoExceptionDuringRead_closesDataSource() {
+    FakeDataSet fakeDataSet =
+        new FakeDataSet()
+            .newData("test_data")
+            .appendReadAction(
+                () -> {
+                  throw new IllegalStateException();
+                })
+            .appendReadData(1)
+            .endData();
+    FakeDataSource dataSource = new FakeDataSource(fakeDataSet);
+    CacheWriter cacheWriter =
+        new CacheWriter(
+            new CacheDataSource(cache, dataSource),
+            new DataSpec(Uri.parse("test_data")),
+            /* temporaryBuffer= */ null,
+            new CachingCounters());
+
+    assertThrows(IllegalStateException.class, cacheWriter::cache);
+
+    assertThat(dataSource.isOpened()).isFalse();
   }
 
   private static final class CachingCounters implements CacheWriter.ProgressListener {

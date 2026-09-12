@@ -15,10 +15,9 @@
  */
 package androidx.media3.effect;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
 import static androidx.media3.common.util.Util.contains;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.abs;
 import static java.lang.Math.max;
 
@@ -26,7 +25,6 @@ import android.content.Context;
 import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
 import android.opengl.EGLSurface;
-import android.opengl.GLES20;
 import android.util.SparseArray;
 import androidx.annotation.GuardedBy;
 import androidx.annotation.IntRange;
@@ -35,20 +33,18 @@ import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.GlObjectsProvider;
 import androidx.media3.common.GlTextureInfo;
+import androidx.media3.common.OverlaySettings;
+import androidx.media3.common.VideoCompositorSettings;
 import androidx.media3.common.VideoFrameProcessingException;
-import androidx.media3.common.util.GlProgram;
 import androidx.media3.common.util.GlUtil;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.LongArrayQueue;
 import androidx.media3.common.util.Size;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.common.util.Util;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ExecutorService;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
@@ -73,18 +69,15 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 @UnstableApi
 public final class DefaultVideoCompositor implements VideoCompositor {
   // TODO: b/262694346 -  Flesh out this implementation by doing the following:
-  //  * Use a lock to synchronize inputFrameInfos more narrowly, to reduce blocking.
+  //  * Use a lock to synchronize FrameInfos more narrowly, to reduce blocking.
   //  * Add support for mixing SDR streams with different ColorInfo.
   //  * Add support for HDR input.
-
-  private static final String THREAD_NAME = "Effect:DefaultVideoCompositor:GlThread";
   private static final String TAG = "DefaultVideoCompositor";
 
   private final VideoCompositor.Listener listener;
   private final GlTextureProducer.Listener textureOutputListener;
   private final GlObjectsProvider glObjectsProvider;
-  private final VideoCompositorSettings settings;
-  private final CompositorGlProgram compositorGlProgram;
+  private final DefaultCompositorGlProgram compositorGlProgram;
   private final VideoFrameProcessingTaskExecutor videoFrameProcessingTaskExecutor;
 
   @GuardedBy("this")
@@ -97,10 +90,10 @@ public final class DefaultVideoCompositor implements VideoCompositor {
   private final LongArrayQueue outputTextureTimestamps; // Synchronized with outputTexturePool.
   private final LongArrayQueue syncObjects; // Synchronized with outputTexturePool.
 
+  private VideoCompositorSettings videoCompositorSettings;
+
   private @MonotonicNonNull ColorInfo configuredColorInfo;
 
-  // Only used on the GL Thread.
-  private @MonotonicNonNull EGLContext eglContext;
   private @MonotonicNonNull EGLDisplay eglDisplay;
   private @MonotonicNonNull EGLSurface placeholderEglSurface;
   private int primaryInputIndex;
@@ -108,22 +101,21 @@ public final class DefaultVideoCompositor implements VideoCompositor {
   /**
    * Creates an instance.
    *
-   * <p>If a non-null {@code executorService} is set, the {@link ExecutorService} must be
-   * {@linkplain ExecutorService#shutdown shut down} by the caller.
+   * <p>It's the caller's responsibility to {@linkplain GlObjectsProvider#release(EGLDisplay)
+   * release} the {@link GlObjectsProvider} on the {@link ExecutorService}'s thread, and to
+   * {@linkplain ExecutorService#shutdown shut down} the {@link ExecutorService}.
    */
   public DefaultVideoCompositor(
       Context context,
       GlObjectsProvider glObjectsProvider,
-      VideoCompositorSettings settings,
-      @Nullable ExecutorService executorService,
+      ExecutorService executorService,
       VideoCompositor.Listener listener,
       GlTextureProducer.Listener textureOutputListener,
       @IntRange(from = 1) int textureOutputCapacity) {
     this.listener = listener;
     this.textureOutputListener = textureOutputListener;
     this.glObjectsProvider = glObjectsProvider;
-    this.settings = settings;
-    this.compositorGlProgram = new CompositorGlProgram(context);
+    this.compositorGlProgram = new DefaultCompositorGlProgram(context);
     primaryInputIndex = C.INDEX_UNSET;
 
     inputSources = new SparseArray<>();
@@ -131,15 +123,11 @@ public final class DefaultVideoCompositor implements VideoCompositor {
         new TexturePool(/* useHighPrecisionColorComponents= */ false, textureOutputCapacity);
     outputTextureTimestamps = new LongArrayQueue(textureOutputCapacity);
     syncObjects = new LongArrayQueue(textureOutputCapacity);
+    videoCompositorSettings = VideoCompositorSettings.DEFAULT;
 
-    boolean ownsExecutor = executorService == null;
-    ExecutorService instanceExecutorService =
-        ownsExecutor ? Util.newSingleThreadExecutor(THREAD_NAME) : checkNotNull(executorService);
     videoFrameProcessingTaskExecutor =
         new VideoFrameProcessingTaskExecutor(
-            instanceExecutorService,
-            /* shouldShutdownExecutorService= */ ownsExecutor,
-            listener::onError);
+            executorService, /* shouldShutdownExecutorService= */ false, listener::onError);
     videoFrameProcessingTaskExecutor.submit(this::setupGlObjects);
   }
 
@@ -155,6 +143,11 @@ public final class DefaultVideoCompositor implements VideoCompositor {
     if (primaryInputIndex == C.INDEX_UNSET) {
       primaryInputIndex = inputIndex;
     }
+  }
+
+  @Override
+  public void setVideoCompositorSettings(VideoCompositorSettings videoCompositorSettings) {
+    this.videoCompositorSettings = videoCompositorSettings;
   }
 
   @Override
@@ -198,20 +191,19 @@ public final class DefaultVideoCompositor implements VideoCompositor {
 
     InputSource inputSource = inputSources.get(inputIndex);
     checkState(!inputSource.isInputEnded);
-    checkStateNotNull(!ColorInfo.isTransferHdr(colorInfo), "HDR input is not supported.");
+    checkState(!ColorInfo.isTransferHdr(colorInfo), "HDR input is not supported.");
     if (configuredColorInfo == null) {
       configuredColorInfo = colorInfo;
     }
     checkState(
         configuredColorInfo.equals(colorInfo), "Mixing different ColorInfos is not supported.");
 
-    InputFrameInfo inputFrameInfo =
-        new InputFrameInfo(
+    FrameInfo frameInfo =
+        new FrameInfo(
             textureProducer,
-            inputTexture,
-            presentationTimeUs,
-            settings.getOverlaySettings(inputIndex, presentationTimeUs));
-    inputSource.frameInfos.add(inputFrameInfo);
+            new TimedGlTextureInfo(inputTexture, presentationTimeUs),
+            videoCompositorSettings.getOverlaySettings(inputIndex, presentationTimeUs));
+    inputSource.frameInfos.add(frameInfo);
 
     if (inputIndex == primaryInputIndex) {
       releaseExcessFramesInAllSecondaryStreams();
@@ -224,7 +216,6 @@ public final class DefaultVideoCompositor implements VideoCompositor {
 
   @Override
   public synchronized void release() {
-    checkState(allInputsEnded);
     try {
       videoFrameProcessingTaskExecutor.release(/* releaseTask= */ this::releaseGlObjects);
     } catch (InterruptedException e) {
@@ -266,15 +257,17 @@ public final class DefaultVideoCompositor implements VideoCompositor {
 
     // Release frames until the secondary stream has 0-2 frames with presentationTimeUs before or at
     // nextTimestampToComposite.
-    @Nullable InputFrameInfo nextPrimaryFrame = primaryInputSource.frameInfos.peek();
+    @Nullable FrameInfo nextPrimaryFrame = primaryInputSource.frameInfos.peek();
     long nextTimestampToComposite =
-        nextPrimaryFrame != null ? nextPrimaryFrame.presentationTimeUs : C.TIME_UNSET;
+        nextPrimaryFrame != null
+            ? nextPrimaryFrame.timedGlTextureInfo.presentationTimeUs
+            : C.TIME_UNSET;
 
     int numberOfSecondaryFramesBeforeOrAtNextTargetTimestamp =
         Iterables.size(
             Iterables.filter(
                 secondaryInputSource.frameInfos,
-                frame -> frame.presentationTimeUs <= nextTimestampToComposite));
+                frame -> frame.timedGlTextureInfo.presentationTimeUs <= nextTimestampToComposite));
     releaseFrames(
         secondaryInputSource,
         /* numberOfFramesToRelease= */ max(
@@ -283,16 +276,16 @@ public final class DefaultVideoCompositor implements VideoCompositor {
 
   private synchronized void releaseFrames(InputSource inputSource, int numberOfFramesToRelease) {
     for (int i = 0; i < numberOfFramesToRelease; i++) {
-      InputFrameInfo frameInfoToRelease = inputSource.frameInfos.remove();
-      frameInfoToRelease.textureProducer.releaseOutputTexture(
-          frameInfoToRelease.presentationTimeUs);
+      FrameInfo frameInfoToRelease = inputSource.frameInfos.remove();
+      checkNotNull(frameInfoToRelease.textureProducer)
+          .releaseOutputTexture(frameInfoToRelease.timedGlTextureInfo.presentationTimeUs);
     }
   }
 
   // Below methods must be called on the GL thread.
   private void setupGlObjects() throws GlUtil.GlException {
     eglDisplay = GlUtil.getDefaultEglDisplay();
-    eglContext =
+    EGLContext eglContext =
         glObjectsProvider.createEglContext(
             eglDisplay, /* openGlVersion= */ 2, GlUtil.EGL_CONFIG_ATTRIBUTES_RGBA_8888);
     placeholderEglSurface =
@@ -301,27 +294,35 @@ public final class DefaultVideoCompositor implements VideoCompositor {
 
   private synchronized void maybeComposite()
       throws VideoFrameProcessingException, GlUtil.GlException {
-    ImmutableList<InputFrameInfo> framesToComposite = getFramesToComposite();
+    ImmutableList<FrameInfo> framesToComposite = getFramesToComposite();
     if (framesToComposite.isEmpty()) {
       return;
     }
 
-    InputFrameInfo primaryInputFrame = framesToComposite.get(primaryInputIndex);
+    FrameInfo primaryInputFrame = framesToComposite.get(primaryInputIndex);
 
     ImmutableList.Builder<Size> inputSizes = new ImmutableList.Builder<>();
     for (int i = 0; i < framesToComposite.size(); i++) {
-      GlTextureInfo texture = framesToComposite.get(i).texture;
+      GlTextureInfo texture = framesToComposite.get(i).timedGlTextureInfo.glTextureInfo;
       inputSizes.add(new Size(texture.width, texture.height));
     }
-    Size outputSize = settings.getOutputSize(inputSizes.build());
+    Size outputSize = videoCompositorSettings.getOutputSize(inputSizes.build());
     outputTexturePool.ensureConfigured(
         glObjectsProvider, outputSize.getWidth(), outputSize.getHeight());
 
     GlTextureInfo outputTexture = outputTexturePool.useTexture();
-    long outputPresentationTimestampUs = primaryInputFrame.presentationTimeUs;
+    long outputPresentationTimestampUs = primaryInputFrame.timedGlTextureInfo.presentationTimeUs;
     outputTextureTimestamps.add(outputPresentationTimestampUs);
 
-    compositorGlProgram.drawFrame(framesToComposite, outputTexture);
+    ImmutableList.Builder<GlCompositionFrame> glProgramInput = new ImmutableList.Builder<>();
+    for (int i = 0; i < framesToComposite.size(); i++) {
+      glProgramInput.add(
+          new GlCompositionFrame(
+              framesToComposite.get(i).timedGlTextureInfo.glTextureInfo,
+              framesToComposite.get(i).overlaySettings));
+    }
+    compositorGlProgram.drawFrame(glProgramInput.build(), outputTexture);
+
     long syncObject = GlUtil.createGlSyncFence();
     syncObjects.add(syncObject);
     textureOutputListener.onTextureRendered(
@@ -338,12 +339,12 @@ public final class DefaultVideoCompositor implements VideoCompositor {
 
   /**
    * Checks whether {@code inputSources} is able to composite, and if so, returns a list of {@link
-   * InputFrameInfo}s that should be composited next.
+   * FrameInfo}s that should be composited next.
    *
    * <p>The first input frame info in the list is from the the primary source. An empty list is
    * returned if {@code inputSources} cannot composite now.
    */
-  private synchronized ImmutableList<InputFrameInfo> getFramesToComposite() {
+  private synchronized ImmutableList<FrameInfo> getFramesToComposite() {
     if (outputTexturePool.freeTextureCount() == 0) {
       return ImmutableList.of();
     }
@@ -352,9 +353,8 @@ public final class DefaultVideoCompositor implements VideoCompositor {
         return ImmutableList.of();
       }
     }
-    ImmutableList.Builder<InputFrameInfo> framesToComposite = new ImmutableList.Builder<>();
-    InputFrameInfo primaryFrameToComposite =
-        inputSources.get(primaryInputIndex).frameInfos.element();
+    ImmutableList.Builder<FrameInfo> framesToComposite = new ImmutableList.Builder<>();
+    FrameInfo primaryFrameToComposite = inputSources.get(primaryInputIndex).frameInfos.element();
     framesToComposite.add(primaryFrameToComposite);
 
     for (int i = 0; i < inputSources.size(); i++) {
@@ -373,27 +373,29 @@ public final class DefaultVideoCompositor implements VideoCompositor {
       }
 
       long minTimeDiffFromPrimaryUs = Long.MAX_VALUE;
-      @Nullable InputFrameInfo secondaryFrameToComposite = null;
-      Iterator<InputFrameInfo> frameInfosIterator = secondaryInputSource.frameInfos.iterator();
+      @Nullable FrameInfo secondaryFrameToComposite = null;
+      Iterator<FrameInfo> frameInfosIterator = secondaryInputSource.frameInfos.iterator();
       while (frameInfosIterator.hasNext()) {
-        InputFrameInfo candidateFrame = frameInfosIterator.next();
-        long candidateTimestampUs = candidateFrame.presentationTimeUs;
+        FrameInfo candidateFrame = frameInfosIterator.next();
+        long candidateTimestampUs = candidateFrame.timedGlTextureInfo.presentationTimeUs;
         long candidateAbsDistance =
-            abs(candidateTimestampUs - primaryFrameToComposite.presentationTimeUs);
+            abs(
+                candidateTimestampUs
+                    - primaryFrameToComposite.timedGlTextureInfo.presentationTimeUs);
 
         if (candidateAbsDistance < minTimeDiffFromPrimaryUs) {
           minTimeDiffFromPrimaryUs = candidateAbsDistance;
           secondaryFrameToComposite = candidateFrame;
         }
 
-        if (candidateTimestampUs > primaryFrameToComposite.presentationTimeUs
+        if (candidateTimestampUs > primaryFrameToComposite.timedGlTextureInfo.presentationTimeUs
             || (!frameInfosIterator.hasNext() && secondaryInputSource.isInputEnded)) {
           framesToComposite.add(checkNotNull(secondaryFrameToComposite));
           break;
         }
       }
     }
-    ImmutableList<InputFrameInfo> framesToCompositeList = framesToComposite.build();
+    ImmutableList<FrameInfo> framesToCompositeList = framesToComposite.build();
     if (framesToCompositeList.size() != inputSources.size()) {
       return ImmutableList.of();
     }
@@ -418,128 +420,16 @@ public final class DefaultVideoCompositor implements VideoCompositor {
       GlUtil.destroyEglSurface(eglDisplay, placeholderEglSurface);
     } catch (GlUtil.GlException e) {
       Log.e(TAG, "Error releasing GL resources", e);
-    } finally {
-      try {
-        glObjectsProvider.release(checkNotNull(eglDisplay));
-      } catch (GlUtil.GlException e) {
-        Log.e(TAG, "Error releasing GL objects", e);
-      }
-    }
-  }
-
-  /**
-   * A wrapper for a {@link GlProgram}, that draws multiple input {@link InputFrameInfo}s onto one
-   * output {@link GlTextureInfo}.
-   *
-   * <p>All methods must be called on a GL thread, unless otherwise stated.
-   */
-  private static final class CompositorGlProgram {
-    private static final String TAG = "CompositorGlProgram";
-    private static final String VERTEX_SHADER_PATH =
-        "shaders/vertex_shader_transformation_es2.glsl";
-    private static final String FRAGMENT_SHADER_PATH =
-        "shaders/fragment_shader_alpha_scale_es2.glsl";
-
-    private final Context context;
-    private final OverlayMatrixProvider overlayMatrixProvider;
-    private @MonotonicNonNull GlProgram glProgram;
-
-    /**
-     * Creates an instance.
-     *
-     * <p>May be called on any thread.
-     */
-    public CompositorGlProgram(Context context) {
-      this.context = context;
-      this.overlayMatrixProvider = new OverlayMatrixProvider();
-    }
-
-    /** Draws {@link InputFrameInfo}s onto an output {@link GlTextureInfo}. */
-    // Enhanced for-loops are discouraged in media3.effect due to short-lived allocations.
-    @SuppressWarnings("ListReverse")
-    public void drawFrame(List<InputFrameInfo> framesToComposite, GlTextureInfo outputTexture)
-        throws GlUtil.GlException, VideoFrameProcessingException {
-      ensureConfigured();
-      GlUtil.focusFramebufferUsingCurrentContext(
-          outputTexture.fboId, outputTexture.width, outputTexture.height);
-      overlayMatrixProvider.configure(new Size(outputTexture.width, outputTexture.height));
-      GlUtil.clearFocusedBuffers();
-
-      GlProgram glProgram = checkNotNull(this.glProgram);
-      glProgram.use();
-
-      // Setup for blending.
-      GLES20.glEnable(GLES20.GL_BLEND);
-      // Similar to:
-      // dst.rgb = src.rgb * src.a + dst.rgb * (1 - src.a)
-      // dst.a   = src.a           + dst.a   * (1 - src.a)
-      GLES20.glBlendFuncSeparate(
-          /* srcRGB= */ GLES20.GL_SRC_ALPHA,
-          /* dstRGB= */ GLES20.GL_ONE_MINUS_SRC_ALPHA,
-          /* srcAlpha= */ GLES20.GL_ONE,
-          /* dstAlpha= */ GLES20.GL_ONE_MINUS_SRC_ALPHA);
-      GlUtil.checkGlError();
-
-      // Draw textures from back to front.
-      for (int i = framesToComposite.size() - 1; i >= 0; i--) {
-        blendOntoFocusedTexture(framesToComposite.get(i));
-      }
-
-      GLES20.glDisable(GLES20.GL_BLEND);
-      GlUtil.checkGlError();
-    }
-
-    public void release() {
-      try {
-        if (glProgram != null) {
-          glProgram.delete();
-        }
-      } catch (GlUtil.GlException e) {
-        Log.e(TAG, "Error releasing GL Program", e);
-      }
-    }
-
-    private void ensureConfigured() throws VideoFrameProcessingException, GlUtil.GlException {
-      if (glProgram != null) {
-        return;
-      }
-      try {
-        glProgram = new GlProgram(context, VERTEX_SHADER_PATH, FRAGMENT_SHADER_PATH);
-        glProgram.setBufferAttribute(
-            "aFramePosition",
-            GlUtil.getNormalizedCoordinateBounds(),
-            GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE);
-        glProgram.setFloatsUniform("uTexTransformationMatrix", GlUtil.create4x4IdentityMatrix());
-      } catch (IOException e) {
-        throw new VideoFrameProcessingException(e);
-      }
-    }
-
-    private void blendOntoFocusedTexture(InputFrameInfo inputFrameInfo) throws GlUtil.GlException {
-      GlProgram glProgram = checkNotNull(this.glProgram);
-      GlTextureInfo inputTexture = inputFrameInfo.texture;
-      glProgram.setSamplerTexIdUniform("uTexSampler", inputTexture.texId, /* texUnitIndex= */ 0);
-      float[] transformationMatrix =
-          overlayMatrixProvider.getTransformationMatrix(
-              /* overlaySize= */ new Size(inputTexture.width, inputTexture.height),
-              inputFrameInfo.overlaySettings);
-      glProgram.setFloatsUniform("uTransformationMatrix", transformationMatrix);
-      glProgram.setFloatUniform("uAlphaScale", inputFrameInfo.overlaySettings.alphaScale);
-      glProgram.bindAttributesAndUniforms();
-
-      // The four-vertex triangle strip forms a quad.
-      GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, /* first= */ 0, /* count= */ 4);
-      GlUtil.checkGlError();
     }
   }
 
   /** Holds information on an input source. */
   private static final class InputSource {
     /**
-     * A queue of {link InputFrameInfo}s, monotonically increasing in order of {@code
-     * presentationTimeUs} values.
+     * A queue of {link FrameInfo}s, monotonically increasing in order of {@code presentationTimeUs}
+     * values.
      */
-    public final Queue<InputFrameInfo> frameInfos;
+    private final Queue<FrameInfo> frameInfos;
 
     public boolean isInputEnded;
 
@@ -549,20 +439,17 @@ public final class DefaultVideoCompositor implements VideoCompositor {
   }
 
   /** Holds information on a frame and how to release it. */
-  private static final class InputFrameInfo {
+  private static final class FrameInfo {
     public final GlTextureProducer textureProducer;
-    public final GlTextureInfo texture;
-    public final long presentationTimeUs;
+    public final TimedGlTextureInfo timedGlTextureInfo;
     public final OverlaySettings overlaySettings;
 
-    public InputFrameInfo(
+    private FrameInfo(
         GlTextureProducer textureProducer,
-        GlTextureInfo texture,
-        long presentationTimeUs,
+        TimedGlTextureInfo timedGlTextureInfo,
         OverlaySettings overlaySettings) {
       this.textureProducer = textureProducer;
-      this.texture = texture;
-      this.presentationTimeUs = presentationTimeUs;
+      this.timedGlTextureInfo = timedGlTextureInfo;
       this.overlaySettings = overlaySettings;
     }
   }

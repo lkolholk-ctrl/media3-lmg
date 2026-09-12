@@ -13,10 +13,6 @@ on:
 permissions:
   contents: write
 
-env:
-  # Версия форка. Бампать при каждом изменении патча (…-lmg1, -lmg2, …).
-  RELEASE_VERSION: 1.5.1-lmg30
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,18 +20,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Read version from catalog
+        run: |
+          python3 - <<'PYTHON'
+          import os, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path("gradle/libs.versions.toml").read_text())["versions"]["releaseVersion"]
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"RELEASE_VERSION={version}\n")
+          PYTHON
+
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install SDK packages (platform 35, build-tools 35)
+      - name: Install SDK packages (platform 36, build-tools 36)
         run: |
-          yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" >/dev/null
+          yes | sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools" >/dev/null
 
       - name: Set up Gradle (with cache)
         uses: gradle/actions/setup-gradle@v4
@@ -44,16 +50,20 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace \
-            :lib-exoplayer:testReleaseUnitTest \
+            :lib-exoplayer:testDebugUnitTest \
             --tests 'androidx.media3.exoplayer.PlayerAudioFadeControlCurvesTest' \
-            --tests 'androidx.media3.exoplayer.CrossfadeConfigurationTest'
+            --tests 'androidx.media3.exoplayer.CrossfadeConfigurationTest' \
+            --tests 'androidx.media3.exoplayer.CrossfadeTrackRoutingTest' \
+            --tests 'androidx.media3.exoplayer.MediaPeriodQueueTest' \
+            --tests 'androidx.media3.exoplayer.ExoPlayerCrossfadeTest' \
+            --tests 'androidx.media3.exoplayer.DefaultMediaClockTest' \
+            --tests 'androidx.media3.exoplayer.ExoPlayerTest.renderersLifecycle*'
 
       - name: Publish media3 AARs to local maven repo
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace \
             -PmavenRepo=$GITHUB_WORKSPACE/m2 \
-            -PreleaseVersion=$RELEASE_VERSION \
             :lib-common:publishReleasePublicationToMavenRepository \
             :lib-common-ktx:publishReleasePublicationToMavenRepository \
             :lib-container:publishReleasePublicationToMavenRepository \
@@ -76,12 +86,22 @@ jobs:
           cd m2 && zip -qr ../media3-${RELEASE_VERSION}-m2.zip . && cd ..
           ls -la media3-${RELEASE_VERSION}-m2.zip
 
+      - name: Upload review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: media3-${{ env.RELEASE_VERSION }}-m2
+          path: media3-${{ env.RELEASE_VERSION }}-m2.zip
+
       - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main' && !endsWith(env.RELEASE_VERSION, '-SNAPSHOT')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="v${RELEASE_VERSION}"
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; keeping its published assets unchanged."
+            exit 0
+          fi
           gh release create "$TAG" \
             "media3-${RELEASE_VERSION}-m2.zip" \
             --title "media3 $RELEASE_VERSION (LMG fork)" \

@@ -15,6 +15,7 @@
 -->
 <lint>
   <issue id="UnsafeOptInUsageError">
-    <option name="opt-in" value="androidx.media3.common.util.UnstableApi" />
+    <option name="opt-in"
+        value="androidx.media3.common.util.UnstableApi,androidx.media3.common.util.ExperimentalApi" />
   </issue>
 </lint>

@@ -26,9 +26,10 @@ import androidx.media3.common.util.UnstableApi;
  *
  * <p>This effect doesn't drop any frames.
  *
- * <p>This effect is not supported for effects previewing.
+ * @deprecated Use {@code EditedMediaItem.Builder#setSpeed(SpeedProvider)} instead.
  */
 @UnstableApi
+@Deprecated
 public final class TimestampAdjustment implements GlEffect {
 
   /**

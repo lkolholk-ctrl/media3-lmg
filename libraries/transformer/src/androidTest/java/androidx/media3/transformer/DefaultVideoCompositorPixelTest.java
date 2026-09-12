@@ -15,55 +15,49 @@
  */
 package androidx.media3.transformer;
 
-import static androidx.media3.common.util.Util.SDK_INT;
-import static androidx.media3.common.util.Util.isRunningOnEmulator;
-import static androidx.media3.test.utils.BitmapPixelTestUtil.MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.maybeSaveTestBitmap;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.readBitmapUnpremultipliedAlpha;
+import static androidx.media3.test.utils.TestUtil.assertBitmapsAreSimilar;
 import static androidx.media3.test.utils.VideoFrameProcessorTestRunner.VIDEO_FRAME_PROCESSING_WAIT_MS;
 import static androidx.media3.test.utils.VideoFrameProcessorTestRunner.createTimestampIterator;
 import static androidx.test.core.app.ApplicationProvider.getApplicationContext;
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.truth.Truth.assertWithMessage;
 import static java.lang.Math.max;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Typeface;
-import android.opengl.EGLContext;
-import android.text.Spannable;
-import android.text.SpannableString;
-import android.text.style.AbsoluteSizeSpan;
-import android.text.style.BackgroundColorSpan;
-import android.text.style.ForegroundColorSpan;
-import android.text.style.StyleSpan;
-import android.text.style.TypefaceSpan;
+import android.graphics.Paint;
+import android.graphics.PorterDuff;
 import android.util.Pair;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Effect;
 import androidx.media3.common.GlObjectsProvider;
+import androidx.media3.common.OverlaySettings;
+import androidx.media3.common.VideoCompositorSettings;
 import androidx.media3.common.VideoFrameProcessingException;
 import androidx.media3.common.util.GlUtil;
+import androidx.media3.common.util.Log;
 import androidx.media3.common.util.Size;
 import androidx.media3.common.util.Util;
 import androidx.media3.effect.AlphaScale;
+import androidx.media3.effect.CanvasOverlay;
 import androidx.media3.effect.DefaultGlObjectsProvider;
 import androidx.media3.effect.DefaultVideoCompositor;
 import androidx.media3.effect.DefaultVideoFrameProcessor;
 import androidx.media3.effect.OverlayEffect;
-import androidx.media3.effect.OverlaySettings;
 import androidx.media3.effect.Presentation;
 import androidx.media3.effect.RgbFilter;
 import androidx.media3.effect.ScaleAndRotateTransformation;
-import androidx.media3.effect.TextOverlay;
+import androidx.media3.effect.StaticOverlaySettings;
 import androidx.media3.effect.VideoCompositor;
-import androidx.media3.effect.VideoCompositorSettings;
 import androidx.media3.test.utils.BitmapPixelTestUtil;
 import androidx.media3.test.utils.TextureBitmapReader;
 import androidx.media3.test.utils.VideoFrameProcessorTestRunner;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import java.io.IOException;
@@ -73,6 +67,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.junit.After;
@@ -81,26 +76,19 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
 
 /** Pixel test for {@link DefaultVideoCompositor} compositing 2 input frames into 1 output frame. */
-@RunWith(Parameterized.class)
+@RunWith(AndroidJUnit4.class)
 public final class DefaultVideoCompositorPixelTest {
-  @Parameterized.Parameters(name = "useSharedExecutor={0}")
-  public static ImmutableList<Boolean> useSharedExecutor() {
-    return ImmutableList.of(true, false);
-  }
 
-  // Golden images were generated on an API 33 emulator. API 26 emulators have a different text
-  // rendering implementation that leads to a larger pixel difference.
-  public static final float MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE_WITH_TEXT_OVERLAY =
-      isRunningOnEmulator() && SDK_INT <= 26 ? 2.5f : MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE;
-
-  @Parameterized.Parameter public boolean useSharedExecutor;
   @Rule public final TestName testName = new TestName();
 
+  private static final String TAG = "DVCompositorPixelTest";
   private static final String ORIGINAL_PNG_ASSET_PATH = "media/png/media3test_srgb.png";
   private static final String TEST_DIRECTORY = "test-generated-goldens/CompositorTestTimestamps/";
+  private static final double PSNR_THRESHOLD_LOCAL = 32.0;
+  private static final float INPUT_ID_BAR_HEIGHT_FRACTION = 0.1f;
+  private static final float TIMESTAMP_BAR_TOP_FRACTION = 0.9f;
   private static final ImmutableList<ImmutableList<Effect>> TWO_INPUT_COMPOSITOR_EFFECT_LISTS =
       ImmutableList.of(
           ImmutableList.of(RgbFilter.createGrayscaleFilter(), new AlphaScale(0.7f)),
@@ -127,8 +115,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void compositeTwoInputs_withOneFrameFromEach_differentTimestamp_matchesExpectedBitmap()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
 
     compositorTestRunner.queueBitmapToInput(
         /* inputId= */ 0, /* timestamps= */ ImmutableList.of(0L));
@@ -157,8 +144,7 @@ public final class DefaultVideoCompositorPixelTest {
             ImmutableList.of(new AlphaScale(0f)),
             ImmutableList.of(
                 new ScaleAndRotateTransformation.Builder().setRotationDegrees(180).build()));
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, inputEffectLists);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, inputEffectLists);
 
     compositorTestRunner.queueBitmapToInput(
         /* inputId= */ 0, /* timestamps= */ ImmutableList.of(0L));
@@ -188,8 +174,7 @@ public final class DefaultVideoCompositorPixelTest {
             ImmutableList.of(RgbFilter.createGrayscaleFilter(), new AlphaScale(100f)),
             ImmutableList.of(
                 new ScaleAndRotateTransformation.Builder().setRotationDegrees(180).build()));
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, inputEffectLists);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, inputEffectLists);
 
     compositorTestRunner.queueBitmapToInput(
         /* inputId= */ 0, /* timestamps= */ ImmutableList.of(0L));
@@ -218,8 +203,7 @@ public final class DefaultVideoCompositorPixelTest {
         ImmutableList.of(
             ImmutableList.of(RgbFilter.createGrayscaleFilter(), new AlphaScale(0.7f)),
             ImmutableList.of(new AlphaScale(0f)));
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, inputEffectLists);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, inputEffectLists);
 
     compositorTestRunner.queueBitmapToInput(
         /* inputId= */ 0, /* timestamps= */ ImmutableList.of(0L));
@@ -246,8 +230,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void compositeTwoInputs_withFiveFramesFromEach_matchesExpectedTimestamps()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     ImmutableList<Long> expectedTimestamps =
         ImmutableList.of(0L, 1_000_000L, 2_000_000L, 3_000_000L, 4_000_000L);
 
@@ -270,8 +253,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void composite_onePrimaryAndFiveSecondaryFrames_matchesExpectedTimestamps()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     ImmutableList<Long> primaryTimestamps = ImmutableList.of(0L);
     ImmutableList<Long> secondaryTimestamps =
         ImmutableList.of(0L, 1_000_000L, 2_000_000L, 3_000_000L, 4_000_000L);
@@ -295,8 +277,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void composite_fivePrimaryAndOneSecondaryFrames_matchesExpectedTimestamps()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     ImmutableList<Long> primaryTimestamps =
         ImmutableList.of(0L, 1_000_000L, 2_000_000L, 3_000_000L, 4_000_000L);
     ImmutableList<Long> secondaryTimestamps = ImmutableList.of(0L);
@@ -321,8 +302,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void composite_primaryDoubleSecondaryFrameRate_matchesExpectedTimestamps()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     ImmutableList<Long> primaryTimestamps =
         ImmutableList.of(0L, 1_000_000L, 2_000_000L, 3_000_000L);
     ImmutableList<Long> secondaryTimestamps = ImmutableList.of(0L, 2_000_000L);
@@ -346,8 +326,7 @@ public final class DefaultVideoCompositorPixelTest {
 
   @Test
   public void composite_primaryHalfSecondaryFrameRate_matchesExpectedTimestamps() throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     ImmutableList<Long> primaryTimestamps = ImmutableList.of(0L, 2_000_000L);
     ImmutableList<Long> secondaryTimestamps =
         ImmutableList.of(0L, 1_000_000L, 2_000_000L, 3_000_000L);
@@ -372,8 +351,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void composite_primaryVariableFrameRateWithOffset_matchesExpectedTimestampsAndBitmaps()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     ImmutableList<Long> primaryTimestamps = ImmutableList.of(1_000_000L, 3_000_000L, 4_000_000L);
     ImmutableList<Long> secondaryTimestamps =
         ImmutableList.of(0L, 1_000_000L, 2_000_000L, 3_000_000L, 4_000_000L);
@@ -398,8 +376,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void composite_secondaryVariableFrameRateWithOffset_matchesExpectedTimestampsAndBitmaps()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     ImmutableList<Long> primaryTimestamps =
         ImmutableList.of(0L, 1_000_000L, 2_000_000L, 3_000_000L, 4_000_000L);
     ImmutableList<Long> secondaryTimestamps = ImmutableList.of(1_000_000L, 3_000_000L, 4_000_000L);
@@ -426,8 +403,7 @@ public final class DefaultVideoCompositorPixelTest {
   @Test
   public void compositeTwoInputs_withTenFramesFromEach_matchesExpectedFrameCount()
       throws Exception {
-    compositorTestRunner =
-        new VideoCompositorTestRunner(testId, useSharedExecutor, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
+    compositorTestRunner = new VideoCompositorTestRunner(testId, TWO_INPUT_COMPOSITOR_EFFECT_LISTS);
     int numberOfFramesToQueue = 10;
 
     compositorTestRunner.queueBitmapToAllInputs(/* durationSec= */ numberOfFramesToQueue);
@@ -446,7 +422,6 @@ public final class DefaultVideoCompositorPixelTest {
     compositorTestRunner =
         new VideoCompositorTestRunner(
             testId,
-            useSharedExecutor,
             /* inputEffectLists= */ ImmutableList.of(
                 ImmutableList.of(),
                 ImmutableList.of(),
@@ -468,7 +443,6 @@ public final class DefaultVideoCompositorPixelTest {
     compositorTestRunner =
         new VideoCompositorTestRunner(
             testId,
-            useSharedExecutor,
             ImmutableList.of(
                 ImmutableList.of(RgbFilter.createGrayscaleFilter(), new AlphaScale(100f))));
 
@@ -488,7 +462,6 @@ public final class DefaultVideoCompositorPixelTest {
     compositorTestRunner =
         new VideoCompositorTestRunner(
             testId,
-            useSharedExecutor,
             ImmutableList.of(
                 ImmutableList.of(RgbFilter.createInvertedFilter(), new AlphaScale(0.4f)),
                 ImmutableList.of(RgbFilter.createGrayscaleFilter(), new AlphaScale(0.7f)),
@@ -536,7 +509,7 @@ public final class DefaultVideoCompositorPixelTest {
           public OverlaySettings getOverlaySettings(int inputId, long presentationTimeUs) {
             if (inputId == 0) {
               // This tests all OverlaySettings builder variables.
-              return new OverlaySettings.Builder()
+              return new StaticOverlaySettings.Builder()
                   .setScale(.25f, .5f)
                   .setOverlayFrameAnchor(1, -1)
                   .setBackgroundFrameAnchor(.9f, -.7f)
@@ -544,13 +517,13 @@ public final class DefaultVideoCompositorPixelTest {
                   .setAlphaScale(.5f)
                   .build();
             } else {
-              return new OverlaySettings.Builder().build();
+              return new StaticOverlaySettings.Builder().build();
             }
           }
         };
     compositorTestRunner =
         new VideoCompositorTestRunner(
-            testId, useSharedExecutor, inputEffectLists, pictureInPictureVideoCompositorSettings);
+            testId, inputEffectLists, pictureInPictureVideoCompositorSettings);
 
     compositorTestRunner.queueBitmapToAllInputs(1);
     compositorTestRunner.endCompositing();
@@ -575,15 +548,12 @@ public final class DefaultVideoCompositorPixelTest {
 
           @Override
           public OverlaySettings getOverlaySettings(int inputId, long presentationTimeUs) {
-            return new OverlaySettings.Builder().build();
+            return new StaticOverlaySettings.Builder().build();
           }
         };
     compositorTestRunner =
         new VideoCompositorTestRunner(
-            testId,
-            useSharedExecutor,
-            inputEffectLists,
-            secondStreamAsOutputSizeVideoCompositorSettings);
+            testId, inputEffectLists, secondStreamAsOutputSizeVideoCompositorSettings);
 
     compositorTestRunner.queueBitmapToAllInputs(1);
     compositorTestRunner.endCompositing();
@@ -617,7 +587,7 @@ public final class DefaultVideoCompositorPixelTest {
 
           @Override
           public OverlaySettings getOverlaySettings(int inputId, long presentationTimeUs) {
-            return new OverlaySettings.Builder()
+            return new StaticOverlaySettings.Builder()
                 .setOverlayFrameAnchor(-1, -1)
                 .setBackgroundFrameAnchor(-1, -1 + 2f * inputId / NUMBER_OF_INPUT_STREAMS)
                 .build();
@@ -625,7 +595,7 @@ public final class DefaultVideoCompositorPixelTest {
         };
     compositorTestRunner =
         new VideoCompositorTestRunner(
-            testId, useSharedExecutor, inputEffectLists, stackedFrameVideoCompositorSettings);
+            testId, inputEffectLists, stackedFrameVideoCompositorSettings);
 
     compositorTestRunner.queueBitmapToAllInputs(1);
     compositorTestRunner.endCompositing();
@@ -645,7 +615,8 @@ public final class DefaultVideoCompositorPixelTest {
     private final LinkedHashMap<Long, Bitmap> outputTimestampsToBitmaps;
     private final List<VideoFrameProcessorTestRunner> inputVideoFrameProcessorTestRunners;
     private final VideoCompositor videoCompositor;
-    @Nullable private final ExecutorService sharedExecutorService;
+    private final ExecutorService sharedExecutorService;
+    private final GlObjectsProvider glObjectsProvider;
     private final AtomicReference<VideoFrameProcessingException> compositionException;
     private final CountDownLatch compositorEnded;
     private final String testId;
@@ -654,47 +625,36 @@ public final class DefaultVideoCompositorPixelTest {
      * Creates an instance using {@link VideoCompositorSettings}.
      *
      * @param testId The {@link String} identifier for the test, used to name output files.
-     * @param useSharedExecutor Whether to use a shared executor for {@link
-     *     VideoFrameProcessorTestRunner} and {@link VideoCompositor} instances.
      * @param inputEffectLists {@link Effect}s to apply for {@link VideoCompositor} input sources.
      *     The size of this outer {@link List} is the amount of inputs. One inner list of {@link
      *     Effect}s is used for each input. For each input, the frame timestamp and {@code inputId}
-     *     are overlaid via {@link TextOverlay} prior to its effects being applied.
+     *     are overlaid via {@link CanvasOverlay} prior to its effects being applied.
      */
     public VideoCompositorTestRunner(
-        String testId,
-        boolean useSharedExecutor,
-        ImmutableList<ImmutableList<Effect>> inputEffectLists)
+        String testId, ImmutableList<ImmutableList<Effect>> inputEffectLists)
         throws GlUtil.GlException, VideoFrameProcessingException {
-      this(testId, useSharedExecutor, inputEffectLists, VideoCompositorSettings.DEFAULT);
+      this(testId, inputEffectLists, VideoCompositorSettings.DEFAULT);
     }
 
     /**
      * Creates an instance.
      *
      * @param testId The {@link String} identifier for the test, used to name output files.
-     * @param useSharedExecutor Whether to use a shared executor for {@link
-     *     VideoFrameProcessorTestRunner} and {@link VideoCompositor} instances.
      * @param inputEffectLists {@link Effect}s to apply for {@link VideoCompositor} input sources.
      *     The size of this outer {@link List} is the amount of inputs. One inner list of {@link
      *     Effect}s is used for each input. For each input, the frame timestamp and {@code inputId}
-     *     are overlaid via {@link TextOverlay} prior to its effects being applied.
+     *     are overlaid via {@link CanvasOverlay} prior to its effects being applied.
      * @param videoCompositorSettings The {@link VideoCompositorSettings}.
      */
     public VideoCompositorTestRunner(
         String testId,
-        boolean useSharedExecutor,
         ImmutableList<ImmutableList<Effect>> inputEffectLists,
         VideoCompositorSettings videoCompositorSettings)
         throws GlUtil.GlException, VideoFrameProcessingException {
       this.testId = testId;
       timeoutMs = inputEffectLists.size() * VIDEO_FRAME_PROCESSING_WAIT_MS;
-      sharedExecutorService =
-          useSharedExecutor ? Util.newSingleThreadExecutor("Effect:Shared:GlThread") : null;
-      EGLContext sharedEglContext = AndroidTestUtil.createOpenGlObjects();
-      GlObjectsProvider glObjectsProvider =
-          new DefaultGlObjectsProvider(
-              /* sharedEglContext= */ useSharedExecutor ? null : sharedEglContext);
+      sharedExecutorService = Util.newSingleThreadExecutor("Effect:Shared:GlThread");
+      glObjectsProvider = new DefaultGlObjectsProvider();
 
       compositionException = new AtomicReference<>();
       outputTimestampsToBitmaps = new LinkedHashMap<>();
@@ -703,7 +663,6 @@ public final class DefaultVideoCompositorPixelTest {
           new DefaultVideoCompositor(
               getApplicationContext(),
               glObjectsProvider,
-              videoCompositorSettings,
               sharedExecutorService,
               new VideoCompositor.Listener() {
                 @Override
@@ -721,9 +680,6 @@ public final class DefaultVideoCompositorPixelTest {
                   outputTexture,
                   presentationTimeUs,
                   syncObject) -> {
-                if (!useSharedExecutor) {
-                  GlUtil.awaitSyncObject(syncObject);
-                }
                 outputTimestampsToBitmaps.put(
                     presentationTimeUs,
                     BitmapPixelTestUtil.createUnpremultipliedArgb8888BitmapFromFocusedGlFramebuffer(
@@ -731,6 +687,7 @@ public final class DefaultVideoCompositorPixelTest {
                 outputTextureProducer.releaseOutputTexture(presentationTimeUs);
               },
               /* textureOutputCapacity= */ 1);
+      videoCompositor.setVideoCompositorSettings(videoCompositorSettings);
       inputBitmapReaders = new ArrayList<>();
       inputVideoFrameProcessorTestRunners = new ArrayList<>();
       for (int i = 0; i < inputEffectLists.size(); i++) {
@@ -837,17 +794,23 @@ public final class DefaultVideoCompositorPixelTest {
         inputVideoFrameProcessorTestRunners.get(i).release();
       }
       videoCompositor.release();
-
-      if (sharedExecutorService != null) {
-        try {
-          sharedExecutorService.shutdown();
-          if (!sharedExecutorService.awaitTermination(timeoutMs, MILLISECONDS)) {
-            throw new IllegalStateException("Missed shutdown timeout.");
-          }
-        } catch (InterruptedException unexpected) {
-          Thread.currentThread().interrupt();
-          throw new IllegalStateException(unexpected);
+      Future<?> unused =
+          sharedExecutorService.submit(
+              () -> {
+                try {
+                  glObjectsProvider.release(GlUtil.getDefaultEglDisplay());
+                } catch (Exception e) {
+                  Log.e(TAG, "Error releasing GlObjectsProvider", e);
+                }
+              });
+      try {
+        sharedExecutorService.shutdown();
+        if (!sharedExecutorService.awaitTermination(timeoutMs, MILLISECONDS)) {
+          throw new IllegalStateException("Missed shutdown timeout.");
         }
+      } catch (InterruptedException unexpected) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException(unexpected);
       }
     }
 
@@ -855,13 +818,14 @@ public final class DefaultVideoCompositorPixelTest {
         String testId,
         TextureBitmapReader textureBitmapReader,
         VideoCompositor videoCompositor,
-        @Nullable ExecutorService executorService,
+        ExecutorService executorService,
         GlObjectsProvider glObjectsProvider,
         int inputIndex) {
       videoCompositor.registerInputSource(inputIndex);
       DefaultVideoFrameProcessor.Factory.Builder defaultVideoFrameProcessorFactoryBuilder =
           new DefaultVideoFrameProcessor.Factory.Builder()
               .setGlObjectsProvider(glObjectsProvider)
+              .setExecutorService(executorService)
               .setSdrWorkingColorSpace(DefaultVideoFrameProcessor.WORKING_COLOR_SPACE_LINEAR)
               .setTextureOutput(
                   /* textureOutputListener= */ (outputTextureProducer,
@@ -879,9 +843,6 @@ public final class DefaultVideoCompositorPixelTest {
                         presentationTimeUs);
                   },
                   /* textureOutputCapacity= */ 2);
-      if (executorService != null) {
-        defaultVideoFrameProcessorFactoryBuilder.setExecutorService(executorService);
-      }
       return new VideoFrameProcessorTestRunner.Builder()
           .setTestId(testId)
           .setVideoFrameProcessorFactory(defaultVideoFrameProcessorFactoryBuilder.build())
@@ -898,61 +859,53 @@ public final class DefaultVideoCompositorPixelTest {
   private static OverlayEffect createTimestampOverlayEffect(int inputId) {
     return new OverlayEffect(
         ImmutableList.of(
-            new TextOverlay() {
-              @Override
-              public SpannableString getText(long presentationTimeUs) {
-                assertThat(presentationTimeUs % C.MICROS_PER_SECOND).isEqualTo(0);
-                String secondsString = String.valueOf(presentationTimeUs / C.MICROS_PER_SECOND);
-                String timeString = secondsString + "s";
-                SpannableString text = new SpannableString("In " + inputId + ", " + timeString);
+            new CanvasOverlay(/* useInputFrameSize= */ true) {
+              private final Paint inputPaint;
+              private final Paint timePaint;
 
-                // Following font styles are applied for consistent text rendering between devices.
-                text.setSpan(
-                    new ForegroundColorSpan(Color.BLACK),
-                    /* start= */ 0,
-                    text.length(),
-                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                text.setSpan(
-                    new AbsoluteSizeSpan(/* size= */ 20),
-                    /* start= */ 0,
-                    text.length(),
-                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                text.setSpan(
-                    new TypefaceSpan(/* family= */ "sans-serif"),
-                    /* start= */ 0,
-                    text.length(),
-                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-
-                // Following font styles increase pixel difference for the text it's applied on when
-                // this text changes, but also may be implemented differently on different devices
-                // or emulators, providing extraneous pixel differences. Only apply these styles to
-                // the values we expect to change in the event of a failing test. Namely, only apply
-                // these styles to the timestamp.
-                int timestampStart = text.length() - timeString.length();
-                int timestampEnd = timestampStart + secondsString.length();
-                text.setSpan(
-                    new BackgroundColorSpan(Color.WHITE),
-                    timestampStart,
-                    timestampEnd,
-                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                text.setSpan(
-                    new StyleSpan(Typeface.BOLD),
-                    timestampStart,
-                    timestampEnd,
-                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                text.setSpan(
-                    new AbsoluteSizeSpan(/* size= */ 42),
-                    timestampStart,
-                    timestampEnd,
-                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-                return text;
+              {
+                inputPaint = new Paint();
+                inputPaint.setStyle(Paint.Style.FILL);
+                switch (inputId) {
+                  case 0:
+                    inputPaint.setColor(Color.RED);
+                    break;
+                  case 1:
+                    inputPaint.setColor(Color.GREEN);
+                    break;
+                  case 2:
+                    inputPaint.setColor(Color.BLUE);
+                    break;
+                  default:
+                    inputPaint.setColor(Color.YELLOW);
+                    break;
+                }
+                timePaint = new Paint();
+                timePaint.setStyle(Paint.Style.FILL);
+                timePaint.setColor(Color.WHITE);
               }
 
               @Override
-              public OverlaySettings getOverlaySettings(long presentationTimeUs) {
-                return new OverlaySettings.Builder()
-                    .setBackgroundFrameAnchor(/* x= */ 0f, /* y= */ 0.5f)
-                    .build();
+              public void onDraw(Canvas canvas, long presentationTimeUs) {
+                canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+
+                int width = canvas.getWidth();
+                int height = canvas.getHeight();
+
+                // Draw Input ID indicator: A colored rectangle at the top.
+                canvas.drawRect(0, 0, width, height * INPUT_ID_BAR_HEIGHT_FRACTION, inputPaint);
+
+                // Draw Timestamp indicator: A white bar at the bottom whose width increases with
+                // time.
+                long seconds = presentationTimeUs / C.MICROS_PER_SECOND;
+
+                // Max 10 seconds for progress bar
+                float progress = (seconds % 10) / 10f;
+                if (progress == 0 && seconds > 0) {
+                  progress = 1.0f;
+                }
+                canvas.drawRect(
+                    0, height * TIMESTAMP_BAR_TOP_FRACTION, width * progress, height, timePaint);
               }
             }));
   }
@@ -961,11 +914,7 @@ public final class DefaultVideoCompositorPixelTest {
       String testId, Bitmap actualBitmap, String actualBitmapLabel, String expectedBitmapAssetPath)
       throws IOException {
     maybeSaveTestBitmap(testId, actualBitmapLabel, actualBitmap, /* path= */ null);
-    float averagePixelAbsoluteDifference =
-        BitmapPixelTestUtil.getBitmapAveragePixelAbsoluteDifferenceArgb8888(
-            readBitmapUnpremultipliedAlpha(expectedBitmapAssetPath), actualBitmap, testId);
-    assertWithMessage("Pixel difference for bitmapLabel = " + actualBitmapLabel)
-        .that(averagePixelAbsoluteDifference)
-        .isAtMost(MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE_WITH_TEXT_OVERLAY);
+    Bitmap expectedBitmap = readBitmapUnpremultipliedAlpha(expectedBitmapAssetPath);
+    assertBitmapsAreSimilar(expectedBitmap, actualBitmap, PSNR_THRESHOLD_LOCAL);
   }
 }

@@ -16,15 +16,16 @@
 
 package androidx.media3.transformer;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static android.os.Build.VERSION.SDK_INT;
 import static androidx.media3.common.util.MediaFormatUtil.createMediaFormatFromFormat;
-import static androidx.media3.common.util.Util.SDK_INT;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.Math.max;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.media.metrics.LogSessionId;
 import android.os.Build;
 import android.util.Pair;
 import android.view.Surface;
@@ -34,10 +35,11 @@ import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.CodecSpecificDataUtil;
+import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.MediaFormatUtil;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil;
@@ -183,6 +185,7 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
      * @param dynamicSchedulingEnabled Whether to enable dynamic scheduling.
      */
     @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/369523131 - Remove once feature is enabled by default.
     public Builder experimentalSetDynamicSchedulingEnabled(boolean dynamicSchedulingEnabled) {
       this.dynamicSchedulingEnabled = dynamicSchedulingEnabled;
       return this;
@@ -238,16 +241,25 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
   }
 
   @Override
-  public DefaultCodec createForAudioDecoding(Format format) throws ExportException {
+  public DefaultCodec createForAudioDecoding(Format format, @Nullable LogSessionId logSessionId)
+      throws ExportException {
     MediaFormat mediaFormat = createMediaFormatFromFormat(format);
     return createCodecForMediaFormat(
-        mediaFormat, format, /* outputSurface= */ null, /* devicePrefersSoftwareDecoder= */ false);
+        mediaFormat,
+        format,
+        /* outputSurface= */ null,
+        /* devicePrefersSoftwareDecoder= */ false,
+        logSessionId);
   }
 
   @SuppressLint("InlinedApi")
   @Override
   public DefaultCodec createForVideoDecoding(
-      Format format, Surface outputSurface, boolean requestSdrToneMapping) throws ExportException {
+      Format format,
+      Surface outputSurface,
+      boolean requestSdrToneMapping,
+      @Nullable LogSessionId logSessionId)
+      throws ExportException {
     if (ColorInfo.isTransferHdr(format.colorInfo)) {
       if (requestSdrToneMapping
           && (SDK_INT < 31
@@ -257,7 +269,7 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
             format, /* reason= */ "Tone-mapping HDR is not supported on this device.");
       }
       if (SDK_INT < 29) {
-        // TODO(b/266837571, b/267171669): Remove API version restriction after fixing linked bugs.
+        // TODO: b/266837571, b/267171669 - Remove API version restriction after fixing linked bugs.
         throw createExportException(
             format, /* reason= */ "Decoding HDR is not supported on this device.");
       }
@@ -282,7 +294,8 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
     }
 
     @Nullable
-    Pair<Integer, Integer> codecProfileAndLevel = MediaCodecUtil.getCodecProfileAndLevel(format);
+    Pair<Integer, Integer> codecProfileAndLevel =
+        CodecSpecificDataUtil.getCodecProfileAndLevel(format);
     if (codecProfileAndLevel != null) {
       MediaFormatUtil.maybeSetInteger(
           mediaFormat, MediaFormat.KEY_PROFILE, codecProfileAndLevel.first);
@@ -294,25 +307,23 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
       mediaFormat.setInteger(MediaFormat.KEY_IMPORTANCE, max(0, -codecPriority));
     }
 
-    if (shouldConfigureOperatingRate) {
-      configureOperatingRate(mediaFormat);
-    }
-
     return createCodecForMediaFormat(
-        mediaFormat, format, outputSurface, devicePrefersSoftwareDecoder(format));
+        mediaFormat, format, outputSurface, devicePrefersSoftwareDecoder(format), logSessionId);
   }
 
   private DefaultCodec createCodecForMediaFormat(
       MediaFormat mediaFormat,
       Format format,
       @Nullable Surface outputSurface,
-      boolean devicePrefersSoftwareDecoder)
+      boolean devicePrefersSoftwareDecoder,
+      @Nullable LogSessionId logSessionId)
       throws ExportException {
     List<MediaCodecInfo> decoderInfos = ImmutableList.of();
     checkNotNull(format.sampleMimeType);
     try {
       decoderInfos =
-          MediaCodecUtil.getDecoderInfosSortedByFormatSupport(
+          MediaCodecUtil.getDecoderInfosSortedByFullFormatSupport(
+              context,
               MediaCodecUtil.getDecoderInfosSoftMatch(
                   mediaCodecSelector,
                   format,
@@ -339,6 +350,15 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
       }
     }
 
+    // MediaFormat#KEY_COLOR_TRANSFER_REQUEST is available from API 31.
+    if (SDK_INT >= 31 && decoderInfos.get(0).codecMimeType.equals(MimeTypes.VIDEO_DOLBY_VISION)) {
+      // Ignore the dolby vision dynamic metadata.
+      mediaFormat.setInteger(
+          MediaFormat.KEY_COLOR_TRANSFER_REQUEST, MediaFormat.COLOR_TRANSFER_HLG);
+    }
+    if (SDK_INT >= 35 && logSessionId != null) {
+      TransformerUtil.Api35.setLogSessionIdToMediaCodecFormat(mediaFormat, logSessionId);
+    }
     List<ExportException> codecInitExceptions = new ArrayList<>();
     DefaultCodec codec =
         createCodecFromDecoderInfos(
@@ -361,7 +381,7 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
     return dynamicSchedulingEnabled;
   }
 
-  private static DefaultCodec createCodecFromDecoderInfos(
+  private DefaultCodec createCodecFromDecoderInfos(
       Context context,
       List<MediaCodecInfo> decoderInfos,
       Format format,
@@ -375,6 +395,10 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
       // The MIME type of the selected decoder may differ from Format.sampleMimeType, for example,
       // video/hevc is used instead of video/dolby-vision for some specific DolbyVision videos.
       mediaFormat.setString(MediaFormat.KEY_MIME, codecMimeType);
+      if (shouldConfigureOperatingRate) {
+        configureOperatingRate(
+            mediaFormat, decoderInfo.getMaxSupportedFrameRate(format.width, format.height));
+      }
       try {
         return new DefaultCodec(
             context, format, mediaFormat, decoderInfo.name, /* isDecoder= */ true, outputSurface);
@@ -387,7 +411,7 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
     throw codecInitExceptions.get(0);
   }
 
-  private static void configureOperatingRate(MediaFormat mediaFormat) {
+  private static void configureOperatingRate(MediaFormat mediaFormat, float maxSupportedFrameRate) {
     if (SDK_INT < 25) {
       // Not setting priority and operating rate achieves better decoding performance.
       return;
@@ -398,8 +422,7 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
       mediaFormat.setInteger(MediaFormat.KEY_PRIORITY, 1);
     }
 
-    // Setting KEY_OPERATING_RATE to Integer.MAX_VALUE leads to slower operation on some devices.
-    mediaFormat.setInteger(MediaFormat.KEY_OPERATING_RATE, 10000);
+    mediaFormat.setFloat(MediaFormat.KEY_OPERATING_RATE, maxSupportedFrameRate);
   }
 
   private static boolean deviceNeedsPriorityWorkaround() {
@@ -416,28 +439,28 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
         && format.height >= 4320
         && format.sampleMimeType != null
         && format.sampleMimeType.equals(MimeTypes.VIDEO_H265)
-        && (Util.MODEL.equals("SM-F711U1") || Util.MODEL.equals("SM-F926U1"));
+        && (Build.MODEL.equals("SM-F711U1") || Build.MODEL.equals("SM-F926U1"));
   }
 
   private static boolean deviceNeedsDisableToneMappingWorkaround(
       @C.ColorTransfer int colorTransfer) {
-    if (Util.MANUFACTURER.equals("Google") && Build.ID.startsWith("TP1A")) {
+    if (Build.MANUFACTURER.equals("Google") && Build.ID.startsWith("TP1A")) {
       // Some Pixel 6 builds report support for tone mapping but the feature doesn't work
       // (see b/249297370#comment8).
       return true;
     }
     if (colorTransfer == C.COLOR_TRANSFER_HLG
-        && (Util.MODEL.startsWith("SM-F936")
-            || Util.MODEL.startsWith("SM-F916")
-            || Util.MODEL.startsWith("SM-F721")
-            || Util.MODEL.equals("SM-X900"))) {
+        && (Build.MODEL.startsWith("SM-F936")
+            || Build.MODEL.startsWith("SM-F916")
+            || Build.MODEL.startsWith("SM-F721")
+            || Build.MODEL.equals("SM-X900"))) {
       // Some Samsung Galaxy Z Fold devices report support for HLG tone mapping but the feature only
       // works on PQ (see b/282791751#comment7).
       return true;
     }
     if (SDK_INT < 34
         && colorTransfer == C.COLOR_TRANSFER_ST2084
-        && Util.MODEL.startsWith("SM-F936")) {
+        && Build.MODEL.startsWith("SM-F936")) {
       // The Samsung Fold 4 HDR10 codec plugin for tonemapping sets incorrect crop values, so block
       // using it (see b/290725189).
       return true;
@@ -447,7 +470,7 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
 
   private static boolean deviceNeedsNoFrameRateWorkaround() {
     // Redmi Note 9 Pro fails if KEY_FRAME_RATE is set too high (see b/278076311).
-    return SDK_INT < 30 && Util.DEVICE.equals("joyeuse");
+    return SDK_INT < 30 && Build.DEVICE.equals("joyeuse");
   }
 
   private static boolean decoderSupportsKeyAllowFrameDrop(Context context) {
@@ -464,9 +487,9 @@ public final class DefaultDecoderFactory implements Codec.DecoderFactory {
     // hardware decoder + software encoder (17 fps).
     // Due to b/267740292 using hardware to software encoder fallback is risky.
     return format.width * format.height >= 1920 * 1080
-        && (Ascii.equalsIgnoreCase(Util.MODEL, "vivo 1906")
-            || Ascii.equalsIgnoreCase(Util.MODEL, "redmi 7a")
-            || Ascii.equalsIgnoreCase(Util.MODEL, "redmi 8"));
+        && (Ascii.equalsIgnoreCase(Build.MODEL, "vivo 1906")
+            || Ascii.equalsIgnoreCase(Build.MODEL, "redmi 7a")
+            || Ascii.equalsIgnoreCase(Build.MODEL, "redmi 8"));
   }
 
   private static ExportException createExportException(Format format, String reason) {

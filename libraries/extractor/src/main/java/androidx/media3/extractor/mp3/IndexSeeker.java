@@ -15,11 +15,11 @@
  */
 package androidx.media3.extractor.mp3;
 
+import static androidx.media3.extractor.mp3.Mp3Util.computeAverageBitrate;
+
 import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.C;
-import androidx.media3.common.util.Util;
 import androidx.media3.extractor.IndexSeekMap;
-import java.math.RoundingMode;
 
 /** MP3 seeker that builds a time-to-byte mapping as the stream is read. */
 /* package */ final class IndexSeeker implements Seeker {
@@ -27,6 +27,7 @@ import java.math.RoundingMode;
   @VisibleForTesting
   /* package */ static final long MIN_TIME_BETWEEN_POINTS_US = C.MICROS_PER_SECOND / 10;
 
+  private final long dataStartPosition;
   private final long dataEndPosition;
   private final int averageBitrate;
   private final IndexSeekMap indexSeekMap;
@@ -37,21 +38,19 @@ import java.math.RoundingMode;
             /* positions= */ new long[] {dataStartPosition},
             /* timesUs= */ new long[] {0L},
             durationUs);
+    this.dataStartPosition = dataStartPosition;
     this.dataEndPosition = dataEndPosition;
-    if (durationUs != C.TIME_UNSET) {
-      long bitrate =
-          Util.scaleLargeValue(
-              dataStartPosition - dataEndPosition, 8, durationUs, RoundingMode.HALF_UP);
-      this.averageBitrate =
-          bitrate > 0 && bitrate <= Integer.MAX_VALUE ? (int) bitrate : C.RATE_UNSET_INT;
-    } else {
-      this.averageBitrate = C.RATE_UNSET_INT;
-    }
+    this.averageBitrate = computeAverageBitrate(dataEndPosition - dataStartPosition, durationUs);
   }
 
   @Override
   public long getTimeUs(long position) {
     return indexSeekMap.getTimeUs(position);
+  }
+
+  @Override
+  public long getDataStartPosition() {
+    return dataStartPosition;
   }
 
   @Override

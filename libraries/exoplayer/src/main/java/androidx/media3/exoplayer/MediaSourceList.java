@@ -15,7 +15,9 @@
  */
 package androidx.media3.exoplayer;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 
@@ -24,16 +26,15 @@ import android.util.Pair;
 import androidx.annotation.Nullable;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.Timeline;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.HandlerWrapper;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.Util;
-import androidx.media3.datasource.TransferListener;
 import androidx.media3.exoplayer.analytics.AnalyticsCollector;
 import androidx.media3.exoplayer.analytics.PlayerId;
 import androidx.media3.exoplayer.drm.DrmSession;
 import androidx.media3.exoplayer.drm.DrmSessionEventListener;
+import androidx.media3.exoplayer.drm.KeyRequestInfo;
 import androidx.media3.exoplayer.source.LoadEventInfo;
 import androidx.media3.exoplayer.source.MaskingMediaPeriod;
 import androidx.media3.exoplayer.source.MaskingMediaSource;
@@ -44,6 +45,7 @@ import androidx.media3.exoplayer.source.MediaSourceEventListener;
 import androidx.media3.exoplayer.source.ShuffleOrder;
 import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder;
 import androidx.media3.exoplayer.upstream.Allocator;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -78,6 +80,7 @@ import java.util.Set;
   private static final String TAG = "MediaSourceList";
 
   private final PlayerId playerId;
+  private final BandwidthMeter bandwidthMeter;
   private final List<MediaSourceHolder> mediaSourceHolders;
   private final IdentityHashMap<MediaPeriod, MediaSourceHolder> mediaSourceByMediaPeriod;
   private final Map<Object, MediaSourceHolder> mediaSourceByUid;
@@ -89,8 +92,6 @@ import java.util.Set;
   private ShuffleOrder shuffleOrder;
   private boolean isPrepared;
 
-  @Nullable private TransferListener mediaTransferListener;
-
   /**
    * Creates the media source list.
    *
@@ -101,13 +102,16 @@ import java.util.Set;
    * @param analyticsCollectorHandler The {@link Handler} to call {@link AnalyticsCollector} methods
    *     on.
    * @param playerId The {@link PlayerId} of the player using this list.
+   * @param bandwidthMeter The {@link BandwidthMeter} of the player using this list.
    */
   public MediaSourceList(
       MediaSourceListInfoRefreshListener listener,
       AnalyticsCollector analyticsCollector,
       HandlerWrapper analyticsCollectorHandler,
-      PlayerId playerId) {
+      PlayerId playerId,
+      BandwidthMeter bandwidthMeter) {
     this.playerId = playerId;
+    this.bandwidthMeter = bandwidthMeter;
     mediaSourceListInfoListener = listener;
     shuffleOrder = new DefaultShuffleOrder(0);
     mediaSourceByMediaPeriod = new IdentityHashMap<>();
@@ -191,7 +195,7 @@ import java.util.Set;
    *     {@code toIndex} &gt; {@link #getSize()}, {@code fromIndex} &gt; {@code toIndex}
    */
   public Timeline removeMediaSourceRange(int fromIndex, int toIndex, ShuffleOrder shuffleOrder) {
-    Assertions.checkArgument(fromIndex >= 0 && fromIndex <= toIndex && toIndex <= getSize());
+    checkArgument(fromIndex >= 0 && fromIndex <= toIndex && toIndex <= getSize());
     this.shuffleOrder = shuffleOrder;
     removeMediaSourcesInternal(fromIndex, toIndex);
     return createTimeline();
@@ -232,7 +236,7 @@ import java.util.Set;
    */
   public Timeline moveMediaSourceRange(
       int fromIndex, int toIndex, int newFromIndex, ShuffleOrder shuffleOrder) {
-    Assertions.checkArgument(
+    checkArgument(
         fromIndex >= 0 && fromIndex <= toIndex && toIndex <= getSize() && newFromIndex >= 0);
     this.shuffleOrder = shuffleOrder;
     if (fromIndex == toIndex || fromIndex == newFromIndex) {
@@ -264,8 +268,8 @@ import java.util.Set;
    */
   public Timeline updateMediaSourcesWithMediaItems(
       int fromIndex, int toIndex, List<MediaItem> mediaItems) {
-    Assertions.checkArgument(fromIndex >= 0 && fromIndex <= toIndex && toIndex <= getSize());
-    Assertions.checkArgument(mediaItems.size() == toIndex - fromIndex);
+    checkArgument(fromIndex >= 0 && fromIndex <= toIndex && toIndex <= getSize());
+    checkArgument(mediaItems.size() == toIndex - fromIndex);
     for (int i = fromIndex; i < toIndex; i++) {
       mediaSourceHolders.get(i).mediaSource.updateMediaItem(mediaItems.get(i - fromIndex));
     }
@@ -307,9 +311,8 @@ import java.util.Set;
   }
 
   /** Prepares the playlist. */
-  public void prepare(@Nullable TransferListener mediaTransferListener) {
-    Assertions.checkState(!isPrepared);
-    this.mediaTransferListener = mediaTransferListener;
+  public void prepare() {
+    checkState(!isPrepared);
     for (int i = 0; i < mediaSourceHolders.size(); i++) {
       MediaSourceHolder mediaSourceHolder = mediaSourceHolders.get(i);
       prepareChildSource(mediaSourceHolder);
@@ -471,7 +474,7 @@ import java.util.Set;
     childSources.put(holder, new MediaSourceAndListener(mediaSource, caller, eventListener));
     mediaSource.addEventListener(Util.createHandlerForCurrentOrMainLooper(), eventListener);
     mediaSource.addDrmEventListener(Util.createHandlerForCurrentOrMainLooper(), eventListener);
-    mediaSource.prepareSource(caller, mediaTransferListener, playerId);
+    mediaSource.prepareSource(caller, playerId, bandwidthMeter);
   }
 
   private void maybeReleaseChildSource(MediaSourceHolder mediaSourceHolder) {
@@ -564,7 +567,8 @@ import java.util.Set;
         int windowIndex,
         @Nullable MediaSource.MediaPeriodId mediaPeriodId,
         LoadEventInfo loadEventData,
-        MediaLoadData mediaLoadData) {
+        MediaLoadData mediaLoadData,
+        int retryCount) {
       @Nullable
       Pair<Integer, MediaSource.@NullableType MediaPeriodId> eventParameters =
           getEventParameters(windowIndex, mediaPeriodId);
@@ -572,7 +576,11 @@ import java.util.Set;
         eventHandler.post(
             () ->
                 eventListener.onLoadStarted(
-                    eventParameters.first, eventParameters.second, loadEventData, mediaLoadData));
+                    eventParameters.first,
+                    eventParameters.second,
+                    loadEventData,
+                    mediaLoadData,
+                    retryCount));
       }
     }
 
@@ -686,13 +694,17 @@ import java.util.Set;
 
     @Override
     public void onDrmKeysLoaded(
-        int windowIndex, @Nullable MediaSource.MediaPeriodId mediaPeriodId) {
+        int windowIndex,
+        @Nullable MediaSource.MediaPeriodId mediaPeriodId,
+        KeyRequestInfo keyRequestInfo) {
       @Nullable
       Pair<Integer, MediaSource.@NullableType MediaPeriodId> eventParameters =
           getEventParameters(windowIndex, mediaPeriodId);
       if (eventParameters != null) {
         eventHandler.post(
-            () -> eventListener.onDrmKeysLoaded(eventParameters.first, eventParameters.second));
+            () ->
+                eventListener.onDrmKeysLoaded(
+                    eventParameters.first, eventParameters.second, keyRequestInfo));
       }
     }
 

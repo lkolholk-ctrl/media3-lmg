@@ -15,7 +15,8 @@
  */
 package androidx.media3.common;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
+import static androidx.media3.common.util.Util.convertToNullIfInvalid;
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.annotation.ElementType.FIELD;
 import static java.lang.annotation.ElementType.LOCAL_VARIABLE;
 import static java.lang.annotation.ElementType.METHOD;
@@ -24,12 +25,12 @@ import static java.lang.annotation.ElementType.TYPE_USE;
 
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.TextUtils;
 import androidx.annotation.IntDef;
 import androidx.annotation.IntRange;
 import androidx.annotation.Nullable;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
-import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.lang.annotation.Documented;
@@ -39,6 +40,7 @@ import java.lang.annotation.Target;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Metadata of a {@link MediaItem}, playlist, or a combination of multiple sources of {@link
@@ -60,6 +62,7 @@ public final class MediaMetadata {
     @Nullable private Rating userRating;
     @Nullable private Rating overallRating;
     @Nullable private byte[] artworkData;
+    @Nullable private BundleableByteArray bundleableArtworkData;
     @Nullable private @PictureType Integer artworkDataType;
     @Nullable private Uri artworkUri;
     @Nullable private Integer trackNumber;
@@ -78,8 +81,10 @@ public final class MediaMetadata {
     @Nullable private Integer releaseMonth;
     @Nullable private Integer releaseDay;
     @Nullable private CharSequence writer;
+    @Nullable private CharSequence author;
     @Nullable private CharSequence composer;
     @Nullable private CharSequence conductor;
+    @Nullable private CharSequence discSubtitle;
     @Nullable private Integer discNumber;
     @Nullable private Integer totalDiscCount;
     @Nullable private CharSequence genre;
@@ -106,6 +111,7 @@ public final class MediaMetadata {
       this.userRating = mediaMetadata.userRating;
       this.overallRating = mediaMetadata.overallRating;
       this.artworkData = mediaMetadata.artworkData;
+      this.bundleableArtworkData = mediaMetadata.bundleableArtworkData;
       this.artworkDataType = mediaMetadata.artworkDataType;
       this.artworkUri = mediaMetadata.artworkUri;
       this.trackNumber = mediaMetadata.trackNumber;
@@ -120,9 +126,11 @@ public final class MediaMetadata {
       this.releaseMonth = mediaMetadata.releaseMonth;
       this.releaseDay = mediaMetadata.releaseDay;
       this.writer = mediaMetadata.writer;
+      this.author = mediaMetadata.author;
       this.composer = mediaMetadata.composer;
       this.conductor = mediaMetadata.conductor;
       this.discNumber = mediaMetadata.discNumber;
+      this.discSubtitle = mediaMetadata.discSubtitle;
       this.totalDiscCount = mediaMetadata.totalDiscCount;
       this.genre = mediaMetadata.genre;
       this.compilation = mediaMetadata.compilation;
@@ -194,7 +202,6 @@ public final class MediaMetadata {
      *
      * @throws IllegalArgumentException if the duration is negative.
      */
-    @UnstableApi
     @CanIgnoreReturnValue
     public Builder setDurationMs(@Nullable Long durationMs) {
       checkArgument(durationMs == null || durationMs >= 0);
@@ -235,6 +242,7 @@ public final class MediaMetadata {
     public Builder setArtworkData(
         @Nullable byte[] artworkData, @Nullable @PictureType Integer artworkDataType) {
       this.artworkData = artworkData == null ? null : artworkData.clone();
+      this.bundleableArtworkData = null;
       this.artworkDataType = artworkDataType;
       return this;
     }
@@ -250,9 +258,10 @@ public final class MediaMetadata {
     @CanIgnoreReturnValue
     public Builder maybeSetArtworkData(byte[] artworkData, @PictureType int artworkDataType) {
       if (this.artworkData == null
-          || Util.areEqual(artworkDataType, PICTURE_TYPE_FRONT_COVER)
-          || !Util.areEqual(this.artworkDataType, PICTURE_TYPE_FRONT_COVER)) {
+          || artworkDataType == PICTURE_TYPE_FRONT_COVER
+          || !Objects.equals(this.artworkDataType, PICTURE_TYPE_FRONT_COVER)) {
         this.artworkData = artworkData.clone();
+        this.bundleableArtworkData = null;
         this.artworkDataType = artworkDataType;
       }
       return this;
@@ -383,6 +392,14 @@ public final class MediaMetadata {
       return this;
     }
 
+    /** Sets the author. */
+    @CanIgnoreReturnValue
+    @UnstableApi
+    public Builder setAuthor(@Nullable CharSequence author) {
+      this.author = author;
+      return this;
+    }
+
     /** Sets the composer. */
     @CanIgnoreReturnValue
     public Builder setComposer(@Nullable CharSequence composer) {
@@ -394,6 +411,14 @@ public final class MediaMetadata {
     @CanIgnoreReturnValue
     public Builder setConductor(@Nullable CharSequence conductor) {
       this.conductor = conductor;
+      return this;
+    }
+
+    /** Sets the disc subtitle. */
+    @UnstableApi
+    @CanIgnoreReturnValue
+    public Builder setDiscSubtitle(@Nullable CharSequence discSubtitle) {
+      this.discSubtitle = discSubtitle;
       return this;
     }
 
@@ -545,6 +570,7 @@ public final class MediaMetadata {
       if (mediaMetadata.artworkUri != null || mediaMetadata.artworkData != null) {
         setArtworkUri(mediaMetadata.artworkUri);
         setArtworkData(mediaMetadata.artworkData, mediaMetadata.artworkDataType);
+        bundleableArtworkData = mediaMetadata.bundleableArtworkData;
       }
       if (mediaMetadata.trackNumber != null) {
         setTrackNumber(mediaMetadata.trackNumber);
@@ -590,6 +616,9 @@ public final class MediaMetadata {
       }
       if (mediaMetadata.conductor != null) {
         setConductor(mediaMetadata.conductor);
+      }
+      if (mediaMetadata.discSubtitle != null) {
+        setDiscSubtitle(mediaMetadata.discSubtitle);
       }
       if (mediaMetadata.discNumber != null) {
         setDiscNumber(mediaMetadata.discNumber);
@@ -1029,7 +1058,7 @@ public final class MediaMetadata {
    * informational purpose only. For retrieving the duration of the media item currently being
    * played, use {@link Player#getDuration()} instead.
    */
-  @UnstableApi @Nullable public final Long durationMs;
+  @Nullable public final Long durationMs;
 
   /** Optional user {@link Rating}. */
   @Nullable public final Rating userRating;
@@ -1039,6 +1068,9 @@ public final class MediaMetadata {
 
   /** Optional artwork data as a compressed byte array. */
   @Nullable public final byte[] artworkData;
+
+  /** Lazily initialized bundleable version of {@link #artworkData}. */
+  @Nullable private BundleableByteArray bundleableArtworkData;
 
   /** Optional {@link PictureType} of the artwork data. */
   @Nullable public final @PictureType Integer artworkDataType;
@@ -1111,11 +1143,17 @@ public final class MediaMetadata {
   /** Optional writer. */
   @Nullable public final CharSequence writer;
 
+  /** Optional author. */
+  @UnstableApi @Nullable public final CharSequence author;
+
   /** Optional composer. */
   @Nullable public final CharSequence composer;
 
   /** Optional conductor. */
   @Nullable public final CharSequence conductor;
+
+  /** Optional disc subtitle. */
+  @UnstableApi @Nullable public final CharSequence discSubtitle;
 
   /** Optional disc number. */
   @Nullable public final Integer discNumber;
@@ -1179,6 +1217,7 @@ public final class MediaMetadata {
     this.userRating = builder.userRating;
     this.overallRating = builder.overallRating;
     this.artworkData = builder.artworkData;
+    this.bundleableArtworkData = builder.bundleableArtworkData;
     this.artworkDataType = builder.artworkDataType;
     this.artworkUri = builder.artworkUri;
     this.trackNumber = builder.trackNumber;
@@ -1194,8 +1233,10 @@ public final class MediaMetadata {
     this.releaseMonth = builder.releaseMonth;
     this.releaseDay = builder.releaseDay;
     this.writer = builder.writer;
+    this.author = builder.author;
     this.composer = builder.composer;
     this.conductor = builder.conductor;
+    this.discSubtitle = builder.discSubtitle;
     this.discNumber = builder.discNumber;
     this.totalDiscCount = builder.totalDiscCount;
     this.genre = builder.genre;
@@ -1222,47 +1263,48 @@ public final class MediaMetadata {
       return false;
     }
     MediaMetadata that = (MediaMetadata) obj;
-    return Util.areEqual(title, that.title)
-        && Util.areEqual(artist, that.artist)
-        && Util.areEqual(albumTitle, that.albumTitle)
-        && Util.areEqual(albumArtist, that.albumArtist)
-        && Util.areEqual(displayTitle, that.displayTitle)
-        && Util.areEqual(subtitle, that.subtitle)
-        && Util.areEqual(description, that.description)
-        && Util.areEqual(durationMs, that.durationMs)
-        && Util.areEqual(userRating, that.userRating)
-        && Util.areEqual(overallRating, that.overallRating)
+    return TextUtils.equals(title, that.title)
+        && TextUtils.equals(artist, that.artist)
+        && TextUtils.equals(albumTitle, that.albumTitle)
+        && TextUtils.equals(albumArtist, that.albumArtist)
+        && TextUtils.equals(displayTitle, that.displayTitle)
+        && TextUtils.equals(subtitle, that.subtitle)
+        && TextUtils.equals(description, that.description)
+        && Objects.equals(durationMs, that.durationMs)
+        && Objects.equals(userRating, that.userRating)
+        && Objects.equals(overallRating, that.overallRating)
         && Arrays.equals(artworkData, that.artworkData)
-        && Util.areEqual(artworkDataType, that.artworkDataType)
-        && Util.areEqual(artworkUri, that.artworkUri)
-        && Util.areEqual(trackNumber, that.trackNumber)
-        && Util.areEqual(totalTrackCount, that.totalTrackCount)
-        && Util.areEqual(folderType, that.folderType)
-        && Util.areEqual(isBrowsable, that.isBrowsable)
-        && Util.areEqual(isPlayable, that.isPlayable)
-        && Util.areEqual(recordingYear, that.recordingYear)
-        && Util.areEqual(recordingMonth, that.recordingMonth)
-        && Util.areEqual(recordingDay, that.recordingDay)
-        && Util.areEqual(releaseYear, that.releaseYear)
-        && Util.areEqual(releaseMonth, that.releaseMonth)
-        && Util.areEqual(releaseDay, that.releaseDay)
-        && Util.areEqual(writer, that.writer)
-        && Util.areEqual(composer, that.composer)
-        && Util.areEqual(conductor, that.conductor)
-        && Util.areEqual(discNumber, that.discNumber)
-        && Util.areEqual(totalDiscCount, that.totalDiscCount)
-        && Util.areEqual(genre, that.genre)
-        && Util.areEqual(compilation, that.compilation)
-        && Util.areEqual(station, that.station)
-        && Util.areEqual(mediaType, that.mediaType)
-        && Util.areEqual(supportedCommands, that.supportedCommands)
+        && Objects.equals(artworkDataType, that.artworkDataType)
+        && Objects.equals(artworkUri, that.artworkUri)
+        && Objects.equals(trackNumber, that.trackNumber)
+        && Objects.equals(totalTrackCount, that.totalTrackCount)
+        && Objects.equals(folderType, that.folderType)
+        && Objects.equals(isBrowsable, that.isBrowsable)
+        && Objects.equals(isPlayable, that.isPlayable)
+        && Objects.equals(recordingYear, that.recordingYear)
+        && Objects.equals(recordingMonth, that.recordingMonth)
+        && Objects.equals(recordingDay, that.recordingDay)
+        && Objects.equals(releaseYear, that.releaseYear)
+        && Objects.equals(releaseMonth, that.releaseMonth)
+        && Objects.equals(releaseDay, that.releaseDay)
+        && TextUtils.equals(writer, that.writer)
+        && TextUtils.equals(composer, that.composer)
+        && TextUtils.equals(conductor, that.conductor)
+        && TextUtils.equals(discSubtitle, that.discSubtitle)
+        && Objects.equals(discNumber, that.discNumber)
+        && Objects.equals(totalDiscCount, that.totalDiscCount)
+        && TextUtils.equals(genre, that.genre)
+        && TextUtils.equals(compilation, that.compilation)
+        && TextUtils.equals(station, that.station)
+        && Objects.equals(mediaType, that.mediaType)
+        && Objects.equals(supportedCommands, that.supportedCommands)
         && ((extras == null) == (that.extras == null));
   }
 
   @SuppressWarnings("deprecation") // Hashing deprecated fields.
   @Override
   public int hashCode() {
-    return Objects.hashCode(
+    return Objects.hash(
         title,
         artist,
         albumTitle,
@@ -1290,6 +1332,7 @@ public final class MediaMetadata {
         writer,
         composer,
         conductor,
+        discSubtitle,
         discNumber,
         totalDiscCount,
         genre,
@@ -1335,11 +1378,34 @@ public final class MediaMetadata {
   private static final String FIELD_IS_BROWSABLE = Util.intToStringMaxRadix(32);
   private static final String FIELD_DURATION_MS = Util.intToStringMaxRadix(33);
   private static final String FIELD_SUPPORTED_COMMANDS = Util.intToStringMaxRadix(34);
+  private static final String FIELD_DISC_SUBTITLE = Util.intToStringMaxRadix(35);
   private static final String FIELD_EXTRAS = Util.intToStringMaxRadix(1000);
 
-  @SuppressWarnings("deprecation") // Bundling deprecated fields.
+  // Use a fairly lenient threshold for sending byte array to legacy processes that don't support
+  // BundleableByteArray yet. This is because most practical compressed artwork data is larger
+  // than C.SUGGESTED_MAX_IPC_SIZE. We still need to enforce a maximum to stay well under the global
+  // hard limit of 1MB across of concurrent binder transactions to this process.
+  private static final int LEGACY_ARTWORK_DATA_ARRAY_SIZE_LIMIT = 500_000;
+
+  /**
+   * @deprecated Use {@link #toBundle(int)} instead.
+   */
+  @Deprecated
   @UnstableApi
   public Bundle toBundle() {
+    return toBundle(MediaLibraryInfo.INTERFACE_VERSION);
+  }
+
+  /**
+   * Writes {@link MediaMetadata} to a {@link Bundle}.
+   *
+   * @param interfaceVersion The {@link MediaLibraryInfo#INTERFACE_VERSION} of the receiving
+   *     process.
+   * @return A {@link Bundle} containing the data of this instance.
+   */
+  @SuppressWarnings("deprecation") // Bundling deprecated fields.
+  @UnstableApi
+  public Bundle toBundle(int interfaceVersion) {
     Bundle bundle = new Bundle();
     if (title != null) {
       bundle.putCharSequence(FIELD_TITLE, title);
@@ -1366,7 +1432,14 @@ public final class MediaMetadata {
       bundle.putLong(FIELD_DURATION_MS, durationMs);
     }
     if (artworkData != null) {
-      bundle.putByteArray(FIELD_ARTWORK_DATA, artworkData);
+      if (interfaceVersion >= 9) {
+        if (bundleableArtworkData == null) {
+          bundleableArtworkData = new BundleableByteArray(artworkData);
+        }
+        bundle.putBundle(FIELD_ARTWORK_DATA, bundleableArtworkData.toBundle());
+      } else if (artworkData.length <= LEGACY_ARTWORK_DATA_ARRAY_SIZE_LIMIT) {
+        bundle.putByteArray(FIELD_ARTWORK_DATA, artworkData);
+      }
     }
     if (artworkUri != null) {
       bundle.putParcelable(FIELD_ARTWORK_URI, artworkUri);
@@ -1431,6 +1504,9 @@ public final class MediaMetadata {
     if (discNumber != null) {
       bundle.putInt(FIELD_DISC_NUMBER, discNumber);
     }
+    if (discSubtitle != null) {
+      bundle.putCharSequence(FIELD_DISC_SUBTITLE, discSubtitle);
+    }
     if (totalDiscCount != null) {
       bundle.putInt(FIELD_TOTAL_DISC_COUNT, totalDiscCount);
     }
@@ -1449,10 +1525,25 @@ public final class MediaMetadata {
     return bundle;
   }
 
-  /** Restores a {@code MediaMetadata} from a {@link Bundle}. */
+  /**
+   * @deprecated Use {@link #fromBundle(Bundle, int)}.
+   */
+  @UnstableApi
+  @Deprecated
+  public static MediaMetadata fromBundle(Bundle bundle) {
+    return fromBundle(bundle, MediaLibraryInfo.INTERFACE_VERSION);
+  }
+
+  /**
+   * Restores a {@code MediaMetadata} from a {@link Bundle}.
+   *
+   * @param bundle The {@link Bundle}.
+   * @param interfaceVersion The {@link MediaLibraryInfo#INTERFACE_VERSION} of the sending process.
+   * @return The restored media metadata.
+   */
   @UnstableApi
   @SuppressWarnings("deprecation") // Unbundling deprecated fields.
-  public static MediaMetadata fromBundle(Bundle bundle) {
+  public static MediaMetadata fromBundle(Bundle bundle, int interfaceVersion) {
     Builder builder = new Builder();
     builder
         .setTitle(bundle.getCharSequence(FIELD_TITLE))
@@ -1462,19 +1553,32 @@ public final class MediaMetadata {
         .setDisplayTitle(bundle.getCharSequence(FIELD_DISPLAY_TITLE))
         .setSubtitle(bundle.getCharSequence(FIELD_SUBTITLE))
         .setDescription(bundle.getCharSequence(FIELD_DESCRIPTION))
-        .setArtworkData(
-            bundle.getByteArray(FIELD_ARTWORK_DATA),
-            bundle.containsKey(FIELD_ARTWORK_DATA_TYPE)
-                ? bundle.getInt(FIELD_ARTWORK_DATA_TYPE)
-                : null)
         .setArtworkUri(bundle.getParcelable(FIELD_ARTWORK_URI))
         .setWriter(bundle.getCharSequence(FIELD_WRITER))
         .setComposer(bundle.getCharSequence(FIELD_COMPOSER))
         .setConductor(bundle.getCharSequence(FIELD_CONDUCTOR))
+        .setDiscSubtitle(bundle.getCharSequence(FIELD_DISC_SUBTITLE))
         .setGenre(bundle.getCharSequence(FIELD_GENRE))
         .setCompilation(bundle.getCharSequence(FIELD_COMPILATION))
         .setStation(bundle.getCharSequence(FIELD_STATION))
-        .setExtras(bundle.getBundle(FIELD_EXTRAS));
+        .setExtras(convertToNullIfInvalid(bundle.getBundle(FIELD_EXTRAS)));
+
+    if (bundle.containsKey(FIELD_ARTWORK_DATA)) {
+      @Nullable
+      Integer artworkDataType =
+          bundle.containsKey(FIELD_ARTWORK_DATA_TYPE)
+              ? bundle.getInt(FIELD_ARTWORK_DATA_TYPE)
+              : null;
+      if (interfaceVersion >= 9) {
+        @Nullable Bundle artworkDataBundle = bundle.getBundle(FIELD_ARTWORK_DATA);
+        if (artworkDataBundle != null) {
+          builder.setArtworkData(
+              BundleableByteArray.fromBundle(artworkDataBundle), artworkDataType);
+        }
+      } else {
+        builder.setArtworkData(bundle.getByteArray(FIELD_ARTWORK_DATA), artworkDataType);
+      }
+    }
 
     if (bundle.containsKey(FIELD_USER_RATING)) {
       @Nullable Bundle fieldBundle = bundle.getBundle(FIELD_USER_RATING);

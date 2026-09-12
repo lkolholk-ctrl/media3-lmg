@@ -16,17 +16,20 @@
 
 package androidx.media3.transformer;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static android.os.Build.VERSION.SDK_INT;
+import static androidx.media3.common.util.Util.isRunningOnEmulator;
+import static androidx.media3.test.utils.AssetInfo.JPG_ASSET;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.MAXIMUM_AVERAGE_PIXEL_ABSOLUTE_DIFFERENCE_LUMA;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.getBitmapAveragePixelAbsoluteDifferenceArgb8888;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.maybeSaveTestBitmap;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.readBitmap;
-import static androidx.media3.transformer.AndroidTestUtil.JPG_ASSET;
-import static androidx.media3.transformer.AndroidTestUtil.MP4_ASSET;
-import static androidx.media3.transformer.AndroidTestUtil.assumeFormatsSupported;
+import static androidx.media3.test.utils.FormatSupportAssumptions.assumeFormatsSupported;
 import static androidx.media3.transformer.AndroidTestUtil.extractBitmapsFromVideo;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
+import static org.junit.Assume.assumeFalse;
 
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -34,20 +37,23 @@ import android.net.Uri;
 import androidx.media3.common.C;
 import androidx.media3.common.Effect;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.OverlaySettings;
+import androidx.media3.common.VideoCompositorSettings;
 import androidx.media3.common.util.Size;
 import androidx.media3.common.util.Util;
 import androidx.media3.effect.AlphaScale;
 import androidx.media3.effect.Contrast;
+import androidx.media3.effect.DebugTraceUtil;
 import androidx.media3.effect.DefaultVideoFrameProcessor;
-import androidx.media3.effect.OverlaySettings;
 import androidx.media3.effect.Presentation;
 import androidx.media3.effect.ScaleAndRotateTransformation;
-import androidx.media3.effect.VideoCompositorSettings;
+import androidx.media3.effect.StaticOverlaySettings;
 import androidx.test.core.app.ApplicationProvider;
 import com.google.common.collect.ImmutableList;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -68,7 +74,7 @@ public final class TransformerMultiSequenceCompositionTest {
       "test-generated-goldens/transformer_multi_sequence_composition_test";
 
   // The duration of one frame of the 30 FPS test video, in milliseconds.
-  private static final long ONE_FRAME_DURATION_MS = 35;
+  private static final long ONE_FRAME_DURATION_MS = 33;
   private static final int EXPORT_WIDTH = 360;
   private static final int EXPORT_HEIGHT = 240;
 
@@ -95,8 +101,15 @@ public final class TransformerMultiSequenceCompositionTest {
   public int maxFramesInEncoder;
 
   @Before
-  public void setUpTestId() {
+  public void setUp() {
+    // TODO: b/456187265 - Remove this once the bug is fixed.
+    DebugTraceUtil.enableTracing = true;
     testId = testName.getMethodName();
+  }
+
+  @After
+  public void tearDown() {
+    DebugTraceUtil.enableTracing = false;
   }
 
   @Test
@@ -104,8 +117,8 @@ public final class TransformerMultiSequenceCompositionTest {
     assumeFormatsSupported(
         context,
         testId,
-        /* inputFormat= */ MP4_ASSET.videoFormat,
-        /* outputFormat= */ MP4_ASSET.videoFormat);
+        /* inputFormat= */ MP4_ADVANCED_ASSET.videoFormat,
+        /* outputFormat= */ MP4_ADVANCED_ASSET.videoFormat);
 
     Composition composition =
         createComposition(
@@ -113,16 +126,19 @@ public final class TransformerMultiSequenceCompositionTest {
                 new Contrast(0.1f),
                 Presentation.createForWidthAndHeight(
                     EXPORT_WIDTH, EXPORT_HEIGHT, Presentation.LAYOUT_SCALE_TO_FIT)),
-            /* firstSequenceMediaItems= */ ImmutableList.of(
-                editedMediaItemByClippingVideo(
-                    MP4_ASSET.uri,
-                    /* effects= */ ImmutableList.of(
-                        new AlphaScale(0.5f),
-                        new ScaleAndRotateTransformation.Builder()
-                            .setRotationDegrees(180)
-                            .build()))),
-            /* secondSequenceMediaItems= */ ImmutableList.of(
-                editedMediaItemByClippingVideo(MP4_ASSET.uri, /* effects= */ ImmutableList.of())),
+            /* firstSequence= */ EditedMediaItemSequence.withVideoFrom(
+                ImmutableList.of(
+                    editedMediaItemByClippingVideo(
+                        MP4_ADVANCED_ASSET.uri,
+                        /* effects= */ ImmutableList.of(
+                            new AlphaScale(0.5f),
+                            new ScaleAndRotateTransformation.Builder()
+                                .setRotationDegrees(180)
+                                .build())))),
+            /* secondSequence= */ EditedMediaItemSequence.withVideoFrom(
+                ImmutableList.of(
+                    editedMediaItemByClippingVideo(
+                        MP4_ADVANCED_ASSET.uri, /* effects= */ ImmutableList.of()))),
             VideoCompositorSettings.DEFAULT);
 
     ExportTestResult result =
@@ -140,8 +156,8 @@ public final class TransformerMultiSequenceCompositionTest {
     assumeFormatsSupported(
         context,
         testId,
-        /* inputFormat= */ MP4_ASSET.videoFormat,
-        /* outputFormat= */ MP4_ASSET.videoFormat);
+        /* inputFormat= */ MP4_ADVANCED_ASSET.videoFormat,
+        /* outputFormat= */ MP4_ADVANCED_ASSET.videoFormat);
 
     Composition composition =
         createComposition(
@@ -149,16 +165,19 @@ public final class TransformerMultiSequenceCompositionTest {
                 new Contrast(0.1f),
                 Presentation.createForWidthAndHeight(
                     EXPORT_WIDTH, EXPORT_HEIGHT, Presentation.LAYOUT_SCALE_TO_FIT)),
-            /* firstSequenceMediaItems= */ ImmutableList.of(
-                editedMediaItemByClippingVideo(
-                    MP4_ASSET.uri,
-                    /* effects= */ ImmutableList.of(
-                        new AlphaScale(0.5f),
-                        new ScaleAndRotateTransformation.Builder()
-                            .setRotationDegrees(180)
-                            .build()))),
-            /* secondSequenceMediaItems= */ ImmutableList.of(
-                editedMediaItemOfOneFrameImage(JPG_ASSET.uri, /* effects= */ ImmutableList.of())),
+            /* firstSequence= */ EditedMediaItemSequence.withVideoFrom(
+                ImmutableList.of(
+                    editedMediaItemByClippingVideo(
+                        MP4_ADVANCED_ASSET.uri,
+                        /* effects= */ ImmutableList.of(
+                            new AlphaScale(0.5f),
+                            new ScaleAndRotateTransformation.Builder()
+                                .setRotationDegrees(180)
+                                .build())))),
+            /* secondSequence= */ EditedMediaItemSequence.withVideoFrom(
+                ImmutableList.of(
+                    editedMediaItemOfOneFrameImage(
+                        JPG_ASSET.uri, /* effects= */ ImmutableList.of()))),
             VideoCompositorSettings.DEFAULT);
 
     ExportTestResult result =
@@ -176,8 +195,8 @@ public final class TransformerMultiSequenceCompositionTest {
     assumeFormatsSupported(
         context,
         testId,
-        /* inputFormat= */ MP4_ASSET.videoFormat,
-        /* outputFormat= */ MP4_ASSET.videoFormat);
+        /* inputFormat= */ MP4_ADVANCED_ASSET.videoFormat,
+        /* outputFormat= */ MP4_ADVANCED_ASSET.videoFormat);
 
     VideoCompositorSettings pictureInPictureVideoCompositorSettings =
         new VideoCompositorSettings() {
@@ -190,13 +209,13 @@ public final class TransformerMultiSequenceCompositionTest {
           public OverlaySettings getOverlaySettings(int inputId, long presentationTimeUs) {
             if (inputId == 0) {
               // This tests all OverlaySettings builder variables.
-              return new OverlaySettings.Builder()
+              return new StaticOverlaySettings.Builder()
                   .setScale(.25f, .25f)
                   .setOverlayFrameAnchor(1, -1)
                   .setBackgroundFrameAnchor(.9f, -.7f)
                   .build();
             } else {
-              return new OverlaySettings.Builder().build();
+              return new StaticOverlaySettings.Builder().build();
             }
           }
         };
@@ -207,16 +226,19 @@ public final class TransformerMultiSequenceCompositionTest {
                 new Contrast(0.1f),
                 Presentation.createForWidthAndHeight(
                     EXPORT_WIDTH, EXPORT_HEIGHT, Presentation.LAYOUT_SCALE_TO_FIT)),
-            /* firstSequenceMediaItems= */ ImmutableList.of(
-                editedMediaItemByClippingVideo(
-                    MP4_ASSET.uri,
-                    /* effects= */ ImmutableList.of(
-                        new AlphaScale(0.5f),
-                        new ScaleAndRotateTransformation.Builder()
-                            .setRotationDegrees(180)
-                            .build()))),
-            /* secondSequenceMediaItems= */ ImmutableList.of(
-                editedMediaItemByClippingVideo(MP4_ASSET.uri, /* effects= */ ImmutableList.of())),
+            /* firstSequence= */ EditedMediaItemSequence.withVideoFrom(
+                ImmutableList.of(
+                    editedMediaItemByClippingVideo(
+                        MP4_ADVANCED_ASSET.uri,
+                        /* effects= */ ImmutableList.of(
+                            new AlphaScale(0.5f),
+                            new ScaleAndRotateTransformation.Builder()
+                                .setRotationDegrees(180)
+                                .build())))),
+            /* secondSequence= */ EditedMediaItemSequence.withVideoFrom(
+                ImmutableList.of(
+                    editedMediaItemByClippingVideo(
+                        MP4_ADVANCED_ASSET.uri, /* effects= */ ImmutableList.of()))),
             pictureInPictureVideoCompositorSettings);
 
     ExportTestResult result =
@@ -231,28 +253,34 @@ public final class TransformerMultiSequenceCompositionTest {
 
   @Test
   public void export_completesWithConsistentFrameCount() throws Exception {
+    assumeFalse(
+        "Skipped due to failing video decoder on API 31 emulator",
+        isRunningOnEmulator() && SDK_INT == 31);
     assumeFormatsSupported(
         context,
         testId,
-        /* inputFormat= */ MP4_ASSET.videoFormat,
-        /* outputFormat= */ MP4_ASSET.videoFormat);
-    MediaItem mediaItem = MediaItem.fromUri(Uri.parse(MP4_ASSET.uri));
+        /* inputFormat= */ MP4_ADVANCED_ASSET.videoFormat,
+        /* outputFormat= */ MP4_ADVANCED_ASSET.videoFormat);
+    MediaItem mediaItem = MediaItem.fromUri(Uri.parse(MP4_ADVANCED_ASSET.uri));
     ImmutableList<Effect> videoEffects = ImmutableList.of(Presentation.createForHeight(480));
     Effects effects = new Effects(/* audioProcessors= */ ImmutableList.of(), videoEffects);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(mediaItem).setEffects(effects).build();
     Composition composition =
-        new Composition.Builder(
-                new EditedMediaItemSequence.Builder(editedMediaItem).build(),
-                new EditedMediaItemSequence.Builder(editedMediaItem).build())
-            .build();
+        createComposition(
+            /* compositionEffects= */ ImmutableList.of(),
+            /* firstSequence= */ EditedMediaItemSequence.withAudioAndVideoFrom(
+                ImmutableList.of(editedMediaItem)),
+            /* secondSequence= */ EditedMediaItemSequence.withAudioAndVideoFrom(
+                ImmutableList.of(editedMediaItem)),
+            VideoCompositorSettings.DEFAULT);
 
     ExportTestResult result =
         new TransformerAndroidTestRunner.Builder(context, buildTransformer())
             .build()
             .run(testId, composition);
 
-    assertThat(result.exportResult.videoFrameCount).isEqualTo(MP4_ASSET.videoFrameCount);
+    assertThat(result.exportResult.videoFrameCount).isEqualTo(MP4_ADVANCED_ASSET.videoFrameCount);
     assertThat(new File(result.filePath).length()).isGreaterThan(0);
   }
 
@@ -296,14 +324,11 @@ public final class TransformerMultiSequenceCompositionTest {
 
   private static Composition createComposition(
       List<Effect> compositionEffects,
-      List<EditedMediaItem> firstSequenceMediaItems,
-      List<EditedMediaItem> secondSequenceMediaItems,
+      EditedMediaItemSequence firstSequence,
+      EditedMediaItemSequence secondSequence,
       VideoCompositorSettings videoCompositorSettings) {
 
-    return new Composition.Builder(
-            ImmutableList.of(
-                new EditedMediaItemSequence.Builder(firstSequenceMediaItems).build(),
-                new EditedMediaItemSequence.Builder(secondSequenceMediaItems).build()))
+    return new Composition.Builder(ImmutableList.of(firstSequence, secondSequence))
         .setEffects(
             new Effects(
                 /* audioProcessors= */ ImmutableList.of(), /* videoEffects= */ compositionEffects))

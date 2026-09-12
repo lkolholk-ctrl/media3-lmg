@@ -15,9 +15,9 @@
  */
 package androidx.media3.session;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotEmpty;
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static androidx.media3.common.util.Util.convertToNullIfInvalid;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.content.ComponentName;
 import android.media.session.MediaSession;
@@ -27,7 +27,7 @@ import android.text.TextUtils;
 import androidx.annotation.Nullable;
 import androidx.core.app.BundleCompat;
 import androidx.media3.common.util.Util;
-import com.google.common.base.Objects;
+import java.util.Objects;
 
 /* package */ final class SessionTokenImplBase implements SessionToken.SessionTokenImpl {
 
@@ -40,6 +40,8 @@ import com.google.common.base.Objects;
   private final int interfaceVersion;
 
   private final String packageName;
+
+  @Nullable private final String packageNameOverride;
 
   private final String serviceName;
 
@@ -55,14 +57,15 @@ import com.google.common.base.Objects;
     this(
         uid,
         type,
-        /* libraryVersion= */ 0,
-        /* interfaceVersion= */ 0,
+        SessionToken.UNKNOWN_SESSION_VERSION,
+        SessionToken.UNKNOWN_INTERFACE_VERSION,
         checkNotNull(serviceComponent).getPackageName(),
         /* serviceName= */ serviceComponent.getClassName(),
         /* componentName= */ serviceComponent,
         /* iSession= */ null,
         /* extras= */ Bundle.EMPTY,
-        /* platformToken= */ null);
+        /* platformToken= */ null,
+        /* packageNameOverride= */ null);
   }
 
   public SessionTokenImplBase(
@@ -73,7 +76,8 @@ import com.google.common.base.Objects;
       String packageName,
       IMediaSession iSession,
       Bundle tokenExtras,
-      @Nullable MediaSession.Token platformToken) {
+      @Nullable MediaSession.Token platformToken,
+      @Nullable String packageNameOverride) {
     this(
         uid,
         type,
@@ -84,7 +88,8 @@ import com.google.common.base.Objects;
         /* componentName= */ null,
         iSession.asBinder(),
         checkNotNull(tokenExtras),
-        platformToken);
+        platformToken,
+        packageNameOverride);
   }
 
   private SessionTokenImplBase(
@@ -97,7 +102,8 @@ import com.google.common.base.Objects;
       @Nullable ComponentName componentName,
       @Nullable IBinder iSession,
       Bundle extras,
-      @Nullable MediaSession.Token platformToken) {
+      @Nullable MediaSession.Token platformToken,
+      @Nullable String packageNameOverride) {
     this.uid = uid;
     this.type = type;
     this.libraryVersion = libraryVersion;
@@ -108,11 +114,12 @@ import com.google.common.base.Objects;
     this.iSession = iSession;
     this.extras = extras;
     this.platformToken = platformToken;
+    this.packageNameOverride = packageNameOverride;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(
+    return Objects.hash(
         uid,
         type,
         libraryVersion,
@@ -121,7 +128,8 @@ import com.google.common.base.Objects;
         serviceName,
         componentName,
         iSession,
-        platformToken);
+        platformToken,
+        packageNameOverride);
   }
 
   @Override
@@ -136,9 +144,10 @@ import com.google.common.base.Objects;
         && interfaceVersion == other.interfaceVersion
         && TextUtils.equals(packageName, other.packageName)
         && TextUtils.equals(serviceName, other.serviceName)
-        && Objects.equal(componentName, other.componentName)
-        && Objects.equal(iSession, other.iSession)
-        && Objects.equal(platformToken, other.platformToken);
+        && Objects.equals(componentName, other.componentName)
+        && Objects.equals(iSession, other.iSession)
+        && Objects.equals(platformToken, other.platformToken)
+        && Objects.equals(packageNameOverride, other.packageNameOverride);
   }
 
   @Override
@@ -172,6 +181,11 @@ import com.google.common.base.Objects;
 
   @Override
   public String getPackageName() {
+    return packageNameOverride == null ? packageName : packageNameOverride;
+  }
+
+  @Override
+  public String getOriginalPackageName() {
     return packageName;
   }
 
@@ -229,8 +243,9 @@ import com.google.common.base.Objects;
   private static final String FIELD_EXTRAS = Util.intToStringMaxRadix(7);
   private static final String FIELD_INTERFACE_VERSION = Util.intToStringMaxRadix(8);
   private static final String FIELD_PLATFORM_TOKEN = Util.intToStringMaxRadix(9);
+  private static final String FIELD_PACKAGE_NAME_OVERRIDE = Util.intToStringMaxRadix(10);
 
-  // Next field key = 10
+  // Next field key = 11
 
   @Override
   public Bundle toBundle() {
@@ -247,6 +262,9 @@ import com.google.common.base.Objects;
     if (platformToken != null) {
       bundle.putParcelable(FIELD_PLATFORM_TOKEN, platformToken);
     }
+    if (packageNameOverride != null) {
+      bundle.putString(FIELD_PACKAGE_NAME_OVERRIDE, packageNameOverride);
+    }
     return bundle;
   }
 
@@ -257,19 +275,24 @@ import com.google.common.base.Objects;
     int uid = bundle.getInt(FIELD_UID);
     checkArgument(bundle.containsKey(FIELD_TYPE), "type should be set.");
     int type = bundle.getInt(FIELD_TYPE);
-    int libraryVersion = bundle.getInt(FIELD_LIBRARY_VERSION, /* defaultValue= */ 0);
-    int interfaceVersion = bundle.getInt(FIELD_INTERFACE_VERSION, /* defaultValue= */ 0);
-    String packageName =
-        checkNotEmpty(bundle.getString(FIELD_PACKAGE_NAME), "package name should be set.");
+    int libraryVersion =
+        bundle.getInt(
+            FIELD_LIBRARY_VERSION, /* defaultValue= */ SessionToken.UNKNOWN_SESSION_VERSION);
+    int interfaceVersion =
+        bundle.getInt(
+            FIELD_INTERFACE_VERSION, /* defaultValue= */ SessionToken.UNKNOWN_INTERFACE_VERSION);
+    String packageName = bundle.getString(FIELD_PACKAGE_NAME);
+    checkArgument(!TextUtils.isEmpty(packageName), "package name should be set.");
     String serviceName = bundle.getString(FIELD_SERVICE_NAME, /* defaultValue= */ "");
     @Nullable IBinder iSession = BundleCompat.getBinder(bundle, FIELD_ISESSION);
     @Nullable ComponentName componentName = bundle.getParcelable(FIELD_COMPONENT_NAME);
-    @Nullable Bundle extras = bundle.getBundle(FIELD_EXTRAS);
+    @Nullable Bundle extras = convertToNullIfInvalid(bundle.getBundle(FIELD_EXTRAS));
     @Nullable
     MediaSession.Token platformTokenFromBundle = bundle.getParcelable(FIELD_PLATFORM_TOKEN);
     if (platformTokenFromBundle != null) {
       platformToken = platformTokenFromBundle;
     }
+    @Nullable String packageNameOverride = bundle.getString(FIELD_PACKAGE_NAME_OVERRIDE);
     return new SessionTokenImplBase(
         uid,
         type,
@@ -280,6 +303,7 @@ import com.google.common.base.Objects;
         componentName,
         iSession,
         extras == null ? Bundle.EMPTY : extras,
-        platformToken);
+        platformToken,
+        packageNameOverride);
   }
 }

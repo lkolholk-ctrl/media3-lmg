@@ -15,76 +15,132 @@
  */
 package androidx.media3.transformer;
 
-import static androidx.annotation.RestrictTo.Scope.LIBRARY_GROUP;
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static android.os.Build.VERSION.SDK_INT;
+import static androidx.media3.common.util.Util.constrainValue;
 import static androidx.media3.common.util.Util.usToMs;
+import static androidx.media3.effect.DebugTraceUtil.COMPONENT_COMPOSITION_PLAYER;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_RELEASE;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_SEEK_TO;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_SET_COMPOSITION;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_SET_VIDEO_OUTPUT;
+import static androidx.media3.exoplayer.video.PlaybackVideoGraphWrapper.LATE_US_TO_DROP_INPUT_FRAME;
+import static androidx.media3.transformer.TransformerUtil.containsSpeedChangingEffects;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static java.lang.Math.max;
 import static java.lang.Math.min;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.ImageFormat;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Process;
-import android.util.Pair;
+import android.util.SparseBooleanArray;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import androidx.annotation.IntRange;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import androidx.annotation.RestrictTo;
+import androidx.annotation.RestrictTo.Scope;
 import androidx.annotation.VisibleForTesting;
+import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Effect;
+import androidx.media3.common.Format;
+import androidx.media3.common.GlObjectsProvider;
 import androidx.media3.common.MediaItem;
-import androidx.media3.common.MimeTypes;
+import androidx.media3.common.MediaItem.ClippingConfiguration;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.common.PreviewingVideoGraph;
 import androidx.media3.common.SimpleBasePlayer;
 import androidx.media3.common.Timeline;
 import androidx.media3.common.VideoFrameProcessingException;
+import androidx.media3.common.VideoGraph;
 import androidx.media3.common.VideoSize;
+import androidx.media3.common.audio.AudioFocusManager;
+import androidx.media3.common.audio.AudioFocusManager.PlayerCommand;
+import androidx.media3.common.audio.AudioProcessor;
+import androidx.media3.common.audio.SpeedChangingAudioProcessor;
 import androidx.media3.common.audio.SpeedProvider;
+import androidx.media3.common.audio.ToInt16PcmAudioProcessor;
 import androidx.media3.common.util.Clock;
+import androidx.media3.common.util.ConditionVariable;
+import androidx.media3.common.util.ExperimentalApi;
+import androidx.media3.common.util.GlUtil;
 import androidx.media3.common.util.HandlerWrapper;
 import androidx.media3.common.util.Log;
+import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.Size;
-import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
-import androidx.media3.effect.PreviewingSingleInputVideoGraph;
+import androidx.media3.common.video.Frame;
+import androidx.media3.common.video.FrameProcessor;
+import androidx.media3.common.video.SurfaceHolderFrameWriter;
+import androidx.media3.common.video.SyncFenceWrapper;
+import androidx.media3.effect.BitmapToHardwareBufferProcessor;
+import androidx.media3.effect.DebugTraceUtil;
+import androidx.media3.effect.DefaultGlObjectsProvider;
+import androidx.media3.effect.DefaultVideoFrameProcessor;
+import androidx.media3.effect.HardwareBufferFrame;
+import androidx.media3.effect.HardwareBufferFrameProcessor;
+import androidx.media3.effect.HardwareBufferFrameQueue;
+import androidx.media3.effect.HardwareBufferJniWrapper;
+import androidx.media3.effect.RenderingPacketConsumer;
+import androidx.media3.effect.SingleInputVideoGraph;
 import androidx.media3.effect.TimestampAdjustment;
-import androidx.media3.exoplayer.ExoPlaybackException;
+import androidx.media3.exoplayer.DecoderCounters;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.LoadControl;
 import androidx.media3.exoplayer.RendererCapabilities;
+import androidx.media3.exoplayer.RendererCapabilities.Capabilities;
+import androidx.media3.exoplayer.analytics.AnalyticsCollector;
+import androidx.media3.exoplayer.analytics.AnalyticsListener;
+import androidx.media3.exoplayer.analytics.DefaultAnalyticsCollector;
 import androidx.media3.exoplayer.audio.AudioSink;
 import androidx.media3.exoplayer.audio.DefaultAudioSink;
+import androidx.media3.exoplayer.image.BitmapFactoryImageDecoder;
+import androidx.media3.exoplayer.image.ExternallyLoadedImageDecoder;
 import androidx.media3.exoplayer.image.ImageDecoder;
 import androidx.media3.exoplayer.source.ClippingMediaSource;
 import androidx.media3.exoplayer.source.ConcatenatingMediaSource2;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
-import androidx.media3.exoplayer.source.ExternalLoader;
+import androidx.media3.exoplayer.source.ExternallyLoadedMediaSource;
 import androidx.media3.exoplayer.source.FilteringMediaSource;
 import androidx.media3.exoplayer.source.ForwardingTimeline;
-import androidx.media3.exoplayer.source.MediaPeriod;
 import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.exoplayer.source.MergingMediaSource;
 import androidx.media3.exoplayer.source.SilenceMediaSource;
-import androidx.media3.exoplayer.source.TrackGroupArray;
 import androidx.media3.exoplayer.source.WrappingMediaSource;
-import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
-import androidx.media3.exoplayer.trackselection.ExoTrackSelection;
-import androidx.media3.exoplayer.upstream.Allocator;
 import androidx.media3.exoplayer.util.EventLogger;
 import androidx.media3.exoplayer.video.PlaybackVideoGraphWrapper;
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener;
 import androidx.media3.exoplayer.video.VideoFrameReleaseControl;
+import androidx.media3.exoplayer.video.VideoSink;
+import androidx.media3.extractor.DefaultExtractorsFactory;
+import androidx.media3.extractor.amr.AmrExtractor;
+import androidx.media3.extractor.ts.AdtsExtractor;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
 /**
@@ -105,23 +161,40 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
  * {@linkplain Player#REPEAT_MODE_ALL all} of the {@link Composition}, or {@linkplain
  * Player#REPEAT_MODE_OFF off}.
  */
-@UnstableApi
-@RestrictTo(LIBRARY_GROUP)
-public final class CompositionPlayer extends SimpleBasePlayer
-    implements CompositionPlayerInternal.Listener,
-        PlaybackVideoGraphWrapper.Listener,
-        SurfaceHolder.Callback {
+@ExperimentalApi // TODO: b/470355043 - Publish CompositionPlayer.
+public final class CompositionPlayer extends SimpleBasePlayer {
 
   /** A builder for {@link CompositionPlayer} instances. */
   public static final class Builder {
     private final Context context;
 
-    private @MonotonicNonNull Looper looper;
-    private @MonotonicNonNull AudioSink audioSink;
-    private @MonotonicNonNull ExternalLoader externalImageLoader;
-    private ImageDecoder.Factory imageDecoderFactory;
+    private Looper looper;
     private Clock clock;
-    private PreviewingVideoGraph.@MonotonicNonNull Factory previewingVideoGraphFactory;
+    private Supplier<AudioSink> audioSinkSupplier;
+    private Supplier<AudioMixer.Factory> audioMixerFactorySupplier;
+    private Supplier<MediaSource.Factory> mediaSourceFactorySupplier;
+    private Supplier<ImageDecoder.Factory> imageDecoderFactorySupplier;
+    private Supplier<GlObjectsProvider> glObjectsProviderSupplier;
+    @Nullable private ExecutorService glExecutorService;
+    private Supplier<LoadControl> loadControlSupplier;
+    private AudioAttributes audioAttributes;
+    private boolean handleAudioFocus;
+    private VideoGraph.@MonotonicNonNull Factory videoGraphFactory;
+
+    @Nullable
+    private RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
+        packetProcessor;
+
+    private FrameProcessor.@MonotonicNonNull Factory frameProcessorFactory;
+
+    @Nullable private HardwareBufferJniWrapper hardwareBufferJniWrapper;
+
+    private Supplier<ImageReaderAdapter.Factory> imageReaderAdapterFactorySupplier;
+
+    private boolean videoPrewarmingEnabled;
+    private boolean perStreamMediaProgressionEnabled;
+    private boolean enableReplayableCache;
+    private long lateThresholdToDropInputUs;
     private boolean built;
 
     /**
@@ -131,13 +204,34 @@ public final class CompositionPlayer extends SimpleBasePlayer
      */
     public Builder(Context context) {
       this.context = context.getApplicationContext();
-      imageDecoderFactory = ImageDecoder.Factory.DEFAULT;
+      looper = Util.getCurrentOrMainLooper();
+      audioSinkSupplier = () -> new DefaultAudioSink.Builder(context).build();
+      glObjectsProviderSupplier = DefaultGlObjectsProvider::new;
+      audioMixerFactorySupplier = DefaultAudioMixer.Factory::new;
+      mediaSourceFactorySupplier =
+          () -> {
+            DefaultExtractorsFactory extractorsFactory =
+                new DefaultExtractorsFactory()
+                    .setAdtsExtractorFlags(AdtsExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
+                    .setAmrExtractorFlags(AmrExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING);
+            return new DefaultMediaSourceFactory(context, extractorsFactory)
+                .setEnableClippingInMediaPeriod(true);
+          };
+      loadControlSupplier = DefaultLoadControl::new;
+      imageDecoderFactorySupplier =
+          () ->
+              new BitmapFactoryImageDecoder.Factory(context)
+                  .setMaxOutputSize(GlUtil.MAX_BITMAP_DECODING_SIZE);
+      imageReaderAdapterFactorySupplier = DefaultImageReaderAdapter.Factory::new;
+      videoPrewarmingEnabled = true;
+      lateThresholdToDropInputUs = LATE_US_TO_DROP_INPUT_FRAME;
       clock = Clock.DEFAULT;
+      audioAttributes = AudioAttributes.DEFAULT;
     }
 
     /**
-     * Sets the {@link Looper} from which the player can be accessed and {@link Player.Listener}
-     * callbacks are dispatched too.
+     * Sets the {@link Looper} from which the player can be accessed and {@link Listener} callbacks
+     * are dispatched too.
      *
      * <p>By default, the builder uses the looper of the thread that calls {@link #build()}.
      *
@@ -160,25 +254,42 @@ public final class CompositionPlayer extends SimpleBasePlayer
      */
     @CanIgnoreReturnValue
     public Builder setAudioSink(AudioSink audioSink) {
-      this.audioSink = audioSink;
+      checkNotNull(audioSink);
+      this.audioSinkSupplier = () -> audioSink;
       return this;
     }
 
     /**
-     * Sets the {@link ExternalLoader} for loading image media items with MIME type set to {@link
-     * MimeTypes#APPLICATION_EXTERNALLY_LOADED_IMAGE}. When setting an external loader, also set an
-     * {@link ImageDecoder.Factory} with {@link #setImageDecoderFactory(ImageDecoder.Factory)}.
+     * Sets the {@link AudioMixer.Factory} to be used when {@linkplain AudioMixer audio mixing} is
+     * needed.
      *
-     * <p>By default, the player will not be able to load images with media type of {@link
-     * androidx.media3.common.MimeTypes#APPLICATION_EXTERNALLY_LOADED_IMAGE}.
+     * <p>The default value is a {@link DefaultAudioMixer.Factory} with default values.
      *
-     * @param externalImageLoader The {@link ExternalLoader}.
-     * @return This builder, for convenience.
-     * @see DefaultMediaSourceFactory#setExternalImageLoader(ExternalLoader)
+     * @param audioMixerFactory A {@link AudioMixer.Factory}.
+     * @return This builder.
      */
     @CanIgnoreReturnValue
-    public Builder setExternalImageLoader(ExternalLoader externalImageLoader) {
-      this.externalImageLoader = externalImageLoader;
+    public Builder setAudioMixerFactory(AudioMixer.Factory audioMixerFactory) {
+      checkNotNull(audioMixerFactory);
+      this.audioMixerFactorySupplier = () -> audioMixerFactory;
+      return this;
+    }
+
+    /**
+     * Sets the {@link MediaSource.Factory} that *creates* the {@link MediaSource} for {@link
+     * EditedMediaItem#mediaItem MediaItems} in a {@link Composition}.
+     *
+     * <p>To use an external image loader, one could create a {@link DefaultMediaSourceFactory},
+     * {@linkplain DefaultMediaSourceFactory#setExternalImageLoader set the external image loader},
+     * and pass in the {@link DefaultMediaSourceFactory} here.
+     *
+     * @param mediaSourceFactory The {@link MediaSource.Factory}
+     * @return This builder, for convenience.
+     */
+    @CanIgnoreReturnValue
+    public Builder setMediaSourceFactory(MediaSource.Factory mediaSourceFactory) {
+      checkNotNull(mediaSourceFactory);
+      this.mediaSourceFactorySupplier = () -> mediaSourceFactory;
       return this;
     }
 
@@ -186,14 +297,49 @@ public final class CompositionPlayer extends SimpleBasePlayer
      * Sets an {@link ImageDecoder.Factory} that will create the {@link ImageDecoder} instances to
      * decode images.
      *
-     * <p>By default, {@link ImageDecoder.Factory#DEFAULT} is used.
+     * <p>By default, an instance of {@link BitmapFactoryImageDecoder.Factory} is used, with a
+     * {@linkplain BitmapFactoryImageDecoder.Factory#setMaxOutputSize(int) max output size} set to
+     * be consistent with {@link Transformer}.
      *
      * @param imageDecoderFactory The {@link ImageDecoder.Factory}.
      * @return This builder, for convenience.
      */
     @CanIgnoreReturnValue
     public Builder setImageDecoderFactory(ImageDecoder.Factory imageDecoderFactory) {
-      this.imageDecoderFactory = imageDecoderFactory;
+      checkNotNull(imageDecoderFactory);
+      this.imageDecoderFactorySupplier = () -> imageDecoderFactory;
+      return this;
+    }
+
+    /**
+     * Sets whether to enable prewarming of the video renderers.
+     *
+     * <p>The default value is {@code true}.
+     *
+     * @param videoPrewarmingEnabled Whether to enable video prewarming.
+     * @return This builder, for convenience.
+     */
+    @VisibleForTesting
+    @CanIgnoreReturnValue
+    /* package */ Builder setVideoPrewarmingEnabled(boolean videoPrewarmingEnabled) {
+      // TODO: b/369817794 - Remove this setter once the tests are run on a device with API < 23.
+      this.videoPrewarmingEnabled = videoPrewarmingEnabled;
+      return this;
+    }
+
+    /**
+     * Sets whether to enable per-stream media progression in the player.
+     *
+     * <p>The default value is {@code false}.
+     *
+     * @param perStreamMediaProgressionEnabled Whether to enable per-stream media progression in the
+     *     player.
+     * @return This builder, for convenience.
+     */
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/528260159 - Enable this by default.
+    public Builder setPerStreamMediaProgressionEnabled(boolean perStreamMediaProgressionEnabled) {
+      this.perStreamMediaProgressionEnabled = perStreamMediaProgressionEnabled;
       return this;
     }
 
@@ -213,18 +359,211 @@ public final class CompositionPlayer extends SimpleBasePlayer
     }
 
     /**
-     * Sets the {@link PreviewingVideoGraph.Factory} that will be used by the player.
+     * Sets the {@link VideoGraph.Factory} that will be used by the player.
      *
-     * <p>By default, a {@link PreviewingSingleInputVideoGraph.Factory} is used.
+     * <p>By default, a {@link SingleInputVideoGraph.Factory} is used.
      *
-     * @param previewingVideoGraphFactory The {@link PreviewingVideoGraph.Factory}.
+     * @param videoGraphFactory The {@link VideoGraph.Factory}.
+     * @return This builder, for convenience.
+     * @throws IllegalStateException if an {@link ExecutorService} is {@linkplain
+     *     #setGlThreadExecutorService set}.
+     */
+    @CanIgnoreReturnValue
+    public Builder setVideoGraphFactory(VideoGraph.Factory videoGraphFactory) {
+      checkState(glExecutorService == null);
+      this.videoGraphFactory = videoGraphFactory;
+      return this;
+    }
+
+    /**
+     * Sets the {@link GlObjectsProvider} to be used by the effect processing pipeline.
+     *
+     * <p>Setting a {@link GlObjectsProvider} is no-op if a {@link VideoGraph.Factory} is
+     * {@linkplain #setVideoGraphFactory set}. By default, a {@link DefaultGlObjectsProvider} is
+     * used.
+     *
+     * @param glObjectsProvider The {@link GlObjectsProvider}.
      * @return This builder, for convenience.
      */
-    @VisibleForTesting
     @CanIgnoreReturnValue
-    public Builder setPreviewingVideoGraphFactory(
-        PreviewingVideoGraph.Factory previewingVideoGraphFactory) {
-      this.previewingVideoGraphFactory = previewingVideoGraphFactory;
+    public Builder setGlObjectsProvider(GlObjectsProvider glObjectsProvider) {
+      checkNotNull(glObjectsProvider);
+      this.glObjectsProviderSupplier = () -> glObjectsProvider;
+      return this;
+    }
+
+    /**
+     * Sets the {@link ExecutorService} to execute GL commands from.
+     *
+     * <p>By default, a {@link Util#newSingleThreadScheduledExecutor}, owned and {@link
+     * ExecutorService#shutdown} by the effects pipeline is used.
+     *
+     * <p>If set, the {@link ExecutorService} must be {@linkplain ExecutorService#shutdown shut
+     * down} by the caller after {@linkplain CompositionPlayer} has been {@linkplain #release
+     * released}.
+     *
+     * @param glExecutorService The {@link ExecutorService}.
+     * @return This builder, for convenience.
+     * @throws IllegalStateException if a {@link VideoGraph.Factory} is {@linkplain
+     *     #setVideoGraphFactory set}.
+     */
+    @CanIgnoreReturnValue
+    public Builder setGlThreadExecutorService(ExecutorService glExecutorService) {
+      checkNotNull(glExecutorService);
+      checkState(videoGraphFactory == null);
+      this.glExecutorService = glExecutorService;
+      return this;
+    }
+
+    /**
+     * Sets the {@link LoadControl} that will be used by the player to control buffering of all
+     * {@linkplain EditedMediaItem#mediaItem media items} in a {@link Composition}.
+     *
+     * <p>By default, a {@link DefaultLoadControl} is used.
+     *
+     * @param loadControl A {@link LoadControl}.
+     * @return This builder, for convenience.
+     */
+    @CanIgnoreReturnValue
+    public Builder setLoadControl(LoadControl loadControl) {
+      checkNotNull(loadControl);
+      this.loadControlSupplier = () -> loadControl;
+      return this;
+    }
+
+    /**
+     * Sets {@link AudioAttributes} that will be used by the player and whether to handle audio
+     * focus.
+     *
+     * <p>If audio focus should be handled, the {@link AudioAttributes#usage} must be {@link
+     * C#USAGE_MEDIA} or {@link C#USAGE_GAME}. Other usages will throw an {@link
+     * IllegalArgumentException}.
+     *
+     * @param audioAttributes {@link AudioAttributes}.
+     * @param handleAudioFocus Whether the player should handle audio focus.
+     * @return This builder.
+     */
+    @CanIgnoreReturnValue
+    public Builder setAudioAttributes(AudioAttributes audioAttributes, boolean handleAudioFocus) {
+      this.audioAttributes = checkNotNull(audioAttributes);
+      this.handleAudioFocus = handleAudioFocus;
+      return this;
+    }
+
+    /**
+     * Sets whether to enable replayable cache.
+     *
+     * <p>By default, the replayable cache is not enabled. Enable it to achieve accurate effect
+     * update, at the cost of using more power and computing resources.
+     *
+     * @param enableReplayableCache Whether replayable cache is enabled.
+     * @return This builder, for convenience.
+     */
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/470383420 - Remove or convert to non-experimental method.
+    public Builder experimentalSetEnableReplayableCache(boolean enableReplayableCache) {
+      this.enableReplayableCache = enableReplayableCache;
+      return this;
+    }
+
+    /**
+     * Sets the late threshold for decoded frames, in microseconds, after which frames may be
+     * dropped before applying effects.
+     *
+     * <p>The default value is {@link PlaybackVideoGraphWrapper#LATE_US_TO_DROP_INPUT_FRAME}.
+     *
+     * <p>Set this threshold to {@link C#TIME_UNSET} to disable frame dropping before effects are
+     * applied.
+     *
+     * <p>This method is experimental and will be renamed or removed in a future release.
+     *
+     * @param lateThresholdToDropInputUs The threshold.
+     */
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/470367421 - Remove or make non-experimental.
+    public Builder experimentalSetLateThresholdToDropInputUs(long lateThresholdToDropInputUs) {
+      this.lateThresholdToDropInputUs = lateThresholdToDropInputUs;
+      return this;
+    }
+
+    /**
+     * @deprecated Use {@link #setFrameProcessorFactory} instead.
+     */
+    @Deprecated
+    @RequiresApi(28)
+    @CanIgnoreReturnValue
+    @RestrictTo(Scope.LIBRARY_GROUP) // TODO: b/498547782 - Remove once usages have been migrated.
+    public Builder setHardwareBufferEffectsPipeline(
+        RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
+            packetProcessor) {
+      checkState(videoGraphFactory == null);
+      checkState(frameProcessorFactory == null);
+      this.packetProcessor = packetProcessor;
+      return this;
+    }
+
+    /**
+     * Sets the {@link FrameProcessor.Factory} to be used to create {@link FrameProcessor} instances
+     * that are used to process {@link androidx.media3.common.video.HardwareBufferFrame}s.
+     *
+     * <p>If a {@link FrameProcessor.Factory} is not set, a {@link SingleInputVideoGraph.Factory} is
+     * used and {@link CompositionPlayer} will not process {@link
+     * androidx.media3.common.video.HardwareBufferFrame}s.
+     *
+     * <p>If used on API 32 and below, the {@linkplain #setNativeHardwareBufferHelpers native
+     * helpers} must be set.
+     *
+     * @param frameProcessorFactory The {@link FrameProcessor.Factory}.
+     * @return This builder.
+     * @throws IllegalStateException if a {@linkplain #setVideoGraphFactory videoGraphFactory} or
+     *     {@linkplain #setHardwareBufferEffectsPipeline HardwareBufferEffectsPipeline} is set.
+     */
+    @RequiresApi(28)
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/449956776 - Remove once FrameConsumer API is finalized.
+    public Builder setFrameProcessorFactory(FrameProcessor.Factory frameProcessorFactory) {
+      checkNotNull(frameProcessorFactory);
+      checkState(videoGraphFactory == null);
+      checkState(packetProcessor == null);
+      this.frameProcessorFactory = frameProcessorFactory;
+      return this;
+    }
+
+    /**
+     * Sets the {@link HardwareBufferJniWrapper} used to provide native helpers.
+     *
+     * <p>This method is experimental and will be renamed or removed in a future release.
+     *
+     * <p>This will only be used if {@link #setHardwareBufferEffectsPipeline} is set.
+     *
+     * @param hardwareBufferJniWrapper The {@link HardwareBufferJniWrapper} to provide native
+     *     helpers.
+     * @return This builder.
+     */
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/449956776 - Remove once FrameConsumer API is finalized.
+    public Builder setNativeHardwareBufferHelpers(
+        HardwareBufferJniWrapper hardwareBufferJniWrapper) {
+      this.hardwareBufferJniWrapper = hardwareBufferJniWrapper;
+      return this;
+    }
+
+    /**
+     * Sets the {@link ImageReaderAdapter.Factory} used to create the video {@link
+     * ImageReaderAdapter}.
+     *
+     * <p>The default value is a {@link DefaultImageReaderAdapter.Factory}.
+     *
+     * @param imageReaderAdapterFactory The {@link ImageReaderAdapter.Factory} to create instances
+     *     of {@link ImageReaderAdapter}, which are used to receive video frames from a {@link
+     *     Surface}.
+     * @return This builder.
+     */
+    @CanIgnoreReturnValue
+    @VisibleForTesting
+    /* package */ Builder setImageReaderAdapterFactory(
+        ImageReaderAdapter.Factory imageReaderAdapterFactory) {
+      this.imageReaderAdapterFactorySupplier = () -> imageReaderAdapterFactory;
       return this;
     }
 
@@ -233,18 +572,18 @@ public final class CompositionPlayer extends SimpleBasePlayer
      *
      * <p>If no {@link Looper} has been called with {@link #setLooper(Looper)}, then this method
      * must be called within a {@link Looper} thread which is the thread that can access the player
-     * instance and where {@link Player.Listener} callbacks are dispatched.
+     * instance and where {@link Listener} callbacks are dispatched.
      */
     public CompositionPlayer build() {
       checkState(!built);
-      if (looper == null) {
-        looper = checkStateNotNull(Looper.myLooper());
-      }
-      if (audioSink == null) {
-        audioSink = new DefaultAudioSink.Builder(context).build();
-      }
-      if (previewingVideoGraphFactory == null) {
-        previewingVideoGraphFactory = new PreviewingSingleInputVideoGraph.Factory();
+      if (videoGraphFactory == null) {
+        DefaultVideoFrameProcessor.Factory videoFrameProcessorFactory =
+            new DefaultVideoFrameProcessor.Factory.Builder()
+                .setEnableReplayableCache(enableReplayableCache)
+                .setGlObjectsProvider(glObjectsProviderSupplier.get())
+                .setExecutorService(glExecutorService)
+                .build();
+        videoGraphFactory = new SingleInputVideoGraph.Factory(videoFrameProcessorFactory);
       }
       CompositionPlayer compositionPlayer = new CompositionPlayer(this);
       built = true;
@@ -260,6 +599,7 @@ public final class CompositionPlayer extends SimpleBasePlayer
               COMMAND_STOP,
               COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
               COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+              COMMAND_SEEK_TO_DEFAULT_POSITION,
               COMMAND_SEEK_BACK,
               COMMAND_SEEK_FORWARD,
               COMMAND_GET_CURRENT_MEDIA_ITEM,
@@ -268,7 +608,8 @@ public final class CompositionPlayer extends SimpleBasePlayer
               COMMAND_SET_VIDEO_SURFACE,
               COMMAND_GET_VOLUME,
               COMMAND_SET_VOLUME,
-              COMMAND_RELEASE)
+              COMMAND_RELEASE,
+              COMMAND_SET_AUDIO_ATTRIBUTES)
           .build();
 
   private static final @Event int[] SUPPORTED_LISTENER_EVENTS =
@@ -281,164 +622,383 @@ public final class CompositionPlayer extends SimpleBasePlayer
       };
 
   private static final String TAG = "CompositionPlayer";
+  private static final String BLANK_FRAMES_MEDIA_SOURCE_TYPE = "composition_player_blank_frames";
+  private static final long SURFACE_DESTROY_TIMEOUT_MS = 2_000;
 
   private final Context context;
   private final Clock clock;
   private final HandlerWrapper applicationHandler;
-  private final List<ExoPlayer> players;
+  private final List<SequencePlayerHolder> playerHolders;
   private final AudioSink finalAudioSink;
-  @Nullable private final ExternalLoader externalImageLoader;
+  private final AudioMixer.Factory audioMixerFactory;
+  private final MediaSource.Factory mediaSourceFactory;
   private final ImageDecoder.Factory imageDecoderFactory;
-  private final PreviewingVideoGraph.Factory previewingVideoGraphFactory;
+  private final VideoGraph.Factory videoGraphFactory;
+  private final boolean videoPrewarmingEnabled;
+  private final boolean perStreamMediaProgressionEnabled;
   private final HandlerWrapper compositionInternalListenerHandler;
+  private final LoadControl loadControl;
+  private final boolean enableReplayableCache;
+  private final long lateThresholdToDropInputUs;
+  private final AudioFocusManager audioFocusManager;
+  private final InternalListener internalListener;
+  @Nullable private final CompositionVideoPacketReleaseControl videoPacketReleaseControl;
 
-  private @MonotonicNonNull HandlerThread playbackThread;
+  /**
+   * The frame processor used to process video frames.
+   *
+   * <p>All interactions with this processor (including creation, queueing, and releasing) and its
+   * listener callbacks must be executed on the {@link #playbackThread}.
+   */
+  @Nullable private final FrameProcessor frameProcessor;
+
+  private final ImageReaderAdapter.Factory imageReaderAdapterFactory;
+
+  @Nullable private final SurfaceHolderFrameWriter surfaceHolderFrameWriter;
+
+  @Nullable private final HardwareBufferFrameProcessor hardwareBufferPostProcessor;
+
+  private final HandlerThread playbackThread;
+  private final HandlerWrapper playbackThreadHandler;
+
+  /** Maps from input index to whether the video track is selected in that sequence. */
+  private final SparseBooleanArray videoTracksSelected;
+
+  private final AnalyticsCollector analyticsCollector;
+
   private @MonotonicNonNull CompositionPlayerInternal compositionPlayerInternal;
   private @MonotonicNonNull ImmutableList<MediaItemData> playlist;
   private @MonotonicNonNull Composition composition;
   private @MonotonicNonNull Size videoOutputSize;
+  private @MonotonicNonNull PlaybackVideoGraphWrapper playbackVideoGraphWrapper;
+  private PlaybackAudioGraphWrapper playbackAudioGraphWrapper;
+  private @MonotonicNonNull VideoFrameMetadataListener videoFrameMetadataListener;
+  private @MonotonicNonNull FrameAggregator frameAggregator;
+
   private long compositionDurationUs;
   private boolean playWhenReady;
   private @PlayWhenReadyChangeReason int playWhenReadyChangeReason;
   private @RepeatMode int repeatMode;
   private float volume;
   private boolean renderedFirstFrame;
+  private boolean packetConsumerEnded;
+  @Nullable private VideoSize videoSize;
   @Nullable private Object videoOutput;
   @Nullable private PlaybackException playbackException;
   private @Player.State int playbackState;
+  private @PlaybackSuppressionReason int playbackSuppressionReason;
   @Nullable private SurfaceHolder surfaceHolder;
   @Nullable private Surface displaySurface;
   private boolean repeatingCompositionSeekInProgress;
+  private LivePositionSupplier positionSupplier;
+  private LivePositionSupplier bufferedPositionSupplier;
+  private LivePositionSupplier totalBufferedDurationSupplier;
+  private boolean compositionPlayerInternalPrepared;
+  private boolean scrubbingModeEnabled;
+  // Whether prepare() needs to be called to prepare the underlying sequence players.
+  private boolean appNeedsToPrepareCompositionPlayer;
+  private boolean playWhenReadyBeforeScrubbingEnabled;
+  private AudioAttributes audioAttributes;
+  private boolean handleAudioFocus;
+  private boolean waitingForFrameAfterSeek;
+  private long pendingSeekPositionMs;
 
+  // "this" reference for position suppliers.
+  @SuppressWarnings("initialization:methodref.receiver.bound.invalid")
   private CompositionPlayer(Builder builder) {
     super(checkNotNull(builder.looper), builder.clock);
     context = builder.context;
     clock = builder.clock;
     applicationHandler = clock.createHandler(builder.looper, /* callback= */ null);
-    finalAudioSink = checkNotNull(builder.audioSink);
-    externalImageLoader = builder.externalImageLoader;
-    imageDecoderFactory = builder.imageDecoderFactory;
-    previewingVideoGraphFactory = checkNotNull(builder.previewingVideoGraphFactory);
+    finalAudioSink = builder.audioSinkSupplier.get();
+    audioMixerFactory = builder.audioMixerFactorySupplier.get();
+    mediaSourceFactory = builder.mediaSourceFactorySupplier.get();
+    imageDecoderFactory = new GapHandlingDecoderFactory(builder.imageDecoderFactorySupplier.get());
+    videoGraphFactory = checkNotNull(builder.videoGraphFactory);
+    videoPrewarmingEnabled = builder.videoPrewarmingEnabled;
+    perStreamMediaProgressionEnabled = builder.perStreamMediaProgressionEnabled;
     compositionInternalListenerHandler = clock.createHandler(builder.looper, /* callback= */ null);
-    players = new ArrayList<>();
+    loadControl = builder.loadControlSupplier.get();
+    this.enableReplayableCache = builder.enableReplayableCache;
+    lateThresholdToDropInputUs = builder.lateThresholdToDropInputUs;
+    imageReaderAdapterFactory = builder.imageReaderAdapterFactorySupplier.get();
+    videoTracksSelected = new SparseBooleanArray();
+    playerHolders = new ArrayList<>();
     compositionDurationUs = C.TIME_UNSET;
     playbackState = STATE_IDLE;
     volume = 1.0f;
+    positionSupplier = new LivePositionSupplier(this::getContentPositionMs);
+    bufferedPositionSupplier = new LivePositionSupplier(this::getBufferedPositionMs);
+    totalBufferedDurationSupplier = new LivePositionSupplier(this::getTotalBufferedDurationMs);
+    audioAttributes = builder.audioAttributes;
+    handleAudioFocus = builder.handleAudioFocus;
+    pendingSeekPositionMs = C.TIME_UNSET;
+    appNeedsToPrepareCompositionPlayer = true;
+    internalListener = new InternalListener();
+    audioFocusManager =
+        new AudioFocusManager(
+            context, applicationHandler.getLooper(), /* playerControl= */ internalListener);
+    playbackAudioGraphWrapper = new PlaybackAudioGraphWrapper(audioMixerFactory, finalAudioSink);
+    HardwareBufferJniWrapper hardwareBufferJniWrapper = builder.hardwareBufferJniWrapper;
+    @Nullable
+    FrameProcessor.Factory frameProcessorFactory =
+        builder.frameProcessorFactory != null
+            ? builder.frameProcessorFactory
+            : getRenderingPacketConsumerFactory(builder.packetProcessor);
+    playbackThread =
+        new HandlerThread(/* name= */ "CompositionPlaybackThread", Process.THREAD_PRIORITY_AUDIO);
+    try {
+      playbackThread.start();
+      playbackThreadHandler = clock.createHandler(playbackThread.getLooper(), /* callback= */ null);
+      if (SDK_INT >= 28 && frameProcessorFactory != null) {
+        Executor playbackThreadExecutor =
+            new HandlerExecutor(playbackThreadHandler, internalListener);
+        Executor applicationThreadExecutor =
+            new HandlerExecutor(applicationHandler, internalListener);
+        // Convert CPU Bitmaps to HardwareBuffers when the native helpers are available.
+        if (hardwareBufferJniWrapper != null) {
+          hardwareBufferPostProcessor =
+              new BitmapToHardwareBufferProcessor(
+                  hardwareBufferJniWrapper,
+                  /* internalExecutor= */ Util.newSingleThreadExecutor(
+                      "BitmapToHardwareBufferProcessor::Thread"),
+                  /* errorExecutor= */ playbackThreadExecutor,
+                  /* errorCallback= */ internalListener::onError);
+        } else {
+          hardwareBufferPostProcessor = null;
+        }
+        surfaceHolderFrameWriter =
+            SDK_INT >= 33
+                ? SurfaceHolderFrameWriter.create(
+                    /* surfaceHolder= */ null,
+                    /* surfaceHolderExecutor= */ applicationThreadExecutor,
+                    internalListener,
+                    applicationThreadExecutor)
+                : SurfaceHolderFrameWriter.create(
+                    /* surfaceHolder= */ null,
+                    /* surfaceHolderExecutor= */ applicationThreadExecutor,
+                    internalListener,
+                    applicationThreadExecutor,
+                    checkNotNull(hardwareBufferJniWrapper));
+        frameProcessor =
+            frameProcessorFactory.create(
+                surfaceHolderFrameWriter,
+                /* listenerExecutor= */ playbackThreadExecutor,
+                /* listener= */ internalListener);
+
+        VideoFrameReleaseControl videoFrameReleaseControl =
+            new VideoFrameReleaseControl(
+                this.context,
+                /* frameTimingEvaluator= */ new CompositionFrameTimingEvaluator(
+                    // Convert lateThresholdToDropInputUs to early time.
+                    lateThresholdToDropInputUs != C.TIME_UNSET
+                        ? -lateThresholdToDropInputUs
+                        : C.TIME_UNSET),
+                /* allowedJoiningTimeMs= */ 0);
+        videoFrameReleaseControl.setClock(clock);
+        videoPacketReleaseControl =
+            new CompositionVideoPacketReleaseControl(
+                videoFrameReleaseControl, frameProcessor, internalListener);
+      } else {
+        hardwareBufferPostProcessor = null;
+        frameProcessor = null;
+        surfaceHolderFrameWriter = null;
+        frameAggregator = null;
+        videoPacketReleaseControl = null;
+      }
+      analyticsCollector = new DefaultAnalyticsCollector(clock);
+      analyticsCollector.setPlayer(this, builder.looper);
+      analyticsCollector.addListener(new EventLogger(TAG));
+      addListener(analyticsCollector);
+    } catch (Throwable t) {
+      playbackThread.quit();
+      throw t;
+    }
   }
 
   /**
-   * Sets the {@link Composition} to play.
+   * Sets the {@link Composition} to play from the beginning.
    *
-   * <p>This method should only be called once.
+   * <p>Calling this method is equivalent to calling {@link #setComposition(Composition, long)} with
+   * a start position at zero.
    *
    * @param composition The {@link Composition} to play. Every {@link EditedMediaItem} in the {@link
    *     Composition} must have its {@link EditedMediaItem#durationUs} set.
    */
   public void setComposition(Composition composition) {
+    setComposition(composition, /* startPositionMs= */ 0);
+  }
+
+  /**
+   * Sets the {@link Composition} to play.
+   *
+   * @param composition The {@link Composition} to play. Every {@link EditedMediaItem} in the {@link
+   *     Composition} must have its {@link EditedMediaItem#durationUs} set.
+   * @param startPositionMs The position at which playback should start, in milliseconds.
+   */
+  @SuppressWarnings("FutureReturnValueIgnored")
+  public void setComposition(Composition composition, @IntRange(from = 0) long startPositionMs) {
     verifyApplicationThread();
     checkArgument(!composition.sequences.isEmpty());
-    checkArgument(!composition.hasGaps());
-    checkState(this.composition == null);
-    composition = deactivateSpeedAdjustingVideoEffects(composition);
+    checkArgument(startPositionMs >= 0, "Invalid start position %s", startPositionMs);
+    checkArgument(
+        !compositionContainsIllegalSpeedChangingEffects(composition),
+        "CompositionPlayer only allows speed changing effects created from"
+            + " Effects#createExperimentalSpeedChangingEffect() placed as first effects within an"
+            + " EditedMediaItem.");
+    DebugTraceUtil.logEvent(
+        COMPONENT_COMPOSITION_PLAYER,
+        EVENT_SET_COMPOSITION,
+        /* presentationTimeUs= */ C.TIME_UNSET,
+        /* extraFormat= */ "%s",
+        composition.toJsonObject().toString());
 
-    setCompositionInternal(composition);
-    if (videoOutput != null) {
-      if (videoOutput instanceof SurfaceHolder) {
-        setVideoSurfaceHolderInternal((SurfaceHolder) videoOutput);
-      } else if (videoOutput instanceof SurfaceView) {
-        SurfaceView surfaceView = (SurfaceView) videoOutput;
-        setVideoSurfaceHolderInternal(surfaceView.getHolder());
-      } else if (videoOutput instanceof Surface) {
-        setVideoSurfaceInternal((Surface) videoOutput, checkNotNull(videoOutputSize));
-      } else {
-        throw new IllegalStateException(videoOutput.getClass().toString());
-      }
+    composition = applyPreProcessingEffects(composition);
+
+    if (composition.sequences.size() > 1 && !videoGraphFactory.supportsMultipleInputs()) {
+      Log.w(TAG, "Setting multi-sequence Composition with single input video graph.");
     }
+
+    // TODO: b/412585856 - Skip reconfiguration when setting the exact same Composition
+    setCompositionInternal(composition, startPositionMs);
     // Update the composition field at the end after everything else has been set.
     this.composition = composition;
+    maybeSetVideoOutput();
+  }
+
+  /**
+   * Adds an {@link AnalyticsListener} to receive analytics events.
+   *
+   * <p>This method can be called from any thread.
+   *
+   * @param listener The listener to be added.
+   */
+  public void addAnalyticsListener(AnalyticsListener listener) {
+    analyticsCollector.addListener(listener);
+  }
+
+  /**
+   * Removes an {@link AnalyticsListener}.
+   *
+   * @param listener The listener to be removed.
+   */
+  public void removeAnalyticsListener(AnalyticsListener listener) {
+    verifyApplicationThread();
+    analyticsCollector.removeListener(listener);
+  }
+
+  /**
+   * Sets whether to optimize the player for scrubbing (many frequent seeks).
+   *
+   * <p>The player may consume more resources in this mode, so it should only be used for short
+   * periods of time in response to user interaction (e.g. dragging on a progress bar UI element).
+   *
+   * <p>During scrubbing mode playback is {@linkplain Player#getPlaybackSuppressionReason()
+   * suppressed} with {@link Player#PLAYBACK_SUPPRESSION_REASON_SCRUBBING}.
+   *
+   * @param scrubbingModeEnabled Whether scrubbing mode should be enabled.
+   */
+  public void setScrubbingModeEnabled(boolean scrubbingModeEnabled) {
+    verifyApplicationThread();
+    if (this.scrubbingModeEnabled == scrubbingModeEnabled) {
+      return;
+    }
+    this.scrubbingModeEnabled = scrubbingModeEnabled;
+    if (scrubbingModeEnabled) {
+      this.playWhenReadyBeforeScrubbingEnabled = this.playWhenReady;
+    }
+
+    for (int i = 0; i < playerHolders.size(); i++) {
+      playerHolders.get(i).player.setScrubbingModeEnabled(scrubbingModeEnabled);
+    }
+
+    if (scrubbingModeEnabled) {
+      updatePlayWhenReadyWithAudioFocus(
+          this.playWhenReady,
+          PLAYBACK_SUPPRESSION_REASON_SCRUBBING,
+          this.playWhenReadyChangeReason);
+    } else {
+      // Disabling scrubbing mode when scrubbing was enabled in a "playing" state is considered an
+      // implicit "play".
+      updatePlayWhenReadyWithAudioFocus(
+          /* playWhenReady= */ this.playWhenReadyBeforeScrubbingEnabled || this.playWhenReady,
+          PLAYBACK_SUPPRESSION_REASON_NONE,
+          this.playWhenReadyBeforeScrubbingEnabled
+              ? PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST
+              : this.playWhenReadyChangeReason);
+
+      // Bypass debouncing for the final seek when scrubbing ends.
+      waitingForFrameAfterSeek = false;
+      if (pendingSeekPositionMs != C.TIME_UNSET) {
+        long pendingSeekPosition = pendingSeekPositionMs;
+        pendingSeekPositionMs = C.TIME_UNSET;
+        handleSeekInternal(pendingSeekPosition);
+      }
+    }
+
+    // This is not a SimpleBasePlayer method, so we need to manually invalidate the state.
+    invalidateState();
+  }
+
+  /**
+   * Returns whether the player is optimized for scrubbing (many frequent seeks).
+   *
+   * <p>See {@link #setScrubbingModeEnabled(boolean)}.
+   */
+  public boolean isScrubbingModeEnabled() {
+    return scrubbingModeEnabled;
+  }
+
+  /**
+   * Forces the effect pipeline to redraw the effects immediately.
+   *
+   * <p>The player must be {@linkplain Builder#experimentalSetEnableReplayableCache built with
+   * replayable cache support}, unless using {@link Builder#setFrameProcessorFactory FrameProcessor}
+   * to apply effects.
+   */
+  @ExperimentalApi // TODO: b/470383420 - Remove or convert to non-experimental method.
+  public void experimentalRedrawLastFrame() {
+    if (playbackThreadHandler == null || playbackVideoGraphWrapper == null) {
+      // Ignore replays before setting a composition.
+      return;
+    }
+    if (videoPacketReleaseControl != null) {
+      checkNotNull(compositionPlayerInternal).redraw();
+    } else if (playbackVideoGraphWrapper != null) {
+      checkState(enableReplayableCache);
+      playbackThreadHandler.post(() -> checkNotNull(playbackVideoGraphWrapper).getSink(0).redraw());
+    }
   }
 
   /** Sets the {@link Surface} and {@link Size} to render to. */
-  @VisibleForTesting
   public void setVideoSurface(Surface surface, Size videoOutputSize) {
     videoOutput = surface;
     this.videoOutputSize = videoOutputSize;
     setVideoSurfaceInternal(surface, videoOutputSize);
   }
 
-  // PlaybackVideoGraphWrapper.Listener methods. Called on playback thread.
-
-  @Override
-  public void onFirstFrameRendered(PlaybackVideoGraphWrapper playbackVideoGraphWrapper) {
-    applicationHandler.post(
-        () -> {
-          CompositionPlayer.this.renderedFirstFrame = true;
-          invalidateState();
-        });
+  /**
+   * Returns the {@link Looper} associated with the playback thread.
+   *
+   * <p>This method may be called from any thread.
+   */
+  public Looper getPlaybackLooper() {
+    return playbackThread.getLooper();
   }
 
-  @Override
-  public void onFrameDropped(PlaybackVideoGraphWrapper playbackVideoGraphWrapper) {
-    // Do not post to application thread on each dropped frame, because onFrameDropped
-    // may be called frequently when resources are already scarce.
-  }
-
-  @Override
-  public void onVideoSizeChanged(
-      PlaybackVideoGraphWrapper playbackVideoGraphWrapper, VideoSize videoSize) {
-    // TODO: b/328219481 - Report video size change to app.
-  }
-
-  @Override
-  public void onError(
-      PlaybackVideoGraphWrapper playbackVideoGraphWrapper,
-      VideoFrameProcessingException videoFrameProcessingException) {
-    // The error will also be surfaced from the underlying ExoPlayer instance via
-    // PlayerListener.onPlayerError, and it will arrive to the composition player twice.
-    applicationHandler.post(
-        () ->
-            maybeUpdatePlaybackError(
-                "Error processing video frames",
-                videoFrameProcessingException,
-                PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED));
-  }
-
-  // SurfaceHolder.Callback methods. Called on application thread.
-
-  @Override
-  public void surfaceCreated(SurfaceHolder holder) {
-    videoOutputSize = new Size(holder.getSurfaceFrame().width(), holder.getSurfaceFrame().height());
-    setVideoSurfaceInternal(holder.getSurface(), videoOutputSize);
-  }
-
-  @Override
-  public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-    maybeSetOutputSurfaceInfo(width, height);
-  }
-
-  @Override
-  public void surfaceDestroyed(SurfaceHolder holder) {
-    clearVideoSurfaceInternal();
+  /**
+   * Returns the {@link Clock} used for playback.
+   *
+   * <p>This method can be called from any thread.
+   */
+  public Clock getClock() {
+    return clock;
   }
 
   // SimpleBasePlayer methods
 
   @Override
   protected State getState() {
-    @Player.State int oldPlaybackState = playbackState;
-    updatePlaybackState();
-    if (oldPlaybackState != STATE_READY && playbackState == STATE_READY && playWhenReady) {
-      for (int i = 0; i < players.size(); i++) {
-        players.get(i).setPlayWhenReady(true);
-      }
-    } else if (oldPlaybackState == STATE_READY
-        && playWhenReady
-        && playbackState == STATE_BUFFERING) {
-      // We were playing but a player got in buffering state, pause the players.
-      for (int i = 0; i < players.size(); i++) {
-        players.get(i).setPlayWhenReady(false);
-      }
-    }
     // TODO: b/328219481 - Report video size change to app.
     State.Builder state =
         new State.Builder()
@@ -448,10 +1008,14 @@ public final class CompositionPlayer extends SimpleBasePlayer
             .setPlayWhenReady(playWhenReady, playWhenReadyChangeReason)
             .setRepeatMode(repeatMode)
             .setVolume(volume)
-            .setContentPositionMs(this::getContentPositionMs)
-            .setContentBufferedPositionMs(this::getBufferedPositionMs)
-            .setTotalBufferedDurationMs(this::getTotalBufferedDurationMs)
-            .setNewlyRenderedFirstFrame(getRenderedFirstFrameAndReset());
+            .setContentPositionMs(positionSupplier)
+            .setContentBufferedPositionMs(bufferedPositionSupplier)
+            .setTotalBufferedDurationMs(totalBufferedDurationSupplier)
+            .setNewlyRenderedFirstFrame(getRenderedFirstFrameAndReset())
+            .setPlaybackSuppressionReason(playbackSuppressionReason);
+    if (frameProcessor != null && videoSize != null) {
+      state.setVideoSize(videoSize);
+    }
     if (repeatingCompositionSeekInProgress) {
       state.setPositionDiscontinuity(DISCONTINUITY_REASON_AUTO_TRANSITION, C.TIME_UNSET);
       repeatingCompositionSeekInProgress = false;
@@ -466,27 +1030,29 @@ public final class CompositionPlayer extends SimpleBasePlayer
 
   @Override
   protected ListenableFuture<?> handlePrepare() {
-    checkStateNotNull(composition, "No composition set");
+    checkNotNull(composition, "No composition set");
 
     if (playbackState != Player.STATE_IDLE) {
       // The player has been prepared already.
       return Futures.immediateVoidFuture();
     }
-    for (int i = 0; i < players.size(); i++) {
-      players.get(i).prepare();
+
+    for (int i = 0; i < playerHolders.size(); i++) {
+      playerHolders.get(i).player.prepare();
     }
+    appNeedsToPrepareCompositionPlayer = false;
+
+    updatePlayWhenReadyWithAudioFocus(
+        this.playWhenReady, this.playbackSuppressionReason, this.playWhenReadyChangeReason);
+
+    updatePlaybackState();
     return Futures.immediateVoidFuture();
   }
 
   @Override
   protected ListenableFuture<?> handleSetPlayWhenReady(boolean playWhenReady) {
-    this.playWhenReady = playWhenReady;
-    playWhenReadyChangeReason = PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST;
-    if (playbackState == STATE_READY) {
-      for (int i = 0; i < players.size(); i++) {
-        players.get(i).setPlayWhenReady(playWhenReady);
-      }
-    } // else, wait until all players are ready.
+    updatePlayWhenReadyWithAudioFocus(
+        playWhenReady, playbackSuppressionReason, PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST);
     return Futures.immediateVoidFuture();
   }
 
@@ -500,36 +1066,76 @@ public final class CompositionPlayer extends SimpleBasePlayer
 
   @Override
   protected ListenableFuture<?> handleStop() {
-    for (int i = 0; i < players.size(); i++) {
-      players.get(i).stop();
+    for (int i = 0; i < playerHolders.size(); i++) {
+      playerHolders.get(i).player.stop();
     }
+    appNeedsToPrepareCompositionPlayer = true;
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
+    updatePlaybackState();
     return Futures.immediateVoidFuture();
   }
 
   @Override
   protected ListenableFuture<?> handleRelease() {
+    DebugTraceUtil.logEvent(
+        COMPONENT_COMPOSITION_PLAYER, EVENT_RELEASE, /* presentationTimeUs= */ C.TIME_UNSET);
     if (composition == null) {
       return Futures.immediateVoidFuture();
     }
 
-    checkState(checkStateNotNull(playbackThread).isAlive());
+    audioFocusManager.release();
+    checkState(checkNotNull(playbackThread).isAlive());
     // Release the players first so that they stop rendering.
-    for (int i = 0; i < players.size(); i++) {
-      players.get(i).release();
+    for (int i = 0; i < playerHolders.size(); i++) {
+      playerHolders.get(i).release();
     }
-    checkStateNotNull(compositionPlayerInternal).release();
+    playerHolders.clear();
+    boolean internalPlayerSuccessfullyReleased = checkNotNull(compositionPlayerInternal).release();
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
     removeSurfaceCallbacks();
+    if (hardwareBufferPostProcessor != null) {
+      try {
+        hardwareBufferPostProcessor.close();
+      } catch (Exception e) {
+        // Ignore exceptions during release.
+        Log.e(TAG, "Failed to release hardwareBufferPostProcessor.", e);
+      }
+    }
+    // TODO: b/518679527 - Move close calls of frameAggregator and frameProcessor to the
+    // playback thread.
+    if (frameAggregator != null) {
+      frameAggregator.close();
+    }
+    if (frameProcessor != null) {
+      frameProcessor.close();
+    }
+    if (SDK_INT >= 28 && surfaceHolderFrameWriter != null) {
+      surfaceHolderFrameWriter.close();
+    }
     // Remove any queued callback from the internal player.
     compositionInternalListenerHandler.removeCallbacksAndMessages(/* token= */ null);
     displaySurface = null;
-    checkStateNotNull(playbackThread).quitSafely();
+    checkNotNull(playbackThread).quitSafely();
     applicationHandler.removeCallbacksAndMessages(/* token= */ null);
-    return Futures.immediateVoidFuture();
+    if (!internalPlayerSuccessfullyReleased) {
+      // The parent class will call getState() after this method returns, where the exception will
+      // surface.
+      playbackException =
+          new PlaybackException(
+              "InternalPlayer release timeout",
+              /* cause= */ null,
+              PlaybackException.ERROR_CODE_TIMEOUT);
+      updatePlaybackState();
+    }
+    analyticsCollector.release();
+    return immediateVoidFuture();
   }
 
   @Override
   protected ListenableFuture<?> handleClearVideoOutput(@Nullable Object videoOutput) {
-    checkArgument(Util.areEqual(videoOutput, this.videoOutput));
+    checkArgument(Objects.equals(videoOutput, this.videoOutput));
 
     this.videoOutput = null;
     if (composition == null) {
@@ -542,90 +1148,229 @@ public final class CompositionPlayer extends SimpleBasePlayer
 
   @Override
   protected ListenableFuture<?> handleSetVideoOutput(Object videoOutput) {
+    DebugTraceUtil.logEvent(
+        COMPONENT_COMPOSITION_PLAYER,
+        EVENT_SET_VIDEO_OUTPUT,
+        /* presentationTimeUs= */ C.TIME_UNSET,
+        "%s",
+        videoOutput);
     if (!(videoOutput instanceof SurfaceHolder || videoOutput instanceof SurfaceView)) {
-      throw new UnsupportedOperationException(videoOutput.getClass().toString());
+      throw new UnsupportedOperationException(
+          videoOutput.getClass() + ". Use CompositionPlayer.setVideoSurface() for Surface output.");
     }
     this.videoOutput = videoOutput;
-    if (composition == null) {
-      return Futures.immediateVoidFuture();
-    }
-    if (videoOutput instanceof SurfaceHolder) {
-      setVideoSurfaceHolderInternal((SurfaceHolder) videoOutput);
-    } else {
-      setVideoSurfaceHolderInternal(((SurfaceView) videoOutput).getHolder());
-    }
-    return Futures.immediateVoidFuture();
+    return maybeSetVideoOutput();
   }
 
   @Override
-  protected ListenableFuture<?> handleSetVolume(float volume) {
-    this.volume = Util.constrainValue(volume, /* min= */ 0.0f, /* max= */ 1.0f);
-    finalAudioSink.setVolume(this.volume);
+  protected ListenableFuture<?> handleSetVolume(
+      float volume, @C.VolumeOperationType int volumeOperationType) {
+    volume = constrainValue(volume, /* min= */ 0.0f, /* max= */ 1.0f);
+    if (this.volume != volume) {
+      setVolumeInternal(volume);
+    }
     return Futures.immediateVoidFuture();
   }
 
   @Override
   protected ListenableFuture<?> handleSeek(
-      int mediaItemIndex, long positionMs, @Player.Command int seekCommand) {
-    CompositionPlayerInternal compositionPlayerInternal =
-        checkStateNotNull(this.compositionPlayerInternal);
-    compositionPlayerInternal.startSeek(positionMs);
-    for (int i = 0; i < players.size(); i++) {
-      players.get(i).seekTo(positionMs);
-    }
-    compositionPlayerInternal.endSeek();
+      int mediaItemIndex, long positionMs, @Command int seekCommand) {
+    handleSeekInternal(positionMs);
     return Futures.immediateVoidFuture();
   }
 
-  // CompositionPlayerInternal.Listener methods
+  private void handleSeekInternal(long positionMs) {
+    resetLivePositionSuppliers();
+    DebugTraceUtil.logEvent(
+        COMPONENT_COMPOSITION_PLAYER,
+        EVENT_SEEK_TO,
+        /* presentationTimeUs= */ C.TIME_UNSET,
+        "positionMs=%d",
+        positionMs);
+
+    if (frameProcessor != null) {
+      if (waitingForFrameAfterSeek) {
+        pendingSeekPositionMs = positionMs;
+        return;
+      }
+      waitingForFrameAfterSeek = true;
+    }
+    CompositionPlayerInternal compositionPlayerInternal =
+        checkNotNull(this.compositionPlayerInternal);
+    compositionPlayerInternal.startSeek(positionMs);
+    for (int i = 0; i < playerHolders.size(); i++) {
+      playerHolders.get(i).player.seekTo(positionMs);
+      // Flush the HardwareBufferFrameReader and FrameAggregator after the player seeks to ensure
+      // frames from before the seek do not race with the flush calls.
+      if (frameProcessor != null) {
+        // TODO: b/449956936 - move packetConsumer playback thread seek handling to
+        //  CompositionPlayerInternal.
+        int sequenceIndex = i;
+        playerHolders
+            .get(i)
+            .player
+            .createMessage(
+                (unused, message) -> {
+                  HardwareBufferFrameReader frameReader =
+                      (HardwareBufferFrameReader) checkNotNull(message);
+                  frameReader.flush();
+                  checkNotNull(frameAggregator).flush(sequenceIndex);
+                })
+            .setPayload(playerHolders.get(i).hardwareBufferFrameReaderSupplier.get())
+            .send();
+      }
+    }
+    compositionPlayerInternal.endSeek();
+  }
 
   @Override
-  public void onError(String message, Exception cause, int errorCode) {
-    maybeUpdatePlaybackError(message, cause, errorCode);
+  protected ListenableFuture<?> handleSetAudioAttributes(
+      AudioAttributes audioAttributes, boolean handleAudioFocus) {
+    setAudioAttributesInternal(audioAttributes, handleAudioFocus);
+    return Futures.immediateVoidFuture();
+  }
+
+  /** Sets the {@link VideoFrameMetadataListener}. */
+  public void setVideoFrameMetadataListener(VideoFrameMetadataListener videoFrameMetadataListener) {
+    this.videoFrameMetadataListener = videoFrameMetadataListener;
+    if (playerHolders.isEmpty()) {
+      return;
+    }
+    if (frameProcessor == null) {
+      playerHolders.get(0).player.setVideoFrameMetadataListener(videoFrameMetadataListener);
+    }
   }
 
   // Internal methods
 
-  private static Composition deactivateSpeedAdjustingVideoEffects(Composition composition) {
+  private static @Player.PlayWhenReadyChangeReason int updatePlayWhenReadyChangeReason(
+      @AudioFocusManager.PlayerCommand int playerCommand,
+      @Player.PlayWhenReadyChangeReason int playWhenReadyChangeReason) {
+    if (playerCommand == AudioFocusManager.PLAYER_COMMAND_DO_NOT_PLAY) {
+      return Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS;
+    }
+    if (playWhenReadyChangeReason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS) {
+      return Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST;
+    }
+    return playWhenReadyChangeReason;
+  }
+
+  private static @Player.PlaybackSuppressionReason int updatePlaybackSuppressionReason(
+      @AudioFocusManager.PlayerCommand int playerCommand,
+      @Player.PlaybackSuppressionReason int playbackSuppressionReason,
+      boolean isScrubbingModeEnabled) {
+    if (playerCommand == AudioFocusManager.PLAYER_COMMAND_WAIT_FOR_CALLBACK) {
+      return Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS;
+    }
+    if (playbackSuppressionReason
+        != Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS) {
+      return playbackSuppressionReason;
+    }
+
+    if (isScrubbingModeEnabled) {
+      return PLAYBACK_SUPPRESSION_REASON_SCRUBBING;
+    }
+
+    return Player.PLAYBACK_SUPPRESSION_REASON_NONE;
+  }
+
+  /**
+   * Returns a copy of the provided {@link Composition} with any required pre-processing effects
+   * applied.
+   *
+   * <p>Pre-processing effects help {@link CompositionPlayer} normalize input formats or implement
+   * speed changing effects.
+   */
+  private static Composition applyPreProcessingEffects(Composition composition) {
     List<EditedMediaItemSequence> newSequences = new ArrayList<>();
     for (EditedMediaItemSequence sequence : composition.sequences) {
       List<EditedMediaItem> newEditedMediaItems = new ArrayList<>();
-      for (EditedMediaItem editedMediaItem : sequence.editedMediaItems) {
-        ImmutableList<Effect> videoEffects = editedMediaItem.effects.videoEffects;
-        List<Effect> newVideoEffects = new ArrayList<>();
-        for (Effect videoEffect : videoEffects) {
-          if (videoEffect instanceof TimestampAdjustment) {
-            newVideoEffects.add(
-                new InactiveTimestampAdjustment(((TimestampAdjustment) videoEffect).speedProvider));
-          } else {
-            newVideoEffects.add(videoEffect);
-          }
-        }
-        newEditedMediaItems.add(
-            editedMediaItem
-                .buildUpon()
-                .setEffects(new Effects(editedMediaItem.effects.audioProcessors, newVideoEffects))
-                .build());
+      for (EditedMediaItem item : sequence.editedMediaItems) {
+        item = applyAudioBitDepthNormalization(item);
+        newEditedMediaItems.add(transformSpeedChangingEffects(item));
       }
-      newSequences.add(
-          new EditedMediaItemSequence.Builder(newEditedMediaItems)
-              .setIsLooping(sequence.isLooping)
-              .build());
+      newSequences.add(sequence.copyWithEditedMediaItems(newEditedMediaItems));
     }
     return composition.buildUpon().setSequences(newSequences).build();
   }
 
+  private static EditedMediaItem applyAudioBitDepthNormalization(EditedMediaItem item) {
+    // This should be the first effect in the preprocessing pipeline.
+    checkState(item.preProcessingAudioProcessors.isEmpty());
+    return item.buildUpon()
+        .setPreProcessingAudioProcessors(ImmutableList.of(new ToInt16PcmAudioProcessor()))
+        .build();
+  }
+
+  /**
+   * Modifies speed changing effects within the {@link EditedMediaItem} to a representation
+   * supported by {@link CompositionPlayer}.
+   *
+   * <p>If the {@link EditedMediaItem} has a set {@link SpeedProvider}, this method adds a {@link
+   * SpeedChangingAudioProcessor} as to the item's pre-processing pipeline. Otherwise, the method
+   * swaps any {@link TimestampAdjustment} instance for {@link InactiveTimestampAdjustment}.
+   *
+   * @return The modified {@link EditedMediaItem}.
+   */
+  private static EditedMediaItem transformSpeedChangingEffects(EditedMediaItem item) {
+    if (item.speedProvider == SpeedProvider.DEFAULT) {
+      return deactivateSpeedAdjustingVideoEffects(item);
+    }
+    List<AudioProcessor> preProcessors = new ArrayList<>(item.preProcessingAudioProcessors);
+    // SpeedChangingMediaSource already adjusts the stream's timestamps, so
+    // SpeedChangingAudioProcessor does not need to adjust them.
+    preProcessors.add(
+        new SpeedChangingAudioProcessor(
+            item.speedProvider,
+            /* areInputTimestampsAdjusted= */ true,
+            item.speedParameters.shouldMaintainPitch));
+    return item.buildUpon().setPreProcessingAudioProcessors(preProcessors).build();
+  }
+
+  /**
+   * Returns a copy of {@code item} with any {@link TimestampAdjustment} effect converted into
+   * {@link InactiveTimestampAdjustment}.
+   */
+  // TODO: b/449937111 - Delete this once Effects#createExperimentalSpeedAdjustingEffect() is
+  // removed.
+  private static EditedMediaItem deactivateSpeedAdjustingVideoEffects(EditedMediaItem item) {
+    ImmutableList<Effect> videoEffects = item.effects.videoEffects;
+    List<Effect> newVideoEffects = new ArrayList<>();
+    for (Effect videoEffect : videoEffects) {
+      if (videoEffect instanceof TimestampAdjustment) {
+        newVideoEffects.add(
+            new InactiveTimestampAdjustment(((TimestampAdjustment) videoEffect).speedProvider));
+      } else {
+        newVideoEffects.add(videoEffect);
+      }
+    }
+    return item.buildUpon()
+        .setEffects(new Effects(item.effects.audioProcessors, newVideoEffects))
+        .build();
+  }
+
+  private static boolean containsVideo(Composition composition) {
+    for (EditedMediaItemSequence sequence : composition.sequences) {
+      if (sequence.trackTypes.contains(C.TRACK_TYPE_VIDEO)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private void updatePlaybackState() {
-    if (players.isEmpty() || playbackException != null) {
+    if (playerHolders.isEmpty() || playbackException != null) {
       playbackState = STATE_IDLE;
       return;
     }
 
+    @Player.State int oldPlaybackState = playbackState;
+
     int idleCount = 0;
     int bufferingCount = 0;
     int endedCount = 0;
-    for (int i = 0; i < players.size(); i++) {
-      @Player.State int playbackState = players.get(i).getPlaybackState();
+    for (int i = 0; i < playerHolders.size(); i++) {
+      @Player.State int playbackState = playerHolders.get(i).player.getPlaybackState();
       switch (playbackState) {
         case STATE_IDLE:
           idleCount++;
@@ -643,96 +1388,163 @@ public final class CompositionPlayer extends SimpleBasePlayer
           throw new IllegalStateException(String.valueOf(playbackState));
       }
     }
-    if (idleCount > 0) {
+    if (appNeedsToPrepareCompositionPlayer) {
+      // State is IDLE before prepare is called.
       playbackState = STATE_IDLE;
-    } else if (bufferingCount > 0) {
+    } else if (bufferingCount > 0 || idleCount > 0) {
+      // After calling prepare, transition into buffering, and stay until either all players are
+      // ready, error is thrown or stop is called.
       playbackState = STATE_BUFFERING;
-    } else if (endedCount == players.size()) {
+      if (oldPlaybackState == STATE_READY && shouldPlayWhenReady()) {
+        // We were playing but a player got in buffering state, pause the players.
+        setPlayWhenReadyInternal(
+            /* playWhenReady= */ false, /* shouldUpdateInternalPlayers= */ true);
+      }
+    } else if (endedCount == playerHolders.size()
+        && (frameProcessor == null
+            || packetConsumerEnded
+            || !containsVideo(checkNotNull(composition)))) {
       playbackState = STATE_ENDED;
+      checkNotNull(compositionPlayerInternal).stopRendering();
     } else {
       playbackState = STATE_READY;
+      if (oldPlaybackState != STATE_READY && shouldPlayWhenReady()) {
+        setPlayWhenReadyInternal(
+            /* playWhenReady= */ true, /* shouldUpdateInternalPlayers= */ true);
+      }
     }
   }
 
-  @SuppressWarnings("VisibleForTests") // Calls ExoPlayer.Builder.setClock()
-  private void setCompositionInternal(Composition composition) {
-    compositionDurationUs = getCompositionDurationUs(composition);
-    playbackThread = new HandlerThread("CompositionPlaybackThread", Process.THREAD_PRIORITY_AUDIO);
-    playbackThread.start();
-    // Create the audio and video composition components now in order to setup the audio and video
-    // pipelines. Once this method returns, further access to the audio and video graph wrappers
-    // must done on the playback thread only, to ensure related components are accessed from one
-    // thread only.
-    PlaybackAudioGraphWrapper playbackAudioGraphWrapper =
-        new PlaybackAudioGraphWrapper(
-            new DefaultAudioMixer.Factory(),
-            composition.effects.audioProcessors,
-            checkNotNull(finalAudioSink));
-    VideoFrameReleaseControl videoFrameReleaseControl =
-        new VideoFrameReleaseControl(
-            context, new CompositionFrameTimingEvaluator(), /* allowedJoiningTimeMs= */ 0);
-    PlaybackVideoGraphWrapper playbackVideoGraphWrapper =
-        new PlaybackVideoGraphWrapper.Builder(context, videoFrameReleaseControl)
-            .setPreviewingVideoGraphFactory(checkNotNull(previewingVideoGraphFactory))
-            .setCompositionEffects(composition.effects.videoEffects)
-            .setClock(clock)
-            .build();
-    playbackVideoGraphWrapper.addListener(this);
+  private void setAudioAttributesInternal(
+      AudioAttributes audioAttributes, boolean handleAudioFocus) {
+    this.handleAudioFocus = handleAudioFocus;
 
-    long primarySequenceDurationUs =
-        getSequenceDurationUs(checkNotNull(composition.sequences.get(0)));
-    for (int i = 0; i < composition.sequences.size(); i++) {
-      EditedMediaItemSequence editedMediaItemSequence = composition.sequences.get(i);
-      SequenceRenderersFactory sequenceRenderersFactory =
-          i == 0
-              ? SequenceRenderersFactory.create(
-                  context,
-                  editedMediaItemSequence,
-                  playbackAudioGraphWrapper,
-                  playbackVideoGraphWrapper.getSink(),
-                  imageDecoderFactory,
-                  /* inputIndex= */ i)
-              : SequenceRenderersFactory.createForAudio(
-                  context, editedMediaItemSequence, playbackAudioGraphWrapper, /* inputIndex= */ i);
-      ExoPlayer.Builder playerBuilder =
-          new ExoPlayer.Builder(context)
-              .setLooper(getApplicationLooper())
-              .setPlaybackLooper(playbackThread.getLooper())
-              .setRenderersFactory(sequenceRenderersFactory)
-              .setHandleAudioBecomingNoisy(true)
-              .setClock(clock);
-
-      boolean disableVideoPlayback = false;
-      for (int j = 0; j < editedMediaItemSequence.editedMediaItems.size(); j++) {
-        if (editedMediaItemSequence.editedMediaItems.get(j).removeVideo) {
-          disableVideoPlayback = true;
-          break;
-        }
+    if (!Objects.equals(audioAttributes, this.audioAttributes)) {
+      this.audioAttributes = audioAttributes;
+      if (compositionPlayerInternalPrepared) {
+        checkNotNull(compositionPlayerInternal).setAudioAttributes(audioAttributes);
       }
-      playerBuilder.setTrackSelector(
-          new CompositionTrackSelector(context, /* sequenceIndex= */ i, disableVideoPlayback));
-
-      ExoPlayer player = playerBuilder.build();
-      player.addListener(new PlayerListener(i));
-      player.addAnalyticsListener(new EventLogger());
-      player.setPauseAtEndOfMediaItems(true);
-
-      if (i == 0) {
-        setPrimaryPlayerSequence(player, editedMediaItemSequence);
-      } else {
-        setSecondaryPlayerSequence(player, editedMediaItemSequence, primarySequenceDurationUs);
-      }
-
-      players.add(player);
-      if (i == 0) {
-        // Invalidate the player state before initializing the playlist to force SimpleBasePlayer
-        // to collect a state while the playlist is null. Consequently, once the playlist is
-        // initialized, SimpleBasePlayer will raise a timeline change callback with reason
-        // TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED.
-        invalidateState();
-        playlist = createPlaylist();
+      // CompositionPlayer handles audio focus, so only set AudioAttributes to internal players.
+      for (SequencePlayerHolder playerHolder : playerHolders) {
+        playerHolder.player.setAudioAttributes(audioAttributes, /* handleAudioFocus= */ false);
       }
     }
+
+    audioFocusManager.setAudioAttributes(handleAudioFocus ? audioAttributes : null);
+
+    updatePlayWhenReadyWithAudioFocus(
+        this.playWhenReady, this.playbackSuppressionReason, this.playWhenReadyChangeReason);
+  }
+
+  private void setVolumeInternal(float volume) {
+    this.volume = volume;
+    if (compositionPlayerInternal != null) {
+      compositionPlayerInternal.setVolume(this.volume * audioFocusManager.getVolumeMultiplier());
+    }
+  }
+
+  /**
+   * Toggles rendering on {@link #compositionPlayerInternal} and {@link ExoPlayer#setPlayWhenReady}
+   * on internal players.
+   *
+   * <p>This method has no effect on {@link #playWhenReady}.
+   *
+   * @param playWhenReady Whether to enable or disable rendering.
+   * @param shouldUpdateInternalPlayers Whether to modify {@link ExoPlayer#setPlayWhenReady} on
+   *     internal players.
+   */
+  private void setPlayWhenReadyInternal(
+      boolean playWhenReady, boolean shouldUpdateInternalPlayers) {
+    if (!compositionPlayerInternalPrepared) {
+      return;
+    }
+    // This method is also called on sequence player state change, so rendering will be started once
+    // CompositionPlayer is ready.
+    if (playbackState == STATE_READY && playWhenReady) {
+      checkNotNull(compositionPlayerInternal).startRendering();
+    } else {
+      checkNotNull(compositionPlayerInternal).stopRendering();
+    }
+
+    if (shouldUpdateInternalPlayers) {
+      for (int i = 0; i < playerHolders.size(); i++) {
+        playerHolders.get(i).player.setPlayWhenReady(playWhenReady);
+      }
+    }
+  }
+
+  private void updatePlayWhenReadyWithAudioFocus(
+      boolean playWhenReady,
+      @PlaybackSuppressionReason int playbackSuppressionReason,
+      @PlayWhenReadyChangeReason int playWhenReadyChangeReason) {
+    int playerCommand = audioFocusManager.updateAudioFocus(playWhenReady, playbackState);
+    updatePlayWhenReadyWithAudioFocus(
+        playWhenReady, playerCommand, playbackSuppressionReason, playWhenReadyChangeReason);
+  }
+
+  private void updatePlayWhenReadyWithAudioFocus(
+      boolean playWhenReady,
+      @AudioFocusManager.PlayerCommand int playerCommand,
+      @PlaybackSuppressionReason int playbackSuppressionReason,
+      @Player.PlayWhenReadyChangeReason int playWhenReadyChangeReason) {
+    playWhenReady &= playerCommand != AudioFocusManager.PLAYER_COMMAND_DO_NOT_PLAY;
+    playWhenReadyChangeReason =
+        updatePlayWhenReadyChangeReason(playerCommand, playWhenReadyChangeReason);
+    playbackSuppressionReason =
+        updatePlaybackSuppressionReason(
+            playerCommand, playbackSuppressionReason, this.scrubbingModeEnabled);
+    if (this.playWhenReady == playWhenReady
+        && this.playbackSuppressionReason == playbackSuppressionReason
+        && this.playWhenReadyChangeReason == playWhenReadyChangeReason) {
+      return;
+    }
+
+    int previousPlaybackSuppressionReason = this.playbackSuppressionReason;
+
+    this.playWhenReady = playWhenReady;
+    this.playWhenReadyChangeReason = playWhenReadyChangeReason;
+    this.playbackSuppressionReason = playbackSuppressionReason;
+
+    boolean shouldUpdateInternalPlayers =
+        previousPlaybackSuppressionReason != PLAYBACK_SUPPRESSION_REASON_SCRUBBING
+            && this.playbackSuppressionReason != PLAYBACK_SUPPRESSION_REASON_SCRUBBING;
+
+    setPlayWhenReadyInternal(shouldPlayWhenReady(), shouldUpdateInternalPlayers);
+  }
+
+  private boolean shouldPlayWhenReady() {
+    return this.playWhenReady
+        && this.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE;
+  }
+
+  private void prepareCompositionPlayerInternal() {
+    // PlaybackAudioGraphWrapper needs to be recreated everytime a new composition is set.
+    if (compositionPlayerInternalPrepared) {
+      playbackAudioGraphWrapper = new PlaybackAudioGraphWrapper(audioMixerFactory, finalAudioSink);
+      checkNotNull(compositionPlayerInternal)
+          .replacePlaybackAudioGraphWrapper(playbackAudioGraphWrapper);
+      return;
+    }
+
+    setAudioAttributesInternal(audioAttributes, handleAudioFocus);
+
+    // Once this method returns, further access to the audio and video graph wrappers must done on
+    // the playback thread only, to ensure related components are accessed from one thread only.
+    VideoFrameReleaseControl videoFrameReleaseControl =
+        new VideoFrameReleaseControl(
+            context,
+            new CompositionFrameTimingEvaluator(
+                CompositionFrameTimingEvaluator.DEFAULT_FRAME_LATE_THRESHOLD_US),
+            /* allowedJoiningTimeMs= */ 0);
+    playbackVideoGraphWrapper =
+        new PlaybackVideoGraphWrapper.Builder(context, videoFrameReleaseControl)
+            .setVideoGraphFactory(checkNotNull(videoGraphFactory))
+            .setClock(clock)
+            .setEnableReplayableCache(enableReplayableCache)
+            .experimentalSetLateThresholdToDropInputUs(lateThresholdToDropInputUs)
+            .build();
+    playbackVideoGraphWrapper.addListener(internalListener);
+
     // From here after, composition player accessed the audio and video pipelines via the internal
     // player. The internal player ensures access to the components is done on the playback thread.
     compositionPlayerInternal =
@@ -741,56 +1553,322 @@ public final class CompositionPlayer extends SimpleBasePlayer
             clock,
             playbackAudioGraphWrapper,
             playbackVideoGraphWrapper,
-            /* listener= */ this,
-            compositionInternalListenerHandler);
+            internalListener,
+            compositionInternalListenerHandler,
+            videoPacketReleaseControl);
+    setVolumeInternal(volume);
+    compositionPlayerInternalPrepared = true;
   }
 
-  private void setPrimaryPlayerSequence(ExoPlayer player, EditedMediaItemSequence sequence) {
-    ConcatenatingMediaSource2.Builder mediaSourceBuilder =
-        new ConcatenatingMediaSource2.Builder().useDefaultMediaSourceFactory(context);
+  private void setCompositionInternal(Composition composition, long startPositionMs) {
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
+    for (int i = 0; i < playerHolders.size(); i++) {
+      // TODO: b/412585856 - Optimize for the case where we can keep some resources.
+      playerHolders.get(i).release();
+    }
+    playerHolders.clear();
+
+    if (SDK_INT >= 26 && frameProcessor != null) {
+      if (frameAggregator != null) {
+        frameAggregator.close();
+      }
+      // Flush the primary sequence to reset the state of the release control when a new Composition
+      // is set.
+      checkNotNull(videoPacketReleaseControl).flush(/* sequenceIndex= */ 0);
+      frameAggregator =
+          new FrameAggregator(
+              composition.sequences.size(),
+              videoPacketReleaseControl::queue,
+              videoPacketReleaseControl::flush);
+    }
+
+    prepareCompositionPlayerInternal();
+    CompositionPlayerInternal compositionPlayerInternal =
+        checkNotNull(this.compositionPlayerInternal);
+    compositionDurationUs = getCompositionDurationUs(composition);
+    long primarySequenceDurationUs =
+        getSequenceDurationUs(checkNotNull(composition.sequences.get(0)));
+    for (int i = 0; i < composition.sequences.size(); i++) {
+      createSequencePlayer(
+          composition, /* sequenceIndex= */ i, primarySequenceDurationUs, startPositionMs);
+    }
+    compositionPlayerInternal.setComposition(composition);
+    compositionPlayerInternal.startSeek(startPositionMs);
+    compositionPlayerInternal.endSeek();
+
+    if (appNeedsToPrepareCompositionPlayer) {
+      return;
+    }
+    // After the app calls prepare() for the first time, subsequent calls to setComposition()
+    // doesn't require apps to call prepare() again (unless stop() is called, or player error
+    // reported), hence the need to prepare the underlying players here.
+    for (int i = 0; i < playerHolders.size(); i++) {
+      SequencePlayerHolder sequencePlayerHolder = playerHolders.get(i);
+      sequencePlayerHolder.player.prepare();
+    }
+    updatePlaybackState();
+    invalidateState();
+  }
+
+  private void createSequencePlayer(
+      Composition newComposition,
+      int sequenceIndex,
+      long primarySequenceDurationUs,
+      long startPositionMs) {
+    EditedMediaItemSequence sequence = newComposition.sequences.get(sequenceIndex);
+    // The underlying player needs to be recreated so that the audio renderer can use the new
+    // AudioSink from the newly created PlaybackAudioGraphWrapper.
+    SequencePlayerHolder playerHolder = createSequencePlayer(newComposition, sequenceIndex);
+    playerHolders.add(playerHolder);
+    ExoPlayer player = playerHolder.player;
+
+    // Starts from zero - internal player will discard current progress, re-preparing it by
+    // setting new media sources.
+    boolean shouldGenerateBlankFrames = sequence.trackTypes.contains(C.TRACK_TYPE_VIDEO);
+    if (sequenceIndex == 0) {
+      player.setMediaSource(
+          createPrimarySequenceMediaSource(sequence, mediaSourceFactory, shouldGenerateBlankFrames),
+          startPositionMs);
+      if (videoFrameMetadataListener != null && frameProcessor == null) {
+        player.setVideoFrameMetadataListener(videoFrameMetadataListener);
+      }
+    } else {
+      player.setMediaSource(
+          createSecondarySequenceMediaSource(
+              sequence, mediaSourceFactory, primarySequenceDurationUs, shouldGenerateBlankFrames),
+          startPositionMs);
+    }
+
+    if (sequenceIndex == 0) {
+      // Invalidate the player state before initializing the playlist to force SimpleBasePlayer
+      // to collect a state while the playlist is null. Consequently, once the playlist is
+      // initialized, SimpleBasePlayer will raise a timeline change callback with reason
+      // TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED.
+      invalidateState();
+      playlist = createPlaylist();
+    }
+  }
+
+  private SequencePlayerHolder createSequencePlayer(Composition composition, int sequenceIndex) {
+    boolean requestMediaCodecToneMapping =
+        composition.hdrMode == Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_MEDIACODEC;
+    boolean sequenceContainsVideo =
+        composition.sequences.get(sequenceIndex).trackTypes.contains(C.TRACK_TYPE_VIDEO);
+    SequenceRenderersFactory renderersFactory;
+    Supplier<@NullableType HardwareBufferFrameReader> hardwareBufferFrameReaderSupplier =
+        () -> null;
+    if (frameProcessor != null) {
+      // TODO: b/449956936 - Support MediaCodec tone mapping with packet consumer.
+      checkState(!requestMediaCodecToneMapping);
+      // TODO: b/449957106 - support component reuse, and decouple the Composition from the
+      // HardwareBufferFrameReader.
+      final FrameAggregator currentFrameAggregator = frameAggregator;
+      hardwareBufferFrameReaderSupplier =
+          Suppliers.memoize(
+              () ->
+                  new HardwareBufferFrameReader(
+                      composition,
+                      sequenceIndex,
+                      /* frameConsumer= */ hardwareBufferFrame -> {
+                        if (hardwareBufferFrame == HardwareBufferFrame.END_OF_STREAM_FRAME) {
+                          checkNotNull(currentFrameAggregator).queueEndOfStream(sequenceIndex);
+                        } else if (hardwareBufferPostProcessor != null) {
+                          HardwareBufferFrame processedFrame =
+                              hardwareBufferPostProcessor.process(hardwareBufferFrame);
+                          checkNotNull(currentFrameAggregator)
+                              .queueFrame(processedFrame, sequenceIndex);
+                        } else {
+                          checkNotNull(currentFrameAggregator)
+                              .queueFrame(hardwareBufferFrame, sequenceIndex);
+                        }
+                      },
+                      checkNotNull(playbackThread).getLooper(),
+                      /* defaultSurfacePixelFormat= */ ImageFormat.PRIVATE,
+                      imageReaderAdapterFactory,
+                      e ->
+                          maybeUpdatePlaybackError(
+                              "HardwareBufferFrameReader error",
+                              e,
+                              PlaybackException.ERROR_CODE_UNSPECIFIED),
+                      compositionInternalListenerHandler));
+      renderersFactory =
+          SequenceRenderersFactory.createForHardwareBuffer(
+              context,
+              checkNotNull(playbackAudioGraphWrapper),
+              imageDecoderFactory,
+              /* inputIndex= */ sequenceIndex,
+              videoPrewarmingEnabled,
+              checkNotNull(videoPacketReleaseControl),
+              hardwareBufferFrameReaderSupplier,
+              lateThresholdToDropInputUs);
+      // Ensure the FrameAggregator ignores audio only sequences.
+      checkNotNull(currentFrameAggregator).registerSequence(sequenceIndex, sequenceContainsVideo);
+    } else {
+      VideoSink inputSink = checkNotNull(playbackVideoGraphWrapper).getSink(sequenceIndex);
+      renderersFactory =
+          SequenceRenderersFactory.createForVideoSink(
+              context,
+              checkNotNull(playbackAudioGraphWrapper),
+              inputSink,
+              imageDecoderFactory,
+              /* inputIndex= */ sequenceIndex,
+              videoPrewarmingEnabled,
+              lateThresholdToDropInputUs);
+    }
+    SequencePlayerHolder playerHolder =
+        new SequencePlayerHolder(
+            context,
+            getApplicationLooper(),
+            checkNotNull(playbackThread).getLooper(),
+            clock,
+            renderersFactory,
+            /* inputIndex= */ sequenceIndex,
+            hardwareBufferFrameReaderSupplier,
+            /* shouldReleaseHardwareBufferFrameReader= */ sequenceContainsVideo);
+    playerHolder.player.addListener(new PlayerListener(sequenceIndex));
+    playerHolder.player.addAnalyticsListener(new PlayerAnalyticsListener());
+    playerHolder.player.addAnalyticsListener(new EventLogger(TAG + "-" + sequenceIndex));
+    // Audio focus is handled directly by CompositionPlayer, not by sequence players.
+    playerHolder.player.setAudioAttributes(audioAttributes, /* handleAudioFocus= */ false);
+    playerHolder.player.setPauseAtEndOfMediaItems(true);
+    playerHolder.renderersFactory.setRequestMediaCodecToneMapping(requestMediaCodecToneMapping);
+    if (frameProcessor != null && sequenceContainsVideo) {
+      playerHolder.player.setVideoSurface(
+          checkNotNull(hardwareBufferFrameReaderSupplier.get()).getSurface());
+    }
+    return playerHolder;
+  }
+
+  private static MediaSource createPrimarySequenceMediaSource(
+      EditedMediaItemSequence sequence,
+      MediaSource.Factory mediaSourceFactory,
+      boolean shouldGenerateBlankFrames) {
+    return createNonLoopingMediaSource(
+        sequence, mediaSourceFactory, shouldGenerateBlankFrames, /* isPrimarySequence= */ true);
+  }
+
+  private static MediaSource createNonLoopingMediaSource(
+      EditedMediaItemSequence sequence,
+      MediaSource.Factory mediaSourceFactory,
+      boolean shouldGenerateBlankFrames,
+      boolean isPrimarySequence) {
+    ConcatenatingMediaSource2.Builder mediaSourceBuilder = new ConcatenatingMediaSource2.Builder();
 
     for (int i = 0; i < sequence.editedMediaItems.size(); i++) {
       EditedMediaItem editedMediaItem = sequence.editedMediaItems.get(i);
       checkArgument(editedMediaItem.durationUs != C.TIME_UNSET);
-      long durationUs = editedMediaItem.getPresentationDurationUs();
-      // Generate silence for primary sequence.
-      DefaultMediaSourceFactory defaultMediaSourceFactory = new DefaultMediaSourceFactory(context);
-      if (externalImageLoader != null) {
-        defaultMediaSourceFactory.setExternalImageLoader(externalImageLoader);
-      }
-      MediaSource silenceMediaSource =
-          new ClippingMediaSource(
-              new SilenceMediaSource(editedMediaItem.durationUs),
-              editedMediaItem.mediaItem.clippingConfiguration.startPositionUs,
-              editedMediaItem.mediaItem.clippingConfiguration.endPositionUs);
 
-      // The MediaSource that loads the MediaItem
-      MediaSource mainMediaSource =
-          defaultMediaSourceFactory.createMediaSource(editedMediaItem.mediaItem);
-      if (editedMediaItem.removeAudio) {
-        mainMediaSource =
-            new FilteringMediaSource(
-                mainMediaSource, ImmutableSet.of(C.TRACK_TYPE_VIDEO, C.TRACK_TYPE_IMAGE));
-      }
+      MediaSource blankFramesAndSilenceGeneratedMediaSource =
+          createMediaSourceWithBlankFramesAndSilence(
+              mediaSourceFactory, editedMediaItem, sequence.trackTypes, shouldGenerateBlankFrames);
 
-      MediaSource mergingMediaSource = new MergingMediaSource(mainMediaSource, silenceMediaSource);
-      MediaSource itemMediaSource =
-          wrapWithVideoEffectsBasedMediaSources(
-              mergingMediaSource, editedMediaItem.effects.videoEffects, durationUs);
+      MediaSource itemMediaSource;
+      if (editedMediaItem.speedProvider != SpeedProvider.DEFAULT) {
+        itemMediaSource =
+            new SpeedChangingMediaSource(
+                blankFramesAndSilenceGeneratedMediaSource,
+                editedMediaItem.speedProvider,
+                editedMediaItem.mediaItem.clippingConfiguration);
+      } else if (isPrimarySequence) {
+        // We don't support speed changing via user-set effects for secondary sequences.
+        // TODO: b/449937111 - Delete this branch once
+        // Effects#createExperimentalSpeedAdjustingEffect() is removed.
+        itemMediaSource =
+            wrapWithVideoEffectsBasedMediaSources(
+                blankFramesAndSilenceGeneratedMediaSource,
+                editedMediaItem.effects.videoEffects,
+                editedMediaItem.mediaItem.clippingConfiguration);
+      } else {
+        itemMediaSource = blankFramesAndSilenceGeneratedMediaSource;
+      }
       mediaSourceBuilder.add(
-          itemMediaSource, /* initialPlaceholderDurationMs= */ usToMs(durationUs));
+          itemMediaSource,
+          /* initialPlaceholderDurationMs= */ usToMs(editedMediaItem.getPresentationDurationUs()));
     }
-    player.setMediaSource(mediaSourceBuilder.build());
+    return wrapMediaSourceWithCompositionForwardingTimeline(sequence, mediaSourceBuilder.build());
   }
 
-  private void setSecondaryPlayerSequence(
-      ExoPlayer player, EditedMediaItemSequence sequence, long primarySequenceDurationUs) {
+  private static MediaSource createMediaSourceWithBlankFramesAndSilence(
+      MediaSource.Factory mediaSourceFactory,
+      EditedMediaItem editedMediaItem,
+      Set<@C.TrackType Integer> sequenceTrackTypes,
+      boolean shouldGenerateBlankFrames) {
+    MediaSource silenceMediaSource =
+        new ClippingMediaSource.Builder(new SilenceMediaSource(editedMediaItem.durationUs))
+            .setStartPositionUs(editedMediaItem.mediaItem.clippingConfiguration.startPositionUs)
+            .setEndPositionUs(editedMediaItem.mediaItem.clippingConfiguration.endPositionUs)
+            .build();
 
-    // TODO: b/331392198 - Repeat only looping sequences, after sequences can be of arbitrary
-    //  length.
-    ConcatenatingMediaSource2.Builder mediaSourceBuilder =
-        new ConcatenatingMediaSource2.Builder().useDefaultMediaSourceFactory(context);
+    MediaSource blankFramesMediaSource =
+        new ClippingMediaSource.Builder(
+                new ExternallyLoadedMediaSource.Factory(
+                        editedMediaItem.durationUs, loadRequest -> Futures.immediateVoidFuture())
+                    .createMediaSource(
+                        new MediaItem.Builder()
+                            .setMimeType(BLANK_FRAMES_MEDIA_SOURCE_TYPE)
+                            .setUri("compositionPlayer://" + BLANK_FRAMES_MEDIA_SOURCE_TYPE)
+                            .build()))
+            .setStartPositionUs(editedMediaItem.mediaItem.clippingConfiguration.startPositionUs)
+            .setEndPositionUs(editedMediaItem.mediaItem.clippingConfiguration.endPositionUs)
+            .build();
 
+    // The order of these MediaSource instances is critical. The CompositionTrackSelector
+    // relies on this fixed order to correctly identify the silence and blank image track groups.
+    // LINT.IfChange
+    if (editedMediaItem.isGap()) {
+      if (shouldGenerateBlankFrames) {
+        return new MergingMediaSource(silenceMediaSource, blankFramesMediaSource);
+      } else {
+        return silenceMediaSource;
+      }
+    } else {
+      // The MediaSource that loads the MediaItem
+      // TODO: b/445884217 - Remove TRACK_TYPE_NONE logic.
+      MediaSource mainMediaSource = mediaSourceFactory.createMediaSource(editedMediaItem.mediaItem);
+      // Filter the media source to only include the track types specified in the sequence. This
+      // logic is skipped if trackTypes contains TRACK_TYPE_NONE, which indicates that a
+      // deprecated EditedMediaItemSequence.Builder is being used, for which we do not want to
+      // filter any tracks.
+      if (!sequenceTrackTypes.contains(C.TRACK_TYPE_NONE)) {
+        // Add TRACK_TYPE_IMAGE to sequenceTrackTypes if it contains TRACK_TYPE_VIDEO, as
+        // FilteringMediaSource differentiates between videos and images.
+        if (sequenceTrackTypes.contains(C.TRACK_TYPE_VIDEO)) {
+          sequenceTrackTypes =
+              new ImmutableSet.Builder<Integer>()
+                  .addAll(sequenceTrackTypes)
+                  .add(C.TRACK_TYPE_IMAGE)
+                  .build();
+        }
+        // If the item is configured to remove video, this ensures the video track is excluded
+        // from the set of allowed track types in the sequence.
+        ImmutableSet<@C.TrackType Integer> includedTrackTypes =
+            editedMediaItem.removeVideo
+                ? Sets.difference(sequenceTrackTypes, ImmutableSet.of(C.TRACK_TYPE_VIDEO))
+                    .immutableCopy()
+                : ImmutableSet.copyOf(sequenceTrackTypes);
+        mainMediaSource = new FilteringMediaSource(mainMediaSource, includedTrackTypes);
+      }
+      if (shouldGenerateBlankFrames) {
+        return new MergingMediaSource(silenceMediaSource, blankFramesMediaSource, mainMediaSource);
+      } else {
+        return new MergingMediaSource(silenceMediaSource, mainMediaSource);
+      }
+    }
+    // LINT.ThenChange(CompositionTrackSelector.java)
+  }
+
+  private static MediaSource createSecondarySequenceMediaSource(
+      EditedMediaItemSequence sequence,
+      MediaSource.Factory mediaSourceFactory,
+      long primarySequenceDurationUs,
+      boolean shouldGenerateBlankFrames) {
+    if (!sequence.isLooping) {
+      return createNonLoopingMediaSource(
+          sequence, mediaSourceFactory, shouldGenerateBlankFrames, /* isPrimarySequence= */ false);
+    }
+
+    ConcatenatingMediaSource2.Builder mediaSourceBuilder = new ConcatenatingMediaSource2.Builder();
     long accumulatedDurationUs = 0;
     int i = 0;
     while (accumulatedDurationUs < primarySequenceDurationUs) {
@@ -798,109 +1876,154 @@ public final class CompositionPlayer extends SimpleBasePlayer
       long itemPresentationDurationUs = editedMediaItem.getPresentationDurationUs();
       if (accumulatedDurationUs + itemPresentationDurationUs <= primarySequenceDurationUs) {
         mediaSourceBuilder.add(
-            editedMediaItem.mediaItem,
+            createMediaSourceWithBlankFramesAndSilence(
+                mediaSourceFactory,
+                editedMediaItem,
+                sequence.trackTypes,
+                shouldGenerateBlankFrames),
             /* initialPlaceholderDurationMs= */ usToMs(itemPresentationDurationUs));
         accumulatedDurationUs += itemPresentationDurationUs;
       } else {
-        MediaItem mediaItem = editedMediaItem.mediaItem;
         long remainingDurationUs = primarySequenceDurationUs - accumulatedDurationUs;
         // TODO: b/289989542 - Handle already clipped, or speed adjusted media.
         mediaSourceBuilder.add(
-            new ClippingMediaSource(
-                new DefaultMediaSourceFactory(context).createMediaSource(mediaItem),
-                mediaItem.clippingConfiguration.startPositionUs,
-                mediaItem.clippingConfiguration.startPositionUs + remainingDurationUs),
-            /* initialPlaceholderDurationMs= */ usToMs(remainingDurationUs));
+            createMediaSourceWithBlankFramesAndSilence(
+                mediaSourceFactory,
+                clipToDuration(editedMediaItem, remainingDurationUs),
+                sequence.trackTypes,
+                shouldGenerateBlankFrames));
         break;
       }
       i = (i + 1) % sequence.editedMediaItems.size();
     }
-    player.setMediaSource(mediaSourceBuilder.build());
+    return wrapMediaSourceWithCompositionForwardingTimeline(sequence, mediaSourceBuilder.build());
   }
 
-  private MediaSource wrapWithVideoEffectsBasedMediaSources(
-      MediaSource mediaSource, ImmutableList<Effect> videoEffects, long durationUs) {
+  private static EditedMediaItem clipToDuration(EditedMediaItem editedMediaItem, long durationUs) {
+    MediaItem.ClippingConfiguration clippingConfiguration =
+        editedMediaItem.mediaItem.clippingConfiguration;
+    return editedMediaItem
+        .buildUpon()
+        .setMediaItem(
+            editedMediaItem
+                .mediaItem
+                .buildUpon()
+                .setClippingConfiguration(
+                    clippingConfiguration
+                        .buildUpon()
+                        .setEndPositionUs(clippingConfiguration.startPositionUs + durationUs)
+                        .build())
+                .build())
+        .build();
+  }
+
+  // TODO: b/449937111 - Delete this once Effects#createExperimentalSpeedAdjustingEffect() is
+  // removed.
+  private static MediaSource wrapWithVideoEffectsBasedMediaSources(
+      MediaSource mediaSource,
+      ImmutableList<Effect> videoEffects,
+      ClippingConfiguration clippingConfiguration) {
     MediaSource newMediaSource = mediaSource;
     for (Effect videoEffect : videoEffects) {
       if (videoEffect instanceof InactiveTimestampAdjustment) {
         newMediaSource =
-            wrapWithSpeedChangingMediaSource(
+            new SpeedChangingMediaSource(
                 newMediaSource,
                 ((InactiveTimestampAdjustment) videoEffect).speedProvider,
-                durationUs);
+                clippingConfiguration);
       }
     }
     return newMediaSource;
   }
 
-  private MediaSource wrapWithSpeedChangingMediaSource(
-      MediaSource mediaSource, SpeedProvider speedProvider, long durationUs) {
+  private static MediaSource wrapMediaSourceWithCompositionForwardingTimeline(
+      EditedMediaItemSequence sequence, MediaSource mediaSource) {
     return new WrappingMediaSource(mediaSource) {
-
+      @Nullable
       @Override
-      public MediaPeriod createPeriod(MediaPeriodId id, Allocator allocator, long startPositionUs) {
-        return new SpeedProviderMediaPeriod(
-            super.createPeriod(id, allocator, startPositionUs), speedProvider);
-      }
-
-      @Override
-      public void releasePeriod(MediaPeriod mediaPeriod) {
-        MediaPeriod wrappedPeriod = ((SpeedProviderMediaPeriod) mediaPeriod).mediaPeriod;
-        super.releasePeriod(wrappedPeriod);
+      public Timeline getInitialTimeline() {
+        Timeline initialTimeline = mediaSource.getInitialTimeline();
+        if (initialTimeline == null) {
+          return null;
+        }
+        return new CompositionForwardingTimeline(initialTimeline, sequence);
       }
 
       @Override
       protected void onChildSourceInfoRefreshed(Timeline newTimeline) {
-        Timeline timeline =
-            new ForwardingTimeline(newTimeline) {
-              @Override
-              public Window getWindow(
-                  int windowIndex, Window window, long defaultPositionProjectionUs) {
-                Window wrappedWindow =
-                    newTimeline.getWindow(windowIndex, window, defaultPositionProjectionUs);
-                wrappedWindow.durationUs = durationUs;
-                return wrappedWindow;
-              }
-
-              @Override
-              public Period getPeriod(int periodIndex, Period period, boolean setIds) {
-                Timeline.Period wrappedPeriod = newTimeline.getPeriod(periodIndex, period, setIds);
-                wrappedPeriod.durationUs = durationUs;
-                return wrappedPeriod;
-              }
-            };
-        super.onChildSourceInfoRefreshed(timeline);
+        super.onChildSourceInfoRefreshed(new CompositionForwardingTimeline(newTimeline, sequence));
       }
     };
   }
 
+  private ListenableFuture<?> maybeSetVideoOutput() {
+    if (videoOutput == null || composition == null) {
+      return Futures.immediateVoidFuture();
+    }
+    if (videoOutput instanceof SurfaceHolder) {
+      setVideoSurfaceHolderInternal((SurfaceHolder) videoOutput);
+    } else if (videoOutput instanceof SurfaceView) {
+      SurfaceView surfaceView = (SurfaceView) videoOutput;
+      setVideoSurfaceHolderInternal(surfaceView.getHolder());
+    } else if (videoOutput instanceof Surface) {
+      setVideoSurfaceInternal(
+          (Surface) videoOutput,
+          checkNotNull(videoOutputSize, "VideoOutputSize must be set when using Surface output"));
+    } else {
+      throw new IllegalStateException(videoOutput.getClass().toString());
+    }
+    return Futures.immediateVoidFuture();
+  }
+
   private long getContentPositionMs() {
-    return players.isEmpty() ? C.TIME_UNSET : players.get(0).getContentPosition();
+    if (playerHolders.isEmpty()) {
+      return 0;
+    }
+
+    long lastContentPositionMs = 0;
+    for (int i = 0; i < playerHolders.size(); i++) {
+      lastContentPositionMs =
+          max(lastContentPositionMs, playerHolders.get(i).player.getContentPosition());
+    }
+    return lastContentPositionMs;
   }
 
   private long getBufferedPositionMs() {
-    if (players.isEmpty()) {
+    if (playerHolders.isEmpty()) {
       return 0;
     }
     // Return the minimum buffered position among players.
     long minBufferedPositionMs = Integer.MAX_VALUE;
-    for (int i = 0; i < players.size(); i++) {
-      minBufferedPositionMs = min(minBufferedPositionMs, players.get(i).getBufferedPosition());
+    for (int i = 0; i < playerHolders.size(); i++) {
+      @Player.State int playbackState = playerHolders.get(i).player.getPlaybackState();
+      if (playbackState == STATE_READY || playbackState == STATE_BUFFERING) {
+        minBufferedPositionMs =
+            min(minBufferedPositionMs, playerHolders.get(i).player.getBufferedPosition());
+      }
     }
-    return minBufferedPositionMs;
+    return minBufferedPositionMs == Integer.MAX_VALUE
+        // All players are ended or idle.
+        ? 0
+        : minBufferedPositionMs;
   }
 
   private long getTotalBufferedDurationMs() {
-    if (players.isEmpty()) {
+    if (playerHolders.isEmpty()) {
       return 0;
     }
     // Return the minimum total buffered duration among players.
     long minTotalBufferedDurationMs = Integer.MAX_VALUE;
-    for (int i = 0; i < players.size(); i++) {
-      minTotalBufferedDurationMs =
-          min(minTotalBufferedDurationMs, players.get(i).getTotalBufferedDuration());
+    for (int i = 0; i < playerHolders.size(); i++) {
+      @Player.State int playbackState = playerHolders.get(i).player.getPlaybackState();
+      if (playbackState == STATE_READY || playbackState == STATE_BUFFERING) {
+        minTotalBufferedDurationMs =
+            min(minTotalBufferedDurationMs, playerHolders.get(i).player.getTotalBufferedDuration());
+      }
     }
-    return minTotalBufferedDurationMs;
+    return minTotalBufferedDurationMs == Integer.MAX_VALUE
+        // All players are ended or idle.
+        ? 0
+        : minTotalBufferedDurationMs;
   }
 
   private boolean getRenderedFirstFrameAndReset() {
@@ -911,11 +2034,16 @@ public final class CompositionPlayer extends SimpleBasePlayer
 
   private void maybeUpdatePlaybackError(
       String errorMessage, Exception cause, @PlaybackException.ErrorCode int errorCode) {
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
     if (playbackException == null) {
       playbackException = new PlaybackException(errorMessage, cause, errorCode);
-      for (int i = 0; i < players.size(); i++) {
-        players.get(i).stop();
+      for (int i = 0; i < playerHolders.size(); i++) {
+        playerHolders.get(i).player.stop();
       }
+      appNeedsToPrepareCompositionPlayer = true;
+      updatePlaybackState();
+      // Invalidate the parent class state.
       invalidateState();
     } else {
       Log.w(TAG, errorMessage, cause);
@@ -923,9 +2051,13 @@ public final class CompositionPlayer extends SimpleBasePlayer
   }
 
   private void setVideoSurfaceHolderInternal(SurfaceHolder surfaceHolder) {
+    if (SDK_INT >= 28 && surfaceHolderFrameWriter != null) {
+      surfaceHolderFrameWriter.setSurfaceHolder(surfaceHolder);
+      return;
+    }
     removeSurfaceCallbacks();
     this.surfaceHolder = surfaceHolder;
-    surfaceHolder.addCallback(this);
+    surfaceHolder.addCallback(internalListener);
     Surface surface = surfaceHolder.getSurface();
     if (surface != null && surface.isValid()) {
       videoOutputSize =
@@ -950,31 +2082,36 @@ public final class CompositionPlayer extends SimpleBasePlayer
     compositionPlayerInternal.setOutputSurfaceInfo(surface, new Size(width, height));
   }
 
+  /**
+   * This method blocks the calling thread until the internal player has removed the surface from
+   * use.
+   */
   private void clearVideoSurfaceInternal() {
     displaySurface = null;
+    if (SDK_INT >= 28 && surfaceHolderFrameWriter != null) {
+      surfaceHolderFrameWriter.setSurfaceHolder(null);
+    }
     if (compositionPlayerInternal != null) {
-      compositionPlayerInternal.clearOutputSurface();
+      ConditionVariable surfaceCleared = new ConditionVariable();
+      compositionPlayerInternal.clearOutputSurface(surfaceCleared);
+      surfaceCleared.blockUninterruptible(SURFACE_DESTROY_TIMEOUT_MS);
     }
   }
 
   private void removeSurfaceCallbacks() {
     if (surfaceHolder != null) {
-      surfaceHolder.removeCallback(this);
+      surfaceHolder.removeCallback(internalListener);
       surfaceHolder = null;
     }
   }
 
   private void repeatCompositionPlayback() {
     repeatingCompositionSeekInProgress = true;
-    seekTo(
-        getCurrentMediaItemIndex(),
-        /* positionMs= */ C.TIME_UNSET,
-        Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
-        /* isRepeatingCurrentItem= */ true);
+    seekToDefaultPosition();
   }
 
   private ImmutableList<MediaItemData> createPlaylist() {
-    checkNotNull(compositionDurationUs != C.TIME_UNSET);
+    checkState(compositionDurationUs != C.TIME_UNSET);
     return ImmutableList.of(
         new MediaItemData.Builder("CompositionTimeline")
             .setMediaItem(MediaItem.EMPTY)
@@ -982,9 +2119,26 @@ public final class CompositionPlayer extends SimpleBasePlayer
             .build());
   }
 
+  private void resetLivePositionSuppliers() {
+    positionSupplier.disconnect(getContentPositionMs());
+    bufferedPositionSupplier.disconnect(getBufferedPositionMs());
+    totalBufferedDurationSupplier.disconnect(getTotalBufferedDurationMs());
+    positionSupplier = new LivePositionSupplier(this::getContentPositionMs);
+    bufferedPositionSupplier = new LivePositionSupplier(this::getBufferedPositionMs);
+    totalBufferedDurationSupplier = new LivePositionSupplier(this::getTotalBufferedDurationMs);
+  }
+
   private static long getCompositionDurationUs(Composition composition) {
     checkState(!composition.sequences.isEmpty());
-    return getSequenceDurationUs(composition.sequences.get(0));
+    long longestSequenceDurationUs = Integer.MIN_VALUE;
+    for (int i = 0; i < composition.sequences.size(); i++) {
+      EditedMediaItemSequence sequence = composition.sequences.get(i);
+      if (sequence.isLooping) {
+        continue;
+      }
+      longestSequenceDurationUs = max(longestSequenceDurationUs, getSequenceDurationUs(sequence));
+    }
+    return longestSequenceDurationUs;
   }
 
   private static long getSequenceDurationUs(EditedMediaItemSequence sequence) {
@@ -997,18 +2151,40 @@ public final class CompositionPlayer extends SimpleBasePlayer
   }
 
   /**
+   * Returns whether the provided {@link Composition} contains any speed changing effect in an
+   * unsupported configuration.
+   *
+   * <p>Speed changing effects are only supported as the first effect of an {@link EditedMediaItem}.
+   */
+  private static boolean compositionContainsIllegalSpeedChangingEffects(Composition composition) {
+    if (containsSpeedChangingEffects(composition.effects, /* ignoreFirstEffect= */ false)) {
+      return true;
+    }
+
+    for (EditedMediaItemSequence sequence : composition.sequences) {
+      for (EditedMediaItem item : sequence.editedMediaItems) {
+        if (containsSpeedChangingEffects(item.effects, /* ignoreFirstEffect= */ true)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * A {@link VideoFrameReleaseControl.FrameTimingEvaluator} for composition frames.
    *
    * <ul>
    *   <li>Signals to {@linkplain
    *       VideoFrameReleaseControl.FrameTimingEvaluator#shouldForceReleaseFrame(long, long) force
-   *       release} a frame if the frame is late by more than {@link #FRAME_LATE_THRESHOLD_US} and
-   *       the elapsed time since the previous frame release is greater than {@link
+   *       release} a frame if the frame is late by more than {@link #lateThresholdUs} and the
+   *       elapsed time since the previous frame release is greater than {@link
    *       #FRAME_RELEASE_THRESHOLD_US}.
    *   <li>Signals to {@linkplain
    *       VideoFrameReleaseControl.FrameTimingEvaluator#shouldDropFrame(long, long, boolean) drop a
-   *       frame} if the frame is late by more than {@link #FRAME_LATE_THRESHOLD_US} and the frame
-   *       is not marked as the last one.
+   *       frame} if the frame is late by more than {@link #lateThresholdUs} and the frame is not
+   *       marked as the last one.
    *   <li>Signals to never {@linkplain
    *       VideoFrameReleaseControl.FrameTimingEvaluator#shouldIgnoreFrame(long, long, long,
    *       boolean, boolean) ignore} a frame.
@@ -1017,24 +2193,35 @@ public final class CompositionPlayer extends SimpleBasePlayer
   private static final class CompositionFrameTimingEvaluator
       implements VideoFrameReleaseControl.FrameTimingEvaluator {
 
-    /** The time threshold, in microseconds, after which a frame is considered late. */
-    private static final long FRAME_LATE_THRESHOLD_US = -30_000;
-
     /**
      * The maximum elapsed time threshold, in microseconds, since last releasing a frame after which
      * a frame can be force released.
      */
     private static final long FRAME_RELEASE_THRESHOLD_US = 100_000;
 
+    private static final long DEFAULT_FRAME_LATE_THRESHOLD_US = -30_000;
+
+    /** The time threshold, in microseconds, after which a frame is considered late. */
+    private final long lateThresholdUs;
+
+    private CompositionFrameTimingEvaluator(long lateThresholdUs) {
+      this.lateThresholdUs = lateThresholdUs;
+    }
+
     @Override
     public boolean shouldForceReleaseFrame(long earlyUs, long elapsedSinceLastReleaseUs) {
-      return earlyUs < FRAME_LATE_THRESHOLD_US
-          && elapsedSinceLastReleaseUs > FRAME_RELEASE_THRESHOLD_US;
+      if (lateThresholdUs == C.TIME_UNSET) {
+        return false;
+      }
+      return earlyUs < lateThresholdUs && elapsedSinceLastReleaseUs > FRAME_RELEASE_THRESHOLD_US;
     }
 
     @Override
     public boolean shouldDropFrame(long earlyUs, long elapsedRealtimeUs, boolean isLastFrame) {
-      return earlyUs < FRAME_LATE_THRESHOLD_US && !isLastFrame;
+      if (lateThresholdUs == C.TIME_UNSET) {
+        return false;
+      }
+      return earlyUs < lateThresholdUs && !isLastFrame;
     }
 
     @Override
@@ -1049,7 +2236,52 @@ public final class CompositionPlayer extends SimpleBasePlayer
     }
   }
 
-  private final class PlayerListener implements Player.Listener {
+  /**
+   * A {@link ForwardingTimeline} which sets CompositionPlayer-specific properties on the {@link
+   * Period}.
+   *
+   * <p>The {@linkplain SequenceRenderersFactory renderers} running on the playback thread need to
+   * know the {@link EditedMediaItem} corresponding to the content being displayed. And the {@link
+   * #setComposition(Composition, long)} call updates the content on the application thread.
+   *
+   * <p>This class attaches CompositionPlayer metadata to the {@linkplain
+   * #wrapMediaSourceWithCompositionForwardingTimeline media source} when changing the {@linkplain
+   * SequencePlayerHolder sequence players} content.
+   */
+  /* package */ static final class CompositionForwardingTimeline extends ForwardingTimeline {
+
+    private final EditedMediaItemSequence sequence;
+
+    /**
+     * Creates an instance.
+     *
+     * <p>Called on the application thread.
+     */
+    CompositionForwardingTimeline(Timeline newTimeline, EditedMediaItemSequence sequence) {
+      super(newTimeline);
+      this.sequence = sequence;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The {@link Period#id} is set to the {@link EditedMediaItemSequence}. Period ids are not
+     * required by {@link ExoPlayer}, and can be optionally used to carry application-specific
+     * metadata associated with the logical piece of media defined by the {@link Period}.
+     *
+     * <p>Can be called on any thread.
+     */
+    @Override
+    public Period getPeriod(int periodIndex, Period period, boolean setIds) {
+      super.getPeriod(periodIndex, period, setIds);
+      // TODO: b/450496133 - Investigate alternative ways to map application-specific data to the
+      // Timeline Period.
+      period.id = sequence;
+      return period;
+    }
+  }
+
+  private final class PlayerListener implements Listener {
     private final int playerIndex;
 
     public PlayerListener(int playerIndex) {
@@ -1064,8 +2296,17 @@ public final class CompositionPlayer extends SimpleBasePlayer
     }
 
     @Override
+    public void onPlaybackStateChanged(int playbackState) {
+      if (playbackState == STATE_ENDED) {
+        if (frameProcessor != null) {
+          checkNotNull(frameAggregator).queueEndOfStream(playerIndex);
+        }
+      }
+      updatePlaybackState();
+    }
+
+    @Override
     public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
-      playWhenReadyChangeReason = reason;
       if (reason == PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM
           && repeatMode != REPEAT_MODE_OFF
           && playerIndex == 0) {
@@ -1079,102 +2320,337 @@ public final class CompositionPlayer extends SimpleBasePlayer
     }
   }
 
-  /**
-   * A {@link DefaultTrackSelector} extension to de-select generated audio when the audio from the
-   * media is playable.
-   */
-  private static final class CompositionTrackSelector extends DefaultTrackSelector {
-
-    private static final String SILENCE_AUDIO_TRACK_GROUP_ID = "1:";
-    private final int sequenceIndex;
-    private final boolean disableVideoPlayback;
-
-    public CompositionTrackSelector(
-        Context context, int sequenceIndex, boolean disableVideoPlayback) {
-      super(context);
-      this.sequenceIndex = sequenceIndex;
-      this.disableVideoPlayback = disableVideoPlayback;
+  private final class PlayerAnalyticsListener implements AnalyticsListener {
+    @Override
+    public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
+      // TODO: b/451741691 - Signal to the application which input sequence drops frames.
+      analyticsCollector.onDroppedFrames(droppedFrames, elapsedMs);
     }
 
-    @Nullable
     @Override
-    protected Pair<ExoTrackSelection.Definition, Integer> selectAudioTrack(
-        MappedTrackInfo mappedTrackInfo,
-        @RendererCapabilities.Capabilities int[][][] rendererFormatSupports,
-        @RendererCapabilities.AdaptiveSupport int[] rendererMixedMimeTypeAdaptationSupports,
-        Parameters params)
-        throws ExoPlaybackException {
-      if (sequenceIndex == 0) {
-        // Currently silence is only generated for the zero-indexed sequence.
-        int audioRenderIndex = C.INDEX_UNSET;
-        for (int i = 0; i < mappedTrackInfo.getRendererCount(); i++) {
-          if (mappedTrackInfo.getRendererType(i) == C.TRACK_TYPE_AUDIO) {
-            audioRenderIndex = i;
-            break;
-          }
-        }
-        checkState(audioRenderIndex != C.INDEX_UNSET);
+    public void onVideoEnabled(EventTime eventTime, DecoderCounters decoderCounters) {
+      // TODO: b/470006904 - Signal to the application for which input sequence video is enabled.
+      analyticsCollector.onVideoEnabled(decoderCounters);
+    }
+  }
 
-        TrackGroupArray audioTrackGroups = mappedTrackInfo.getTrackGroups(audioRenderIndex);
-        // If there's only one audio TrackGroup, it'll be silence, there's no need to override track
-        // selection.
-        if (audioTrackGroups.length > 1) {
-          boolean mediaAudioIsPlayable = false;
-          int silenceAudioTrackGroupIndex = C.INDEX_UNSET;
-          for (int i = 0; i < audioTrackGroups.length; i++) {
-            if (audioTrackGroups.get(i).id.startsWith(SILENCE_AUDIO_TRACK_GROUP_ID)) {
-              silenceAudioTrackGroupIndex = i;
-              continue;
-            }
-            // For non-silence tracks
-            for (int j = 0; j < audioTrackGroups.get(i).length; j++) {
-              mediaAudioIsPlayable |=
-                  RendererCapabilities.getFormatSupport(
-                          rendererFormatSupports[audioRenderIndex][i][j])
-                      == C.FORMAT_HANDLED;
-            }
-          }
-          checkState(silenceAudioTrackGroupIndex != C.INDEX_UNSET);
+  private void onVideoTrackSelection(boolean selected, int inputIndex) {
+    videoTracksSelected.put(inputIndex, selected);
 
-          if (mediaAudioIsPlayable) {
-            // Disable silence if the media's audio track is playable.
-            int silenceAudioTrackIndex = audioTrackGroups.length - 1;
-            rendererFormatSupports[audioRenderIndex][silenceAudioTrackIndex][0] =
-                RendererCapabilities.create(C.FORMAT_UNSUPPORTED_TYPE);
-          }
+    if (videoTracksSelected.size() == checkNotNull(composition).sequences.size()) {
+      int selectedVideoTracks = 0;
+      for (int i = 0; i < videoTracksSelected.size(); i++) {
+        if (videoTracksSelected.get(videoTracksSelected.keyAt(i))) {
+          selectedVideoTracks++;
         }
       }
 
-      return super.selectAudioTrack(
-          mappedTrackInfo, rendererFormatSupports, rendererMixedMimeTypeAdaptationSupports, params);
+      checkNotNull(playbackVideoGraphWrapper).setTotalVideoInputCount(selectedVideoTracks);
+    }
+  }
+
+  private final class SequencePlayerHolder {
+    public final ExoPlayer player;
+    public final SequenceRenderersFactory renderersFactory;
+    public final CompositionTrackSelector trackSelector;
+    final Supplier<@NullableType HardwareBufferFrameReader> hardwareBufferFrameReaderSupplier;
+    final boolean shouldReleaseHardwareBufferFrameReader;
+
+    private SequencePlayerHolder(
+        Context context,
+        Looper applicationLooper,
+        Looper playbackLooper,
+        Clock clock,
+        SequenceRenderersFactory renderersFactory,
+        int inputIndex,
+        Supplier<@NullableType HardwareBufferFrameReader> hardwareBufferFrameReaderSupplier,
+        boolean shouldReleaseHardwareBufferFrameReader) {
+      trackSelector =
+          new CompositionTrackSelector(
+              context,
+              /* listener= */ CompositionPlayer.this::onVideoTrackSelection,
+              /* sequenceIndex= */ inputIndex);
+
+      @SuppressLint("VisibleForTests") // Calls ExoPlayer.Builder.setClock()
+      ExoPlayer.Builder playerBuilder =
+          new ExoPlayer.Builder(context)
+              .setLooper(applicationLooper)
+              .setPlaybackLooper(playbackLooper)
+              .setRenderersFactory(renderersFactory)
+              .setHandleAudioBecomingNoisy(true)
+              .setLoadControl(loadControl)
+              .setClock(clock)
+              // Use dynamic scheduling to show the first video/image frame more promptly when the
+              // player is paused (which is common in editing applications).
+              .experimentalSetDynamicSchedulingEnabled(true)
+              .setTrackSelector(trackSelector)
+              // TODO: b/489733731 - Reenable stuck player detection.
+              .setStuckBufferingDetectionTimeoutMs(Integer.MAX_VALUE)
+              .setStuckPlayingDetectionTimeoutMs(Integer.MAX_VALUE)
+              .setStuckPlayingNotEndingTimeoutMs(Integer.MAX_VALUE)
+              .setStuckSuppressedDetectionTimeoutMs(Integer.MAX_VALUE)
+              .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled);
+      player = playerBuilder.build();
+      this.renderersFactory = renderersFactory;
+      this.hardwareBufferFrameReaderSupplier = hardwareBufferFrameReaderSupplier;
+      this.shouldReleaseHardwareBufferFrameReader = shouldReleaseHardwareBufferFrameReader;
     }
 
-    @Nullable
-    @Override
-    protected Pair<ExoTrackSelection.Definition, Integer> selectVideoTrack(
-        MappedTrackInfo mappedTrackInfo,
-        @RendererCapabilities.Capabilities int[][][] rendererFormatSupports,
-        @RendererCapabilities.AdaptiveSupport int[] mixedMimeTypeSupports,
-        Parameters params)
-        throws ExoPlaybackException {
-      if (disableVideoPlayback) {
-        return null;
+    private void release() {
+      player.release();
+      HardwareBufferFrameReader reader = hardwareBufferFrameReaderSupplier.get();
+      // TODO: b/518679527 - Move hardwareBufferFrameReader release to video renderers.
+      if (shouldReleaseHardwareBufferFrameReader && reader != null) {
+        reader.release();
       }
-      return super.selectVideoTrack(
-          mappedTrackInfo, rendererFormatSupports, mixedMimeTypeSupports, params);
+    }
+  }
+
+  private static final class GapHandlingDecoderFactory implements ImageDecoder.Factory {
+    private static final String BLANK_FRAMES_MEDIA_SOURCE_TYPE = "composition_player_blank_frames";
+    // TODO: b/502556636 - Extract blank image constants to a shared location.
+    private static final int BLANK_IMAGE_BITMAP_WIDTH = 16;
+    private static final int BLANK_IMAGE_BITMAP_HEIGHT = 16;
+
+    private final ImageDecoder.Factory imageDecoderFactory;
+    private @MonotonicNonNull Format format;
+
+    public GapHandlingDecoderFactory(@Nullable ImageDecoder.Factory imageDecoderFactory) {
+      this.imageDecoderFactory = checkNotNull(imageDecoderFactory);
     }
 
-    @Nullable
     @Override
-    protected Pair<ExoTrackSelection.Definition, Integer> selectImageTrack(
-        MappedTrackInfo mappedTrackInfo,
-        @RendererCapabilities.Capabilities int[][][] rendererFormatSupports,
-        Parameters params)
-        throws ExoPlaybackException {
-      if (disableVideoPlayback) {
-        return null;
+    public @Capabilities int supportsFormat(Format format) {
+      // TODO: b/429411914 - Investigate a better way to get the output format
+      this.format = format;
+      if (format.sampleMimeType != null
+          && format.sampleMimeType.equals(BLANK_FRAMES_MEDIA_SOURCE_TYPE)) {
+        return RendererCapabilities.create(C.FORMAT_HANDLED);
       }
-      return super.selectImageTrack(mappedTrackInfo, rendererFormatSupports, params);
+      return imageDecoderFactory.supportsFormat(format);
+    }
+
+    @Override
+    public ImageDecoder createImageDecoder() {
+      if (format != null
+          && format.sampleMimeType != null
+          && format.sampleMimeType.equals(BLANK_FRAMES_MEDIA_SOURCE_TYPE)) {
+        return new ExternallyLoadedImageDecoder.Factory(
+                request -> {
+                  Bitmap bitmap =
+                      Bitmap.createBitmap(
+                          BLANK_IMAGE_BITMAP_WIDTH,
+                          BLANK_IMAGE_BITMAP_HEIGHT,
+                          Bitmap.Config.ARGB_8888);
+                  bitmap.eraseColor(Color.BLACK);
+                  return immediateFuture(bitmap);
+                })
+            .createImageDecoder();
+      }
+      return imageDecoderFactory.createImageDecoder();
+    }
+  }
+
+  /** Class that holds internal listener methods for {@link CompositionPlayer}. */
+  @SuppressWarnings("UngroupedOverloads") // onError() methods represent different callbacks.
+  private final class InternalListener
+      implements AudioFocusManager.PlayerControl,
+          CompositionPlayerInternal.Listener,
+          SurfaceHolder.Callback,
+          PlaybackVideoGraphWrapper.Listener,
+          CompositionVideoPacketReleaseControl.Listener,
+          SurfaceHolderFrameWriter.Listener,
+          FrameProcessor.Listener {
+
+    // AudioFocusManager.PlayerControl methods. Called on the application thread.
+
+    @Override
+    public void setVolumeMultiplier(float volumeMultiplier) {
+      setVolumeInternal(volume);
+      invalidateState();
+    }
+
+    @Override
+    public void executePlayerCommand(@PlayerCommand int playerCommand) {
+      updatePlayWhenReadyWithAudioFocus(
+          playWhenReady, playerCommand, playbackSuppressionReason, playWhenReadyChangeReason);
+      invalidateState();
+    }
+
+    // CompositionPlayerInternal.Listener method. Called on the application thread.
+
+    @Override
+    public void onError(String message, Exception cause, int errorCode) {
+      maybeUpdatePlaybackError(message, cause, errorCode);
+    }
+
+    @Override
+    public void onDroppedVideoFrames(int droppedFrameCount, long elapsedMs) {
+      // TODO: b/451741691 - Signal to the application that these frames were dropped at the output.
+      analyticsCollector.onDroppedFrames(droppedFrameCount, elapsedMs);
+    }
+
+    // SurfaceHolder.Callback methods. Called on application thread.
+
+    @Override
+    public void surfaceCreated(SurfaceHolder holder) {
+      videoOutputSize =
+          new Size(holder.getSurfaceFrame().width(), holder.getSurfaceFrame().height());
+      setVideoSurfaceInternal(holder.getSurface(), videoOutputSize);
+    }
+
+    @Override
+    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+      maybeSetOutputSurfaceInfo(width, height);
+    }
+
+    @Override
+    public void surfaceDestroyed(SurfaceHolder holder) {
+      clearVideoSurfaceInternal();
+    }
+
+    // PlaybackVideoGraphWrapper.Listener methods. Called on the playback thread.
+
+    @Override
+    public void onFirstFrameRendered() {
+      applicationHandler.post(
+          () -> {
+            CompositionPlayer.this.renderedFirstFrame = true;
+            invalidateState();
+          });
+    }
+
+    @Override
+    public void onFrameDropped() {
+      if (compositionPlayerInternal == null) {
+        return;
+      }
+      compositionPlayerInternal.onFrameDropped();
+    }
+
+    @Override
+    public void onVideoSizeChanged(VideoSize videoSize) {
+      // TODO: b/328219481 - Report video size change to app.
+    }
+
+    // CompositionVideoPacketReleaseControl.Listener methods. Called on the playback thread.
+
+    @Override
+    public void onFrameProcessed() {
+      applicationHandler.post(
+          () -> {
+            if (waitingForFrameAfterSeek) {
+              waitingForFrameAfterSeek = false;
+              if (pendingSeekPositionMs != C.TIME_UNSET) {
+                long pendingSeekPosition = pendingSeekPositionMs;
+                pendingSeekPositionMs = C.TIME_UNSET;
+                handleSeekInternal(pendingSeekPosition);
+              }
+            }
+          });
+    }
+
+    @Override
+    public void onError(Exception e) {
+      onError(VideoFrameProcessingException.from(e));
+    }
+
+    // SurfaceHolderFrameWriter.Listener methods. Called on the application thread.
+
+    @Override
+    public void onFrameAboutToBeRendered(
+        long presentationTimeUs, long releaseTimeNs, Format format) {
+      if (frameProcessor != null) {
+        VideoSize videoSizeToBeRendered = new VideoSize(format.width, format.height);
+        if (!Objects.equals(videoSize, videoSizeToBeRendered)) {
+          if (videoSize == null) {
+            renderedFirstFrame = true;
+          }
+          videoSize = videoSizeToBeRendered;
+          invalidateState();
+        }
+        if (videoFrameMetadataListener != null) {
+          videoFrameMetadataListener.onVideoFrameAboutToBeRendered(
+              presentationTimeUs, releaseTimeNs, format, /* mediaFormat= */ null);
+        }
+      }
+    }
+
+    @Override
+    public void onEnded() {
+      if (frameProcessor != null) {
+        // TODO: b/484336225 - reset packetConsumerEnded on replay.
+        packetConsumerEnded = true;
+        updatePlaybackState();
+        invalidateState();
+      }
+    }
+
+    @Override
+    public void onError(VideoFrameProcessingException videoFrameProcessingException) {
+      // The error will also be surfaced from the underlying ExoPlayer instance via
+      // PlayerListener.onPlayerError, and it will arrive to the composition player twice.
+      applicationHandler.post(
+          () ->
+              maybeUpdatePlaybackError(
+                  "Error processing video frames",
+                  videoFrameProcessingException,
+                  PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED));
+    }
+
+    // FrameProcessor.Listener methods
+
+    @Override
+    public void onWakeup() {
+      // TODO: b/517459813 - Wake up the renderers.
+    }
+
+    @Override
+    public void onFrameProcessed(Frame frame, @Nullable SyncFenceWrapper onCompleteFence) {
+      if (SDK_INT >= 26 && videoPacketReleaseControl != null) {
+        videoPacketReleaseControl.onFrameProcessed(frame, onCompleteFence);
+      }
+    }
+  }
+
+  // TODO: b/510766403 - Remove once PacketConsumer entrypoint is removed.
+  /** Converts a {@link RenderingPacketConsumer} to a {@link FrameProcessor}. */
+  @Nullable
+  private static FrameProcessor.Factory getRenderingPacketConsumerFactory(
+      @Nullable
+          RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
+              packetProcessor) {
+    if (SDK_INT >= 26 && packetProcessor != null) {
+      return (output, listenerExecutor, listener) -> {
+        HardwareBufferFrameQueue adaptedQueue =
+            new FrameWriterToHardwareBufferFrameQueueAdapter(output);
+        packetProcessor.setRenderOutput(adaptedQueue);
+        return new PacketConsumerToFrameProcessorAdapter(
+            packetProcessor, listenerExecutor, listener);
+      };
+    }
+    return null;
+  }
+
+  private static final class HandlerExecutor implements Executor {
+    private final HandlerWrapper handler;
+    private final InternalListener internalListener;
+
+    private HandlerExecutor(HandlerWrapper handler, InternalListener internalListener) {
+      this.handler = handler;
+      this.internalListener = internalListener;
+    }
+
+    @Override
+    public void execute(Runnable command) {
+      handler.post(
+          () -> {
+            try {
+              command.run();
+            } catch (RuntimeException e) {
+              internalListener.onError(e);
+            }
+          });
     }
   }
 }

@@ -15,7 +15,7 @@
  */
 package androidx.media3.exoplayer.upstream;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import androidx.annotation.IntDef;
@@ -114,16 +114,38 @@ public interface LoadErrorHandlingPolicy {
     /** The number of tracks that are already excluded. */
     public final int numberOfExcludedTracks;
 
-    /** Creates an instance. */
+    /** Whether location steering (eg. Content Steering) is active. */
+    public final boolean locationSteeringActive;
+
+    /**
+     * @deprecated Use {@link #FallbackOptions(int, int, int, int, boolean)} instead.
+     */
+    @Deprecated
     public FallbackOptions(
         int numberOfLocations,
         int numberOfExcludedLocations,
         int numberOfTracks,
         int numberOfExcludedTracks) {
+      this(
+          numberOfLocations,
+          numberOfExcludedLocations,
+          numberOfTracks,
+          numberOfExcludedTracks,
+          /* locationSteeringActive= */ false);
+    }
+
+    /** Creates an instance. */
+    public FallbackOptions(
+        int numberOfLocations,
+        int numberOfExcludedLocations,
+        int numberOfTracks,
+        int numberOfExcludedTracks,
+        boolean locationSteeringActive) {
       this.numberOfLocations = numberOfLocations;
       this.numberOfExcludedLocations = numberOfExcludedLocations;
       this.numberOfTracks = numberOfTracks;
       this.numberOfExcludedTracks = numberOfExcludedTracks;
+      this.locationSteeringActive = locationSteeringActive;
     }
 
     /** Returns whether a fallback is available for the given {@link FallbackType fallback type}. */

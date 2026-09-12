@@ -17,17 +17,24 @@
 package androidx.media3.transformer;
 
 import static androidx.media3.common.util.Util.sampleCountToDurationUs;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import androidx.annotation.Nullable;
+import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.audio.AudioProcessor;
 import androidx.media3.common.audio.AudioProcessor.AudioFormat;
 import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.audio.AudioSink;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Objects;
+import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
 /**
  * Processes input from {@link AudioGraphInputAudioSink} instances, plumbing the data through an
@@ -39,46 +46,60 @@ import java.util.Objects;
   private static final int PRIMARY_SEQUENCE_INDEX = 0;
 
   private final AudioSink finalAudioSink;
-  private final AudioGraph audioGraph;
+  private final AudioMixer.Factory mixerFactory;
+  private final Supplier<Thread> thread;
 
+  private @MonotonicNonNull AudioGraph audioGraph;
   private int audioGraphInputsCreated;
   private int inputAudioSinksCreated;
-  private int inputAudioSinksPlaying;
   private boolean hasRegisteredPrimaryFormat;
   private AudioFormat outputAudioFormat;
   private long outputFramesWritten;
   private long seekPositionUs;
+  private boolean isRenderingStarted;
+  private ImmutableList<AudioProcessor> effects;
 
   /**
    * Creates an instance.
    *
    * @param mixerFactory The {@linkplain AudioMixer.Factory factory} used to {@linkplain
    *     AudioMixer.Factory#create() create} the underlying {@link AudioMixer}.
-   * @param effects The composition-level audio effects that are applied after mixing.
    * @param finalAudioSink The {@linkplain AudioSink sink} for processed output audio.
    */
-  public PlaybackAudioGraphWrapper(
-      AudioMixer.Factory mixerFactory,
-      ImmutableList<AudioProcessor> effects,
-      AudioSink finalAudioSink) {
-    audioGraph = new AudioGraph(mixerFactory, effects);
+  public PlaybackAudioGraphWrapper(AudioMixer.Factory mixerFactory, AudioSink finalAudioSink) {
     this.finalAudioSink = finalAudioSink;
-
+    this.mixerFactory = mixerFactory;
     outputAudioFormat = AudioFormat.NOT_SET;
+    effects = ImmutableList.of();
+    thread = Suppliers.memoize(Thread::currentThread);
+  }
+
+  /** Sets the composition-level audio effects that are applied after mixing. */
+  public void setAudioProcessors(List<AudioProcessor> audioProcessors) {
+    checkThread();
+    if (audioGraph != null) {
+      throw new UnsupportedOperationException(
+          "Setting AudioProcessors after creating the AudioGraph is not supported");
+    }
+    effects = ImmutableList.copyOf(audioProcessors);
+    audioGraph = new AudioGraph(mixerFactory, effects);
   }
 
   /** Releases any underlying resources. */
   public void release() {
-    audioGraph.reset();
+    checkThread();
+    if (audioGraph != null) {
+      audioGraph.reset();
+    }
     finalAudioSink.reset();
     finalAudioSink.release();
     audioGraphInputsCreated = 0;
     inputAudioSinksCreated = 0;
-    inputAudioSinksPlaying = 0;
   }
 
   /** Returns an {@link AudioSink} for a single sequence of non-overlapping raw PCM audio. */
   public AudioGraphInputAudioSink createInput(int inputIndex) {
+    // TODO: b/458719147 - Add checkThread() once threading issues with this method are resolved.
     return new AudioGraphInputAudioSink(new SinkController(inputIndex));
   }
 
@@ -92,25 +113,24 @@ import java.util.Objects;
           AudioSink.WriteException,
           AudioSink.InitializationException,
           AudioSink.ConfigurationException {
+    checkThread();
     // Do not process any data until the input audio sinks have created audio graph inputs.
     if (inputAudioSinksCreated == 0 || inputAudioSinksCreated != audioGraphInputsCreated) {
       return false;
     }
 
     if (Objects.equals(outputAudioFormat, AudioFormat.NOT_SET)) {
-      AudioFormat audioGraphAudioFormat = audioGraph.getOutputAudioFormat();
+      AudioFormat audioGraphAudioFormat = checkNotNull(audioGraph).getOutputAudioFormat();
       if (Objects.equals(audioGraphAudioFormat, AudioFormat.NOT_SET)) {
         return false;
       }
 
       finalAudioSink.configure(
-          Util.getPcmFormat(audioGraphAudioFormat),
-          /* specifiedBufferSize= */ 0,
-          /* outputChannels= */ null);
+          new AudioSink.AudioSinkConfig.Builder(Util.getPcmFormat(audioGraphAudioFormat)).build());
       outputAudioFormat = audioGraphAudioFormat;
     }
 
-    if (audioGraph.isEnded()) {
+    if (checkNotNull(audioGraph).isEnded()) {
       if (finalAudioSink.isEnded()) {
         return false;
       }
@@ -118,7 +138,7 @@ import java.util.Objects;
       return false;
     }
 
-    ByteBuffer audioBuffer = audioGraph.getOutput();
+    ByteBuffer audioBuffer = checkNotNull(audioGraph).getOutput();
     if (!audioBuffer.hasRemaining()) {
       return false;
     }
@@ -137,19 +157,40 @@ import java.util.Objects;
         + sampleCountToDurationUs(outputFramesWritten, outputAudioFormat.sampleRate);
   }
 
+  public void startRendering() {
+    checkThread();
+    finalAudioSink.play();
+    isRenderingStarted = true;
+  }
+
+  public void stopRendering() {
+    checkThread();
+    if (!isRenderingStarted) {
+      // The finalAudioSink cannot be paused more than once.
+      return;
+    }
+    finalAudioSink.pause();
+    isRenderingStarted = false;
+  }
+
+  public void setVolume(float volume) {
+    checkThread();
+    finalAudioSink.setVolume(volume);
+  }
+
   /**
    * Handles the steps that need to be executed for a seek before seeking the upstream players.
    *
    * @param positionUs The seek position, in microseconds.
    */
   public void startSeek(long positionUs) {
+    checkThread();
     if (positionUs == C.TIME_UNSET) {
       positionUs = 0;
     }
-    finalAudioSink.pause();
-    audioGraph.blockInput();
-    audioGraph.setPendingStartTimeUs(positionUs);
-    audioGraph.flush();
+    stopRendering();
+    checkNotNull(audioGraph).blockInput();
+    checkNotNull(audioGraph).flush(positionUs);
     finalAudioSink.flush();
     outputFramesWritten = 0;
     seekPositionUs = positionUs;
@@ -157,12 +198,23 @@ import java.util.Objects;
 
   /** Handles the steps that need to be executed for a seek after seeking the upstream players. */
   public void endSeek() {
-    audioGraph.unblockInput();
+    checkThread();
+    checkNotNull(audioGraph).unblockInput();
+  }
+
+  /** Updates the {@link AudioAttributes} on the {@linkplain #finalAudioSink final audio sink}. */
+  public void setAudioAttributes(AudioAttributes attributes) {
+    checkThread();
+    finalAudioSink.setAudioAttributes(attributes);
+  }
+
+  private void checkThread() {
+    checkState(thread.get() == Thread.currentThread());
   }
 
   private final class SinkController implements AudioGraphInputAudioSink.Controller {
     private final boolean isSequencePrimary;
-    private boolean playing;
+    private boolean isAudioGraphInputActive;
 
     public SinkController(int inputIndex) {
       this.isSequencePrimary = inputIndex == PRIMARY_SEQUENCE_INDEX;
@@ -173,59 +225,49 @@ import java.util.Objects;
     @Override
     public AudioGraphInput getAudioGraphInput(EditedMediaItem editedMediaItem, Format format)
         throws ExportException {
+      checkThread();
+      checkState(!isAudioGraphInputActive);
       if (!isSequencePrimary && !hasRegisteredPrimaryFormat) {
         // Make sure the format corresponding to the primary sequence is registered first to the
         // AudioGraph.
         return null;
       }
 
-      AudioGraphInput audioGraphInput = audioGraph.registerInput(editedMediaItem, format);
+      AudioGraphInput audioGraphInput =
+          checkNotNull(audioGraph).registerInput(editedMediaItem, format);
       audioGraphInputsCreated++;
       if (isSequencePrimary) {
         hasRegisteredPrimaryFormat = true;
       }
+      isAudioGraphInputActive = true;
       return audioGraphInput;
     }
 
     @Override
-    public long getCurrentPositionUs() {
-      return finalAudioSink.getCurrentPositionUs(/* sourceEnded= */ false);
+    public void onAudioGraphInputReleased() {
+      checkThread();
+      checkState(audioGraphInputsCreated > 0);
+      checkState(isAudioGraphInputActive);
+      audioGraphInputsCreated--;
+      isAudioGraphInputActive = false;
     }
 
     @Override
-    public boolean isEnded() {
-      return finalAudioSink.isEnded();
+    public long getCurrentPositionUs(boolean sourceEnded) {
+      checkThread();
+      return finalAudioSink.getCurrentPositionUs(sourceEnded);
     }
 
     @Override
-    public void onPlay() {
-      if (playing) {
-        return;
+    public boolean shouldEnd() {
+      // TODO: b/487191706 - Investigate whether PlaybackAudioGraphWrapper can keep track of active
+      //  sinks and return based on whether the caller is the last active sink, instead of keeping
+      //  primary sequence renderer alive.
+      checkThread();
+      if (isSequencePrimary) {
+        return finalAudioSink.isEnded();
       }
-      playing = true;
-
-      inputAudioSinksPlaying++;
-      if (inputAudioSinksCreated == inputAudioSinksPlaying) {
-        finalAudioSink.play();
-      }
-    }
-
-    @Override
-    public void onPause() {
-      if (!playing) {
-        return;
-      }
-      playing = false;
-
-      if (inputAudioSinksCreated == inputAudioSinksPlaying) {
-        finalAudioSink.pause();
-      }
-      inputAudioSinksPlaying--;
-    }
-
-    @Override
-    public void onReset() {
-      onPause();
+      return true;
     }
   }
 }

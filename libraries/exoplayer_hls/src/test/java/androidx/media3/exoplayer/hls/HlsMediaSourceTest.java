@@ -16,23 +16,39 @@
 package androidx.media3.exoplayer.hls;
 
 import static androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil;
+import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.advance;
 import static com.google.common.truth.Truth.assertThat;
 
+import android.content.Context;
+import android.graphics.SurfaceTexture;
 import android.net.Uri;
 import android.os.SystemClock;
+import android.view.Surface;
+import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.ParserException;
+import androidx.media3.common.Player;
 import androidx.media3.common.StreamKey;
 import androidx.media3.common.Timeline;
+import androidx.media3.common.TrackGroup;
+import androidx.media3.common.Tracks;
 import androidx.media3.common.util.Util;
+import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.analytics.PlayerId;
 import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist;
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser;
+import androidx.media3.exoplayer.source.MediaPeriod;
 import androidx.media3.exoplayer.source.MediaSource;
+import androidx.media3.exoplayer.source.TrackGroupArray;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
+import androidx.media3.exoplayer.upstream.DefaultAllocator;
+import androidx.media3.test.utils.FakeClock;
 import androidx.media3.test.utils.FakeDataSet;
 import androidx.media3.test.utils.FakeDataSource;
 import androidx.media3.test.utils.TestUtil;
+import androidx.media3.test.utils.robolectric.ShadowMediaCodecConfig;
+import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import java.io.ByteArrayInputStream;
@@ -40,13 +56,19 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
 /** Unit test for {@link HlsMediaSource}. */
 @RunWith(AndroidJUnit4.class)
 public class HlsMediaSourceTest {
+
+  @Rule
+  public ShadowMediaCodecConfig mediaCodecConfig =
+      ShadowMediaCodecConfig.withAllDefaultSupportedCodecs();
 
   @Test
   public void loadLivePlaylist_noTargetLiveOffsetDefined_fallbackToThreeTargetDuration()
@@ -683,6 +705,93 @@ public class HlsMediaSourceTest {
   }
 
   @Test
+  public void
+      loadMultivariantPlaylist_withMultipleNamedAudioAndSubtitleRenditions_createsExpectedTracks()
+          throws TimeoutException {
+    String multivariantUri = "fake://foo.bar/media0/playlist.m3u8";
+    String firstMediaPlaylistUri = "https://test.test/test1.m3u8";
+    String multivariantPlaylist =
+        "#EXTM3U\n"
+            + "#EXT-X-VERSION:4\n"
+            + "#EXT-X-INDEPENDENT-SEGMENTS"
+            + "#EXT-X-MEDIA-SEQUENCE:0\n"
+            + "#EXT-X-STREAM-INF:BANDWIDTH=20000,CODECS=\"avc1.4d401f,mp4a.40.2\","
+            + "RESOLUTION=640x360,AUDIO=\"audio_1\",SUBTITLES=\"subtitles_1\"\n"
+            + "https://test.test/test1.m3u8\n"
+            + "#EXT-X-STREAM-INF:BANDWIDTH=30000,CODECS=\"avc1.4d401f,mp4a.40.2\","
+            + "RESOLUTION=1024x768,AUDIO=\"audio_2\",SUBTITLES=\"subtitles_2\"\n"
+            + "https://test.test/test2.m3u8\n"
+            + "#EXT-X-MEDIA:TYPE=AUDIO,LANGUAGE=\"en\",NAME=\"English\","
+            + "GROUP-ID=\"audio_1\",URI=\"https://test.test/audio1en.m3u8\"\n"
+            + "#EXT-X-MEDIA:TYPE=AUDIO,LANGUAGE=\"en\",NAME=\"English\","
+            + "GROUP-ID=\"audio_2\",URI=\"https://test.test/audio2en.m3u8\"\n"
+            + "#EXT-X-MEDIA:TYPE=AUDIO,LANGUAGE=\"fr\",NAME=\"français\","
+            + "GROUP-ID=\"audio_1\",URI=\"https://test.test/audio1fr.m3u8\"\n"
+            + "#EXT-X-MEDIA:TYPE=AUDIO,LANGUAGE=\"fr\",NAME=\"français\","
+            + "GROUP-ID=\"audio_2\",URI=\"https://test.test/audio2fr.m3u8\"\n"
+            + "#EXT-X-MEDIA:TYPE=SUBTITLES,LANGUAGE=\"de\",NAME=\"Deutsch\","
+            + "GROUP-ID=\"subtitles_1\",URI=\"https://test.test/subtitles1sw.m3u8\"\n"
+            + "#EXT-X-MEDIA:TYPE=SUBTITLES,LANGUAGE=\"de\",NAME=\"Deutsch\","
+            + "GROUP-ID=\"subtitles_2\",URI=\"https://test.test/subtitles2sw.m3u8\"\n"
+            + "#EXT-X-MEDIA:TYPE=SUBTITLES,LANGUAGE=\"zh\",NAME=\"中国人\","
+            + "GROUP-ID=\"subtitles_1\",URI=\"https://test.test/subtitles1zh.m3u8\"\n"
+            + "#EXT-X-MEDIA:TYPE=SUBTITLES,LANGUAGE=\"zh\",NAME=\"中国人\","
+            + "GROUP-ID=\"subtitles_2\",URI=\"https://test.test/subtitles2zh.m3u8\"\n";
+    String firstMediaPlaylist =
+        "#EXTM3U\n"
+            + "#EXT-X-PLAYLIST-TYPE:VOD\n"
+            + "#EXT-X-VERSION:4\n"
+            + "#EXT-X-TARGETDURATION:10\n"
+            + "#EXTINF:10.0,\n"
+            + "segment.mp4\n"
+            + "#EXT-X-ENDLIST";
+    HlsMediaSource.Factory factory =
+        createHlsMediaSourceFactory(
+            multivariantUri, multivariantPlaylist, firstMediaPlaylistUri, firstMediaPlaylist);
+    MediaItem mediaItem = new MediaItem.Builder().setUri(multivariantUri).build();
+    HlsMediaSource mediaSource = factory.createMediaSource(mediaItem);
+
+    TrackGroupArray trackGroupArray = prepareAndWaitForTracks(mediaSource);
+
+    assertThat(trackGroupArray.length).isEqualTo(8);
+    ImmutableList<TrackGroup> groups =
+        ImmutableList.of(
+            trackGroupArray.get(0),
+            trackGroupArray.get(1),
+            trackGroupArray.get(2),
+            trackGroupArray.get(3),
+            trackGroupArray.get(4),
+            trackGroupArray.get(5),
+            trackGroupArray.get(6),
+            trackGroupArray.get(7));
+    assertThat(groups.stream().mapToInt(group -> group.type))
+        .containsExactly(
+            C.TRACK_TYPE_VIDEO,
+            C.TRACK_TYPE_AUDIO,
+            C.TRACK_TYPE_AUDIO,
+            C.TRACK_TYPE_TEXT,
+            C.TRACK_TYPE_TEXT,
+            C.TRACK_TYPE_METADATA,
+            C.TRACK_TYPE_METADATA,
+            C.TRACK_TYPE_METADATA);
+    assertThat(
+            groups.stream()
+                .filter(group -> group.type != C.TRACK_TYPE_METADATA)
+                .mapToInt(group -> group.length))
+        .containsExactly(2, 1, 1, 1, 1);
+    assertThat(
+            groups.stream()
+                .filter(group -> group.type == C.TRACK_TYPE_AUDIO)
+                .map(group -> group.getFormat(0).language))
+        .containsExactly("en", "fr");
+    assertThat(
+            groups.stream()
+                .filter(group -> group.type == C.TRACK_TYPE_TEXT)
+                .map(group -> group.getFormat(0).language))
+        .containsExactly("de", "zh");
+  }
+
+  @Test
   public void refreshPlaylist_targetLiveOffsetRemainsInWindow()
       throws TimeoutException, IOException {
     String playlistUri1 = "fake://foo.bar/media0/playlist1.m3u8";
@@ -758,7 +867,7 @@ public class HlsMediaSourceTest {
     List<Timeline> timelines = new ArrayList<>();
     MediaSource.MediaSourceCaller mediaSourceCaller = (source, timeline) -> timelines.add(timeline);
 
-    mediaSource.prepareSource(mediaSourceCaller, /* mediaTransferListener= */ null, PlayerId.UNSET);
+    mediaSource.prepareSource(mediaSourceCaller, PlayerId.UNSET, BandwidthMeter.NO_OP);
     runMainLooperUntil(() -> timelines.size() == 1);
     mediaSource.onPrimaryPlaylistRefreshed(secondPlaylist);
     runMainLooperUntil(() -> timelines.size() == 2);
@@ -958,9 +1067,112 @@ public class HlsMediaSourceTest {
         .isEqualTo(updatedMediaItem);
   }
 
+  @Test
+  public void selectTracks_withOptionalMetadataTracks_appliesUpdatesSuccessfully()
+      throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext)
+            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    player.setMediaItem(MediaItem.fromUri("asset:///media/cmaf/multi-segment/playlist.m3u8"));
+    player.prepare();
+    advance(player).untilState(Player.STATE_READY);
+
+    Tracks tracksAllEnabled = player.getCurrentTracks();
+    player.setTrackSelectionParameters(
+        player
+            .getTrackSelectionParameters()
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+            .build());
+    advance(player).untilPendingCommandsAreFullyHandled();
+    Tracks tracksDisabledAudio = player.getCurrentTracks();
+    player.setTrackSelectionParameters(
+        player
+            .getTrackSelectionParameters()
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+            .build());
+    advance(player).untilPendingCommandsAreFullyHandled();
+    Tracks tracksDisabledAudioAndVideo = player.getCurrentTracks();
+    player.setTrackSelectionParameters(
+        player
+            .getTrackSelectionParameters()
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+            .build());
+    advance(player).untilPendingCommandsAreFullyHandled();
+    Tracks tracksDisabledVideo = player.getCurrentTracks();
+    player.setTrackSelectionParameters(
+        player
+            .getTrackSelectionParameters()
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
+            .build());
+    advance(player).untilPendingCommandsAreFullyHandled();
+    Tracks tracksAllEnabled2 = player.getCurrentTracks();
+    player.release();
+    surface.release();
+
+    String videoGroupId =
+        tracksAllEnabled.getGroups().stream()
+            .filter(group -> group.getType() == C.TRACK_TYPE_VIDEO)
+            .map(group -> group.getMediaTrackGroup().id)
+            .findFirst()
+            .get();
+    String audioGroupId =
+        tracksAllEnabled.getGroups().stream()
+            .filter(group -> group.getType() == C.TRACK_TYPE_AUDIO)
+            .map(group -> group.getMediaTrackGroup().id)
+            .findFirst()
+            .get();
+    assertThat(tracksAllEnabled.isTypeSelected(C.TRACK_TYPE_AUDIO)).isTrue();
+    assertThat(tracksAllEnabled.isTypeSelected(C.TRACK_TYPE_VIDEO)).isTrue();
+    assertThat(tracksAllEnabled.isTypeSelected(C.TRACK_TYPE_METADATA)).isTrue();
+    assertThat(
+            tracksAllEnabled.getGroups().stream()
+                .filter(group -> group.isSelected() && group.getType() == C.TRACK_TYPE_METADATA))
+        .hasSize(2);
+    assertThat(tracksDisabledAudio.isTypeSelected(C.TRACK_TYPE_AUDIO)).isFalse();
+    assertThat(tracksDisabledAudio.isTypeSelected(C.TRACK_TYPE_VIDEO)).isTrue();
+    assertThat(tracksDisabledAudio.isTypeSelected(C.TRACK_TYPE_METADATA)).isTrue();
+    assertThat(
+            tracksDisabledAudio.getGroups().stream()
+                .filter(group -> group.isSelected() && group.getType() == C.TRACK_TYPE_METADATA)
+                .map(group -> group.getTrackFormat(0).primaryTrackGroupId))
+        .containsExactly(videoGroupId);
+    assertThat(tracksDisabledAudioAndVideo.isTypeSelected(C.TRACK_TYPE_AUDIO)).isFalse();
+    assertThat(tracksDisabledAudioAndVideo.isTypeSelected(C.TRACK_TYPE_VIDEO)).isFalse();
+    assertThat(tracksDisabledAudioAndVideo.isTypeSelected(C.TRACK_TYPE_METADATA)).isFalse();
+    assertThat(tracksDisabledVideo.isTypeSelected(C.TRACK_TYPE_AUDIO)).isTrue();
+    assertThat(tracksDisabledVideo.isTypeSelected(C.TRACK_TYPE_VIDEO)).isFalse();
+    assertThat(tracksDisabledVideo.isTypeSelected(C.TRACK_TYPE_METADATA)).isTrue();
+    assertThat(
+            tracksDisabledVideo.getGroups().stream()
+                .filter(group -> group.isSelected() && group.getType() == C.TRACK_TYPE_METADATA)
+                .map(group -> group.getTrackFormat(0).primaryTrackGroupId))
+        .containsExactly(audioGroupId);
+    assertThat(tracksAllEnabled2).isEqualTo(tracksAllEnabled);
+  }
+
   private static HlsMediaSource.Factory createHlsMediaSourceFactory(
       String playlistUri, String playlist) {
-    FakeDataSet fakeDataSet = new FakeDataSet().setData(playlistUri, Util.getUtf8Bytes(playlist));
+    return createHlsMediaSourceFactory(
+        playlistUri, playlist, /* playlistUri2= */ null, /* playlist2= */ null);
+  }
+
+  private static HlsMediaSource.Factory createHlsMediaSourceFactory(
+      String playlistUri1,
+      String playlist1,
+      @Nullable String playlistUri2,
+      @Nullable String playlist2) {
+    FakeDataSet fakeDataSet = new FakeDataSet().setData(playlistUri1, Util.getUtf8Bytes(playlist1));
+    if (playlistUri2 != null && playlist2 != null) {
+      fakeDataSet.setData(playlistUri2, Util.getUtf8Bytes(playlist2));
+    }
     return new HlsMediaSource.Factory(
             dataType -> new FakeDataSource.Factory().setFakeDataSet(fakeDataSet).createDataSource())
         .setElapsedRealTimeOffsetMs(0);
@@ -971,11 +1183,34 @@ public class HlsMediaSourceTest {
       throws TimeoutException {
     AtomicReference<Timeline> receivedTimeline = new AtomicReference<>();
     mediaSource.prepareSource(
-        (source, timeline) -> receivedTimeline.set(timeline),
-        /* mediaTransferListener= */ null,
-        PlayerId.UNSET);
+        (source, timeline) -> receivedTimeline.set(timeline), PlayerId.UNSET, BandwidthMeter.NO_OP);
     runMainLooperUntil(() -> receivedTimeline.get() != null);
     return receivedTimeline.get();
+  }
+
+  private static TrackGroupArray prepareAndWaitForTracks(HlsMediaSource mediaSource)
+      throws TimeoutException {
+    Timeline timeline = prepareAndWaitForTimeline(mediaSource);
+    MediaPeriod mediaPeriod =
+        mediaSource.createPeriod(
+            new MediaSource.MediaPeriodId(
+                timeline.getUidOfPeriod(/* periodIndex= */ 0), /* windowSequenceNumber= */ 0),
+            new DefaultAllocator(/* trimOnReset= */ true, /* individualAllocationSize= */ 1024),
+            /* startPositionUs= */ 0);
+    AtomicBoolean onPreparedCalled = new AtomicBoolean();
+    mediaPeriod.prepare(
+        new MediaPeriod.Callback() {
+          @Override
+          public void onPrepared(MediaPeriod mediaPeriod) {
+            onPreparedCalled.set(true);
+          }
+
+          @Override
+          public void onContinueLoadingRequested(MediaPeriod source) {}
+        },
+        /* positionUs= */ 0);
+    runMainLooperUntil(onPreparedCalled::get);
+    return mediaPeriod.getTrackGroups();
   }
 
   private static HlsMediaPlaylist parseHlsMediaPlaylist(String playlistUri, String playlist)

@@ -16,6 +16,7 @@
 package androidx.media3.cast;
 
 import static com.google.common.truth.Truth.assertThat;
+import static org.junit.Assert.assertThrows;
 
 import android.net.Uri;
 import androidx.media3.common.C;
@@ -23,6 +24,7 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.MimeTypes;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
+import com.google.android.gms.cast.MediaInfo;
 import com.google.android.gms.cast.MediaQueueItem;
 import com.google.common.collect.ImmutableMap;
 import org.junit.Test;
@@ -117,5 +119,159 @@ public class DefaultMediaItemConverterTest {
     MediaQueueItem secondQueueItem = converter.toMediaQueueItem(secondMediaItem);
 
     assertThat(secondQueueItem.getMedia().getContentId()).isEqualTo("http://example.com");
+  }
+
+  @Test
+  public void toMediaQueueItem_withNoMimeType_usesCastMediaTypeMovie() {
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaItem mediaItem = new MediaItem.Builder().setUri("http://example.com").build();
+
+    MediaQueueItem queueItem = converter.toMediaQueueItem(mediaItem);
+
+    assertThat(queueItem.getMedia().getMetadata().getMediaType())
+        .isEqualTo(com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE);
+  }
+
+  @Test
+  public void toMediaQueueItem_withAudioMimeType_usesMediaTypeMusicTrack() {
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaItem mediaItem =
+        new MediaItem.Builder()
+            .setUri("http://example.com")
+            .setMimeType(MimeTypes.AUDIO_MPEG)
+            .build();
+
+    MediaQueueItem queueItem = converter.toMediaQueueItem(mediaItem);
+
+    assertThat(queueItem.getMedia().getMetadata().getMediaType())
+        .isEqualTo(com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MUSIC_TRACK);
+  }
+
+  @Test
+  public void toMediaQueueItem_withMimeTypeAndMediaType_usesMediaType() {
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaItem mediaItem =
+        new MediaItem.Builder()
+            .setUri("http://example.com")
+            .setMimeType(MimeTypes.APPLICATION_M3U8)
+            .setMediaMetadata(
+                new MediaMetadata.Builder().setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC).build())
+            .build();
+
+    MediaQueueItem queueItem = converter.toMediaQueueItem(mediaItem);
+
+    assertThat(queueItem.getMedia().getMetadata().getMediaType())
+        .isEqualTo(com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MUSIC_TRACK);
+  }
+
+  @Test
+  public void toMediaItem_noCustomData_fallbackWithContentUrl() {
+    com.google.android.gms.cast.MediaMetadata gmsMetadata =
+        new com.google.android.gms.cast.MediaMetadata(
+            com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE);
+    gmsMetadata.putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "fallbackTitle");
+    MediaInfo mediaInfo =
+        new MediaInfo.Builder("contentId")
+            .setContentUrl("http://example.com/url")
+            .setContentType(MimeTypes.VIDEO_MP4)
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setMetadata(gmsMetadata)
+            .build();
+    MediaQueueItem queueItem = new MediaQueueItem.Builder(mediaInfo).build();
+
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaItem mediaItem = converter.toMediaItem(queueItem);
+
+    assertThat(mediaItem.mediaId).isEqualTo("contentId");
+    assertThat(mediaItem.localConfiguration.uri.toString()).isEqualTo("http://example.com/url");
+    assertThat(mediaItem.localConfiguration.mimeType).isEqualTo(MimeTypes.VIDEO_MP4);
+    assertThat(mediaItem.mediaMetadata.title.toString()).isEqualTo("fallbackTitle");
+  }
+
+  @Test
+  public void toMediaItem_noCustomData_fallbackWithContentIdAsUri() {
+    com.google.android.gms.cast.MediaMetadata gmsMetadata =
+        new com.google.android.gms.cast.MediaMetadata(
+            com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE);
+    gmsMetadata.putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "fallbackTitle");
+    MediaInfo mediaInfo =
+        new MediaInfo.Builder("http://example.com/id")
+            .setContentType(MimeTypes.VIDEO_MP4)
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setMetadata(gmsMetadata)
+            .build();
+    MediaQueueItem queueItem = new MediaQueueItem.Builder(mediaInfo).build();
+
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaItem mediaItem = converter.toMediaItem(queueItem);
+
+    assertThat(mediaItem.mediaId).isEqualTo("http://example.com/id");
+    assertThat(mediaItem.localConfiguration.uri.toString()).isEqualTo("http://example.com/id");
+    assertThat(mediaItem.localConfiguration.mimeType).isEqualTo(MimeTypes.VIDEO_MP4);
+    assertThat(mediaItem.mediaMetadata.title.toString()).isEqualTo("fallbackTitle");
+  }
+
+  @Test
+  public void toMediaItem_noCustomData_fallbackWithNonUriContentIdAndNoContentUrl() {
+    com.google.android.gms.cast.MediaMetadata gmsMetadata =
+        new com.google.android.gms.cast.MediaMetadata(
+            com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE);
+    gmsMetadata.putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, "fallbackTitle");
+    MediaInfo mediaInfo =
+        new MediaInfo.Builder("just_an_id")
+            .setContentType(MimeTypes.VIDEO_MP4)
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setMetadata(gmsMetadata)
+            .build();
+    MediaQueueItem queueItem = new MediaQueueItem.Builder(mediaInfo).build();
+
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    assertThrows(IllegalArgumentException.class, () -> converter.toMediaItem(queueItem));
+  }
+
+  @Test
+  public void toMediaQueueItem_withLiveConfiguration_setsStreamTypeLive() {
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaItem mediaItem =
+        new MediaItem.Builder()
+            .setUri("http://example.com/live.m3u8")
+            .setLiveConfiguration(
+                new MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(10000).build())
+            .build();
+
+    MediaQueueItem queueItem = converter.toMediaQueueItem(mediaItem);
+
+    assertThat(queueItem.getMedia().getStreamType()).isEqualTo(MediaInfo.STREAM_TYPE_LIVE);
+  }
+
+  @Test
+  public void serialize_deserialize_liveConfiguration() {
+    MediaItem item =
+        new MediaItem.Builder()
+            .setUri("http://example.com/live.m3u8")
+            .setLiveConfiguration(
+                new MediaItem.LiveConfiguration.Builder()
+                    .setTargetOffsetMs(10000)
+                    .setMinOffsetMs(5000)
+                    .setMaxOffsetMs(20000)
+                    .setMinPlaybackSpeed(0.9f)
+                    .setMaxPlaybackSpeed(1.1f)
+                    .build())
+            .build();
+
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaQueueItem queueItem = converter.toMediaQueueItem(item);
+    MediaItem reconstructedItem = converter.toMediaItem(queueItem);
+    assertThat(reconstructedItem.liveConfiguration).isEqualTo(item.liveConfiguration);
+  }
+
+  @Test
+  public void toMediaQueueItem_withoutLiveConfiguration_setsStreamTypeInvalid() {
+    DefaultMediaItemConverter converter = new DefaultMediaItemConverter();
+    MediaItem mediaItem = new MediaItem.Builder().setUri("http://example.com/live.m3u8").build();
+
+    MediaQueueItem queueItem = converter.toMediaQueueItem(mediaItem);
+
+    assertThat(queueItem.getMedia().getStreamType()).isEqualTo(MediaInfo.STREAM_TYPE_INVALID);
   }
 }

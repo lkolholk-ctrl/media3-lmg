@@ -15,10 +15,11 @@
  */
 package androidx.media3.exoplayer.source.chunk;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DataSpec;
@@ -76,7 +77,8 @@ public abstract class BaseMediaChunk extends MediaChunk {
         trackSelectionData,
         startTimeUs,
         endTimeUs,
-        chunkIndex);
+        chunkIndex,
+        /* steeredPathwayId= */ null);
     this.clippedStartTimeUs = clippedStartTimeUs;
     this.clippedEndTimeUs = clippedEndTimeUs;
   }
@@ -97,11 +99,11 @@ public abstract class BaseMediaChunk extends MediaChunk {
    * from this chunk.
    */
   public final int getFirstSampleIndex(int trackIndex) {
-    return Assertions.checkStateNotNull(firstSampleIndices)[trackIndex];
+    return checkNotNull(firstSampleIndices)[trackIndex];
   }
 
   /** Returns the output most recently passed to {@link #init(BaseMediaChunkOutput)}. */
   protected final BaseMediaChunkOutput getOutput() {
-    return Assertions.checkStateNotNull(output);
+    return checkNotNull(output);
   }
 }

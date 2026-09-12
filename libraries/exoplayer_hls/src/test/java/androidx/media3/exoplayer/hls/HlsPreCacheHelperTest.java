@@ -1,0 +1,96 @@
+/*
+ * Copyright 2025 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package androidx.media3.exoplayer.hls;
+
+import static androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.robolectric.Shadows.shadowOf;
+
+import android.os.HandlerThread;
+import android.os.Looper;
+import androidx.media3.common.MediaItem;
+import androidx.media3.exoplayer.source.preload.PreCacheHelper;
+import androidx.media3.test.utils.InMemoryDatabaseRule;
+import androidx.test.core.app.ApplicationProvider;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.annotation.Config;
+
+@RunWith(AndroidJUnit4.class)
+public class HlsPreCacheHelperTest {
+
+  @Rule public final InMemoryDatabaseRule cacheRule = InMemoryDatabaseRule.create();
+
+  private HandlerThread preCacheThread;
+  private Looper preCacheLooper;
+
+  @Before
+  public void setUp() throws Exception {
+    preCacheThread = new HandlerThread("preCache");
+    preCacheThread.start();
+    preCacheLooper = preCacheThread.getLooper();
+  }
+
+  @After
+  public void tearDown() {
+    preCacheThread.quit();
+  }
+
+  @Test
+  // TODO: b/507342863 - Run this on all API levels when it's not flaky.
+  @Config(sdk = 31)
+  public void preCache_succeeds() throws Exception {
+    PreCacheHelper.Listener preCacheHelperListener = mock(PreCacheHelper.Listener.class);
+    AtomicBoolean preCacheCompleted = new AtomicBoolean();
+    doAnswer(
+            invocation -> {
+              preCacheCompleted.set(true);
+              return null;
+            })
+        .when(preCacheHelperListener)
+        .onPreCacheProgress(any(), anyLong(), anyLong(), eq(100f));
+    PreCacheHelper preCacheHelper =
+        new PreCacheHelper.Factory(
+                ApplicationProvider.getApplicationContext(),
+                cacheRule.createSimpleCache(),
+                preCacheLooper)
+            .setListener(preCacheHelperListener)
+            .create(MediaItem.fromUri("asset:///media/hls/multi-segment/playlist.m3u8"));
+
+    preCacheHelper.preCache(/* startPositionMs= */ 0, /* durationMs= */ 2000L);
+    shadowOf(preCacheLooper).idle();
+    runMainLooperUntil(preCacheCompleted::get);
+    shadowOf(Looper.getMainLooper()).idle();
+
+    verify(preCacheHelperListener).onPrepared(any(), any());
+    verify(preCacheHelperListener, never()).onPrepareError(any(), any());
+    verify(preCacheHelperListener, never()).onDownloadError(any(), any());
+
+    preCacheHelper.release(/* removeCachedContent= */ true);
+    shadowOf(preCacheLooper).idle();
+  }
+}

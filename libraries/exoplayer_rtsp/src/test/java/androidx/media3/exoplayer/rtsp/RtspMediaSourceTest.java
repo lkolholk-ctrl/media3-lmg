@@ -21,6 +21,7 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.Timeline;
 import androidx.media3.exoplayer.analytics.PlayerId;
 import androidx.media3.exoplayer.source.MediaSource;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
 import androidx.media3.test.utils.TestUtil;
 import androidx.media3.test.utils.robolectric.RobolectricUtil;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -67,6 +68,18 @@ public class RtspMediaSourceTest {
   }
 
   @Test
+  public void canUpdateMediaItem_withChangeToRtspFromRtspt_returnsTrue() {
+    MediaItem initialMediaItem = new MediaItem.Builder().setUri("rtspt://test.test").build();
+    MediaItem updatedMediaItem =
+        TestUtil.buildFullyCustomizedMediaItem().buildUpon().setUri("rtsp://test.test").build();
+    MediaSource mediaSource = buildMediaSource(initialMediaItem);
+
+    boolean canUpdateMediaItem = mediaSource.canUpdateMediaItem(updatedMediaItem);
+
+    assertThat(canUpdateMediaItem).isTrue();
+  }
+
+  @Test
   public void updateMediaItem_createsTimelineWithUpdatedItem() throws Exception {
     MediaItem initialMediaItem =
         new MediaItem.Builder().setUri("http://test.test").setTag("tag1").build();
@@ -78,8 +91,8 @@ public class RtspMediaSourceTest {
     mediaSource.updateMediaItem(updatedMediaItem);
     mediaSource.prepareSource(
         (source, timeline) -> timelineReference.set(timeline),
-        /* mediaTransferListener= */ null,
-        PlayerId.UNSET);
+        PlayerId.UNSET,
+        BandwidthMeter.NO_OP);
     RobolectricUtil.runMainLooperUntil(() -> timelineReference.get() != null);
 
     assertThat(

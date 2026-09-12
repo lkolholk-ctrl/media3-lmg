@@ -15,11 +15,8 @@
  */
 package androidx.media3.extractor.metadata.id3;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkArgument;
 
-import android.os.Parcel;
-import android.os.Parcelable;
 import androidx.annotation.Nullable;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.util.UnstableApi;
@@ -29,6 +26,7 @@ import com.google.common.primitives.Ints;
 import com.google.errorprone.annotations.InlineMe;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /** Text information ID3 frame. */
 @UnstableApi
@@ -44,7 +42,6 @@ public final class TextInformationFrame extends Id3Frame {
   /** The text values of this frame. Will always have at least one element. */
   public final ImmutableList<String> values;
 
-  @SuppressWarnings("deprecation") // Assigning deprecated public field
   public TextInformationFrame(String id, @Nullable String description, List<String> values) {
     super(id);
     checkArgument(!values.isEmpty());
@@ -64,13 +61,6 @@ public final class TextInformationFrame extends Id3Frame {
       imports = "com.google.common.collect.ImmutableList")
   public TextInformationFrame(String id, @Nullable String description, String value) {
     this(id, description, ImmutableList.of(value));
-  }
-
-  private TextInformationFrame(Parcel in) {
-    this(
-        checkNotNull(in.readString()),
-        in.readString(),
-        ImmutableList.copyOf(checkNotNull(in.createStringArray())));
   }
 
   /**
@@ -188,6 +178,20 @@ public final class TextInformationFrame extends Id3Frame {
         }
         // Don't set a numeric genre that we don't recognize.
         break;
+      case "TSST":
+        builder.setDiscSubtitle(values.get(0));
+        break;
+      case "TPOS":
+        String[] discNumbers = Util.split(values.get(0), "/");
+        try {
+          int discNumber = Integer.parseInt(discNumbers[0]);
+          @Nullable
+          Integer totalDiscCount = discNumbers.length > 1 ? Integer.parseInt(discNumbers[1]) : null;
+          builder.setDiscNumber(discNumber).setTotalDiscCount(totalDiscCount);
+        } catch (NumberFormatException e) {
+          // Do nothing, invalid input.
+        }
+        break;
       default:
         break;
     }
@@ -202,8 +206,8 @@ public final class TextInformationFrame extends Id3Frame {
       return false;
     }
     TextInformationFrame other = (TextInformationFrame) obj;
-    return Util.areEqual(id, other.id)
-        && Util.areEqual(description, other.description)
+    return Objects.equals(id, other.id)
+        && Objects.equals(description, other.description)
         && values.equals(other.values);
   }
 
@@ -220,29 +224,6 @@ public final class TextInformationFrame extends Id3Frame {
   public String toString() {
     return id + ": description=" + description + ": values=" + values;
   }
-
-  // Parcelable implementation.
-
-  @Override
-  public void writeToParcel(Parcel dest, int flags) {
-    dest.writeString(id);
-    dest.writeString(description);
-    dest.writeStringArray(values.toArray(new String[0]));
-  }
-
-  public static final Parcelable.Creator<TextInformationFrame> CREATOR =
-      new Parcelable.Creator<TextInformationFrame>() {
-
-        @Override
-        public TextInformationFrame createFromParcel(Parcel in) {
-          return new TextInformationFrame(in);
-        }
-
-        @Override
-        public TextInformationFrame[] newArray(int size) {
-          return new TextInformationFrame[size];
-        }
-      };
 
   // Private methods
 

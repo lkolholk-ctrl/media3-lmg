@@ -15,6 +15,7 @@
  */
 package androidx.media3.test.utils;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.net.Uri;
@@ -23,7 +24,6 @@ import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.TrackGroup;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
@@ -45,7 +45,6 @@ import androidx.media3.exoplayer.trackselection.ExoTrackSelection;
 import androidx.media3.exoplayer.upstream.Allocator;
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -109,26 +108,25 @@ public class FakeAdaptiveMediaPeriod
   @Override
   public void prepare(Callback callback, long positionUs) {
     mediaSourceEventDispatcher.loadStarted(
-        new LoadEventInfo(fakePreparationLoadTaskId, FAKE_DATA_SPEC, SystemClock.elapsedRealtime()),
+        new LoadEventInfo.Builder(
+                fakePreparationLoadTaskId, FAKE_DATA_SPEC, SystemClock.elapsedRealtime())
+            .build(),
         C.DATA_TYPE_MEDIA,
         C.TRACK_TYPE_UNKNOWN,
         /* trackFormat= */ null,
         C.SELECTION_REASON_UNKNOWN,
         /* trackSelectionData= */ null,
         /* mediaStartTimeUs= */ 0,
-        /* mediaEndTimeUs= */ C.TIME_UNSET);
+        /* mediaEndTimeUs= */ C.TIME_UNSET,
+        /* retryCount= */ 0);
     this.callback = callback;
     prepared = true;
     Util.castNonNull(this.callback).onPrepared(this);
     mediaSourceEventDispatcher.loadCompleted(
-        new LoadEventInfo(
-            fakePreparationLoadTaskId,
-            FAKE_DATA_SPEC,
-            FAKE_DATA_SPEC.uri,
-            /* responseHeaders= */ ImmutableMap.of(),
-            SystemClock.elapsedRealtime(),
-            /* loadDurationMs= */ 0,
-            /* bytesLoaded= */ 100),
+        new LoadEventInfo.Builder(
+                fakePreparationLoadTaskId, FAKE_DATA_SPEC, SystemClock.elapsedRealtime())
+            .setBytesLoaded(100)
+            .build(),
         C.DATA_TYPE_MEDIA,
         C.TRACK_TYPE_UNKNOWN,
         /* trackFormat= */ null,
@@ -188,7 +186,8 @@ public class FakeAdaptiveMediaPeriod
                 new DrmSessionEventListener.EventDispatcher(),
                 new DefaultLoadErrorHandlingPolicy(/* minimumLoadableRetryCount= */ 3),
                 mediaSourceEventDispatcher,
-                /* canReportInitialDiscontinuity= */ false,
+                /* handleInitialDiscontinuity= */ false,
+                /* firstChunkStartTimeUs= */ C.TIME_UNSET,
                 /* downloadExecutor= */ null);
         streams[i] = sampleStream;
         sampleStreams.add(sampleStream);
@@ -259,6 +258,6 @@ public class FakeAdaptiveMediaPeriod
 
   @Override
   public void onContinueLoadingRequested(ChunkSampleStream<FakeChunkSource> source) {
-    Assertions.checkStateNotNull(callback).onContinueLoadingRequested(this);
+    checkNotNull(callback).onContinueLoadingRequested(this);
   }
 }

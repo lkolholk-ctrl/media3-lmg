@@ -15,6 +15,7 @@
  */
 package androidx.media3.exoplayer.mediacodec;
 
+import static android.os.Build.VERSION.SDK_INT;
 import static androidx.media3.exoplayer.DecoderReuseEvaluation.DISCARD_REASON_AUDIO_CHANNEL_COUNT_CHANGED;
 import static androidx.media3.exoplayer.DecoderReuseEvaluation.DISCARD_REASON_AUDIO_ENCODING_CHANGED;
 import static androidx.media3.exoplayer.DecoderReuseEvaluation.DISCARD_REASON_AUDIO_SAMPLE_RATE_CHANGED;
@@ -30,26 +31,40 @@ import static androidx.media3.exoplayer.DecoderReuseEvaluation.REUSE_RESULT_YES_
 import static androidx.media3.exoplayer.DecoderReuseEvaluation.REUSE_RESULT_YES_WITH_RECONFIGURATION;
 import static androidx.media3.exoplayer.mediacodec.MediaCodecPerformancePointCoverageProvider.COVERAGE_RESULT_NO;
 import static androidx.media3.exoplayer.mediacodec.MediaCodecPerformancePointCoverageProvider.COVERAGE_RESULT_YES;
+import static androidx.media3.exoplayer.mediacodec.MediaCodecUtil.createCodecProfileLevel;
+import static com.google.common.base.Preconditions.checkNotNull;
 
+import android.content.Context;
 import android.graphics.Point;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo.AudioCapabilities;
 import android.media.MediaCodecInfo.CodecCapabilities;
 import android.media.MediaCodecInfo.CodecProfileLevel;
 import android.media.MediaCodecInfo.VideoCapabilities;
+import android.os.Build;
 import android.util.Pair;
+import android.util.Range;
 import androidx.annotation.Nullable;
-import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
+import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
+import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.util.Assertions;
+import androidx.media3.common.util.CodecSpecificDataUtil;
+import androidx.media3.common.util.CodecSpecificDataUtil.MediaCodecProfileAndLevel;
 import androidx.media3.common.util.Log;
+import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.DecoderReuseEvaluation;
 import androidx.media3.exoplayer.DecoderReuseEvaluation.DecoderDiscardReasons;
+import com.google.common.base.Strings;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
+import com.google.common.primitives.Ints;
+import com.google.errorprone.annotations.InlineMe;
+import java.util.Objects;
 
 /** Information about a {@link MediaCodec} for a given MIME type. */
 @SuppressWarnings("InlinedApi")
@@ -63,6 +78,10 @@ public final class MediaCodecInfo {
    * number of supported instances is unknown.
    */
   public static final int MAX_SUPPORTED_INSTANCES_UNKNOWN = -1;
+
+  private static final Supplier<@NullableType Integer> VENDOR_API_LEVEL =
+      Suppliers.<@NullableType Integer>memoize(
+          () -> Ints.tryParse(Strings.nullToEmpty(Util.getSystemProperty("ro.vendor.api_level"))));
 
   /**
    * The name of the decoder.
@@ -148,6 +167,11 @@ public final class MediaCodecInfo {
 
   private final boolean isVideo;
 
+  // Memoization for getMaxSupportedFrameRate
+  private int maxFrameRateWidth;
+  private int maxFrameRateHeight;
+  private float maxFrameRate;
+
   /**
    * Creates an instance.
    *
@@ -182,10 +206,7 @@ public final class MediaCodecInfo {
         hardwareAccelerated,
         softwareOnly,
         vendor,
-        /* adaptive= */ !forceDisableAdaptive
-            && capabilities != null
-            && isAdaptive(capabilities)
-            && !needsDisableAdaptationWorkaround(name),
+        /* adaptive= */ !forceDisableAdaptive && capabilities != null && isAdaptive(capabilities),
         /* tunneling= */ capabilities != null && isTunneling(capabilities),
         /* secure= */ forceSecure || (capabilities != null && isSecure(capabilities)),
         isDetachedSurfaceSupported(capabilities));
@@ -204,7 +225,7 @@ public final class MediaCodecInfo {
       boolean tunneling,
       boolean secure,
       boolean detachedSurfaceSupported) {
-    this.name = Assertions.checkNotNull(name);
+    this.name = checkNotNull(name);
     this.mimeType = mimeType;
     this.codecMimeType = codecMimeType;
     this.capabilities = capabilities;
@@ -216,6 +237,9 @@ public final class MediaCodecInfo {
     this.secure = secure;
     this.detachedSurfaceSupported = detachedSurfaceSupported;
     isVideo = MimeTypes.isVideo(mimeType);
+    maxFrameRate = C.RATE_UNSET;
+    maxFrameRateWidth = C.LENGTH_UNSET;
+    maxFrameRateHeight = C.LENGTH_UNSET;
   }
 
   @Override
@@ -242,26 +266,31 @@ public final class MediaCodecInfo {
    * @see CodecCapabilities#getMaxSupportedInstances()
    */
   public int getMaxSupportedInstances() {
-    if (Util.SDK_INT < 23 || capabilities == null) {
+    if (capabilities == null) {
       return MAX_SUPPORTED_INSTANCES_UNKNOWN;
     }
-    return getMaxSupportedInstancesV23(capabilities);
+    return capabilities.getMaxSupportedInstances();
   }
 
   /**
    * Returns whether the decoder may support decoding the given {@code format} both functionally and
    * performantly.
    *
+   * @param context A context.
    * @param format The input media format.
    * @return Whether the decoder may support decoding the given {@code format}.
-   * @throws MediaCodecUtil.DecoderQueryException Thrown if an error occurs while querying decoders.
    */
-  public boolean isFormatSupported(Format format) throws MediaCodecUtil.DecoderQueryException {
+  public boolean isFormatSupported(Context context, Format format) {
     if (!isSampleMimeTypeSupported(format)) {
       return false;
     }
 
-    if (!isCodecProfileAndLevelSupported(format, /* checkPerformanceCapabilities= */ true)) {
+    if (!isCodecProfileAndLevelSupported(
+        context, format, /* checkPerformanceCapabilities= */ true)) {
+      return false;
+    }
+
+    if (!isCompressedAudioBitDepthSupported(format)) {
       return false;
     }
 
@@ -269,24 +298,26 @@ public final class MediaCodecInfo {
       if (format.width <= 0 || format.height <= 0) {
         return true;
       }
-      return isVideoSizeAndRateSupportedV21(format.width, format.height, format.frameRate);
+      return isVideoSizeAndRateSupported(format.width, format.height, format.frameRate);
     } else { // Audio
-      return (format.sampleRate == Format.NO_VALUE
-              || isAudioSampleRateSupportedV21(format.sampleRate))
+      return (format.sampleRate == Format.NO_VALUE || isAudioSampleRateSupported(format.sampleRate))
           && (format.channelCount == Format.NO_VALUE
-              || isAudioChannelCountSupportedV21(format.channelCount));
+              || isAudioChannelCountSupported(format.channelCount));
     }
   }
 
   /**
    * Returns whether the decoder may functionally support decoding the given {@code format}.
    *
+   * @param context A context.
    * @param format The input media format.
    * @return Whether the decoder may functionally support decoding the given {@code format}.
    */
-  public boolean isFormatFunctionallySupported(Format format) {
+  public boolean isFormatFunctionallySupported(Context context, Format format) {
     return isSampleMimeTypeSupported(format)
-        && isCodecProfileAndLevelSupported(format, /* checkPerformanceCapabilities= */ false);
+        && isCodecProfileAndLevelSupported(
+            context, format, /* checkPerformanceCapabilities= */ false)
+        && isCompressedAudioBitDepthSupported(format);
   }
 
   private boolean isSampleMimeTypeSupported(Format format) {
@@ -295,8 +326,9 @@ public final class MediaCodecInfo {
   }
 
   private boolean isCodecProfileAndLevelSupported(
-      Format format, boolean checkPerformanceCapabilities) {
-    Pair<Integer, Integer> codecProfileAndLevel = MediaCodecUtil.getCodecProfileAndLevel(format);
+      Context context, Format format, boolean checkPerformanceCapabilities) {
+    MediaCodecProfileAndLevel codecProfileAndLevel =
+        CodecSpecificDataUtil.getMediaCodecProfileAndLevel(format);
     if (format.sampleMimeType != null && format.sampleMimeType.equals(MimeTypes.VIDEO_MV_HEVC)) {
       String normalizedCodecMimeType = MimeTypes.normalizeMimeType(codecMimeType);
       if (normalizedCodecMimeType.equals(MimeTypes.VIDEO_MV_HEVC)) {
@@ -314,29 +346,51 @@ public final class MediaCodecInfo {
       // If we don't know any better, we assume that the profile and level are supported.
       return true;
     }
-    int profile = codecProfileAndLevel.first;
-    int level = codecProfileAndLevel.second;
+    if (!codecProfileAndLevel.isSupportableByMediaCodec()) {
+      return false;
+    }
+    int profile = codecProfileAndLevel.getProfile();
+    int level = codecProfileAndLevel.getLevel();
     if (MimeTypes.VIDEO_DOLBY_VISION.equals(format.sampleMimeType)) {
-      // If this codec is H264 or H265, we only support the Dolby Vision base layer and need to map
-      // the Dolby Vision profile to the corresponding base layer profile. Also assume all levels of
-      // this base layer profile are supported.
-      if (MimeTypes.VIDEO_H264.equals(mimeType)) {
-        profile = CodecProfileLevel.AVCProfileHigh;
-        level = 0;
-      } else if (MimeTypes.VIDEO_H265.equals(mimeType)) {
-        profile = CodecProfileLevel.HEVCProfileMain10;
-        level = 0;
+      // If this codec is H.264, H.265 or AV1, we only support the Dolby Vision base layer and need
+      // to map the Dolby Vision profile to the corresponding base layer profile. Also assume all
+      // levels of this base layer profile are supported.
+      switch (mimeType) {
+        case MimeTypes.VIDEO_H264:
+          profile = CodecProfileLevel.AVCProfileHigh;
+          level = 0;
+          break;
+        case MimeTypes.VIDEO_H265:
+          profile = CodecProfileLevel.HEVCProfileMain10;
+          level = 0;
+          break;
+        case MimeTypes.VIDEO_AV1:
+          profile = CodecProfileLevel.AV1ProfileMain10;
+          level = 0;
+          break;
+        default:
+          break;
       }
     }
 
-    if (!isVideo && profile != CodecProfileLevel.AACObjectXHE) {
-      // Some devices/builds underreport audio capabilities, so assume support except for xHE-AAC
-      // which may not be widely supported. See https://github.com/google/ExoPlayer/issues/5145.
+    if (!isVideo
+        && !mimeType.equals(MimeTypes.AUDIO_AC4)
+        && profile != CodecProfileLevel.AACObjectXHE) {
+      // AC-4 decoders report profile levels or audio capabilities that determine whether the input
+      // format is supported or not.
+      // With other encodings some devices/builds underreport audio capabilities, so assume support
+      // except for xHE-AAC which may not be widely supported. See
+      // https://github.com/google/ExoPlayer/issues/5145.
       return true;
     }
 
     CodecProfileLevel[] profileLevels = getProfileLevels();
-    if (Util.SDK_INT <= 23 && MimeTypes.VIDEO_VP9.equals(mimeType) && profileLevels.length == 0) {
+    if (mimeType.equals(MimeTypes.AUDIO_AC4) && profileLevels.length == 0) {
+      // Some older devices don't report profile levels for AC-4. Estimate them using other data
+      // in the codec capabilities.
+      profileLevels = estimateLegacyAc4ProfileLevels(context, capabilities);
+    }
+    if (SDK_INT == 23 && MimeTypes.VIDEO_VP9.equals(mimeType) && profileLevels.length == 0) {
       // Some older devices don't report profile levels for VP9. Estimate them using other data in
       // the codec capabilities.
       profileLevels = estimateLegacyVp9ProfileLevels(capabilities);
@@ -353,9 +407,20 @@ public final class MediaCodecInfo {
     return false;
   }
 
+  private boolean isCompressedAudioBitDepthSupported(Format format) {
+    // MediaCodec doesn't have a way to query FLAC decoder bit-depth support.
+    // c2.android.flac.decoder is known not to support 32-bit until API 34. We optimistically assume
+    // that another (unrecognized) FLAC decoder does support 32-bit on all API levels where it
+    // exists.
+    return !Objects.equals(format.sampleMimeType, MimeTypes.AUDIO_FLAC)
+        || format.pcmEncoding != C.ENCODING_PCM_32BIT
+        || SDK_INT >= 34
+        || !name.equals("c2.android.flac.decoder");
+  }
+
   /** Whether the codec handles HDR10+ out-of-band metadata. */
   public boolean isHdr10PlusOutOfBandMetadataSupported() {
-    if (Util.SDK_INT >= 29 && MimeTypes.VIDEO_VP9.equals(mimeType)) {
+    if (SDK_INT >= 29 && MimeTypes.VIDEO_VP9.equals(mimeType)) {
       for (CodecProfileLevel capabilities : getProfileLevels()) {
         if (capabilities.profile == CodecProfileLevel.VP9Profile2HDR10Plus) {
           return true;
@@ -379,8 +444,11 @@ public final class MediaCodecInfo {
     if (isVideo) {
       return adaptive;
     } else {
-      Pair<Integer, Integer> profileLevel = MediaCodecUtil.getCodecProfileAndLevel(format);
-      return profileLevel != null && profileLevel.first == CodecProfileLevel.AACObjectXHE;
+      MediaCodecProfileAndLevel profileLevel =
+          CodecSpecificDataUtil.getMediaCodecProfileAndLevel(format);
+      return profileLevel != null
+          && profileLevel.isSupportableByMediaCodec()
+          && profileLevel.getProfile() == CodecProfileLevel.AACObjectXHE;
     }
   }
 
@@ -397,7 +465,7 @@ public final class MediaCodecInfo {
    */
   public DecoderReuseEvaluation canReuseCodec(Format oldFormat, Format newFormat) {
     @DecoderDiscardReasons int discardReasons = 0;
-    if (!Util.areEqual(oldFormat.sampleMimeType, newFormat.sampleMimeType)) {
+    if (!Objects.equals(oldFormat.sampleMimeType, newFormat.sampleMimeType)) {
       discardReasons |= DISCARD_REASON_MIME_TYPE_CHANGED;
     }
 
@@ -405,19 +473,49 @@ public final class MediaCodecInfo {
       if (oldFormat.rotationDegrees != newFormat.rotationDegrees) {
         discardReasons |= DISCARD_REASON_VIDEO_ROTATION_CHANGED;
       }
-      if (!adaptive
-          && (oldFormat.width != newFormat.width || oldFormat.height != newFormat.height)) {
+      boolean resolutionChanged =
+          oldFormat.width != newFormat.width || oldFormat.height != newFormat.height;
+      if (!adaptive && resolutionChanged) {
         discardReasons |= DISCARD_REASON_VIDEO_RESOLUTION_CHANGED;
       }
       if ((!ColorInfo.isEquivalentToAssumedSdrDefault(oldFormat.colorInfo)
               || !ColorInfo.isEquivalentToAssumedSdrDefault(newFormat.colorInfo))
-          && !Util.areEqual(oldFormat.colorInfo, newFormat.colorInfo)) {
+          && !Objects.equals(oldFormat.colorInfo, newFormat.colorInfo)) {
         // Don't perform detailed checks if both ColorInfos fall within the default SDR assumption.
         discardReasons |= DISCARD_REASON_VIDEO_COLOR_INFO_CHANGED;
       }
       if (needsAdaptationReconfigureWorkaround(name)
           && !oldFormat.initializationDataEquals(newFormat)) {
         discardReasons |= DISCARD_REASON_WORKAROUND;
+      }
+
+      if (oldFormat.decodedWidth != Format.NO_VALUE
+          && oldFormat.decodedHeight != Format.NO_VALUE
+          && oldFormat.decodedWidth == newFormat.decodedWidth
+          && oldFormat.decodedHeight == newFormat.decodedHeight
+          && resolutionChanged) {
+        // Work around a bug where MediaCodec fails to adapt between formats if the compressed
+        // picture dimensions match but the cropped region for display differs.
+        // See b/409036359.
+        discardReasons |= DISCARD_REASON_WORKAROUND;
+      }
+
+      if (discardReasons == 0
+          && Objects.equals(newFormat.sampleMimeType, MimeTypes.VIDEO_DOLBY_VISION)) {
+        @Nullable
+        Pair<Integer, Integer> oldCodecProfileLevel =
+            CodecSpecificDataUtil.getCodecProfileAndLevel(oldFormat);
+        @Nullable
+        Pair<Integer, Integer> newCodecProfileLevel =
+            CodecSpecificDataUtil.getCodecProfileAndLevel(newFormat);
+        if (oldCodecProfileLevel == null
+            || newCodecProfileLevel == null
+            || !oldCodecProfileLevel.first.equals(newCodecProfileLevel.first)) {
+          // DolbyVision profiles convey specific base encodings and decoders may not be able
+          // to be reused across profiles.
+          // See b/446011738.
+          discardReasons |= DISCARD_REASON_WORKAROUND;
+        }
       }
 
       if (discardReasons == 0) {
@@ -441,18 +539,20 @@ public final class MediaCodecInfo {
         discardReasons |= DISCARD_REASON_AUDIO_ENCODING_CHANGED;
       }
 
-      // Check whether we're adapting between two xHE-AAC formats, for which adaptation is possible
-      // without reconfiguration or flushing.
-      if (discardReasons == 0 && MimeTypes.AUDIO_AAC.equals(mimeType)) {
+      // Some audio formats allow adaptation without reconfiguration or flushing.
+      if (discardReasons == 0
+          && (mimeType.equals(MimeTypes.AUDIO_AAC) || mimeType.equals(MimeTypes.AUDIO_AC4))) {
         @Nullable
         Pair<Integer, Integer> oldCodecProfileLevel =
-            MediaCodecUtil.getCodecProfileAndLevel(oldFormat);
+            CodecSpecificDataUtil.getCodecProfileAndLevel(oldFormat);
         @Nullable
         Pair<Integer, Integer> newCodecProfileLevel =
-            MediaCodecUtil.getCodecProfileAndLevel(newFormat);
+            CodecSpecificDataUtil.getCodecProfileAndLevel(newFormat);
         if (oldCodecProfileLevel != null && newCodecProfileLevel != null) {
           int oldProfile = oldCodecProfileLevel.first;
           int newProfile = newCodecProfileLevel.first;
+          // Check whether we're adapting between two xHE-AAC formats, for which adaptation is
+          // possible without reconfiguration or flushing.
           if (oldProfile == CodecProfileLevel.AACObjectXHE
               && newProfile == CodecProfileLevel.AACObjectXHE) {
             return new DecoderReuseEvaluation(
@@ -462,7 +562,30 @@ public final class MediaCodecInfo {
                 REUSE_RESULT_YES_WITHOUT_RECONFIGURATION,
                 /* discardReasons= */ 0);
           }
+          // For ac4 with the same profile and level, adaptation is possible without reconfiguration
+          // or flushing.
+          if (mimeType.equals(MimeTypes.AUDIO_AC4)
+              && oldCodecProfileLevel.equals(newCodecProfileLevel)) {
+            return new DecoderReuseEvaluation(
+                name,
+                oldFormat,
+                newFormat,
+                REUSE_RESULT_YES_WITHOUT_RECONFIGURATION,
+                /* discardReasons= */ 0);
+          }
         }
+      }
+
+      // For eac3 and eac3-joc, adaptation is possible without reconfiguration or flushing.
+      if (discardReasons == 0
+          && (mimeType.equals(MimeTypes.AUDIO_E_AC3_JOC)
+              || mimeType.equals(MimeTypes.AUDIO_E_AC3))) {
+        return new DecoderReuseEvaluation(
+            name,
+            oldFormat,
+            newFormat,
+            REUSE_RESULT_YES_WITHOUT_RECONFIGURATION,
+            /* discardReasons= */ 0);
       }
 
       if (!oldFormat.initializationDataEquals(newFormat)) {
@@ -490,7 +613,7 @@ public final class MediaCodecInfo {
    *     Format#NO_VALUE} or any value less than or equal to 0.
    * @return Whether the decoder supports video with the given width, height and frame rate.
    */
-  public boolean isVideoSizeAndRateSupportedV21(int width, int height, double frameRate) {
+  public boolean isVideoSizeAndRateSupported(int width, int height, double frameRate) {
     if (capabilities == null) {
       logNoSupport("sizeAndRate.caps");
       return false;
@@ -501,7 +624,7 @@ public final class MediaCodecInfo {
       return false;
     }
 
-    if (Util.SDK_INT >= 29) {
+    if (SDK_INT >= 29) {
       @MediaCodecPerformancePointCoverageProvider.PerformancePointCoverageResult
       int evaluation =
           MediaCodecPerformancePointCoverageProvider.areResolutionAndFrameRateCovered(
@@ -529,6 +652,53 @@ public final class MediaCodecInfo {
   }
 
   /**
+   * @deprecated Use {@link #isVideoSizeAndRateSupported(int, int, double)} instead.
+   */
+  @Deprecated
+  @InlineMe(replacement = "this.isVideoSizeAndRateSupported(width, height, frameRate)")
+  public final boolean isVideoSizeAndRateSupportedV21(int width, int height, double frameRate) {
+    return isVideoSizeAndRateSupported(width, height, frameRate);
+  }
+
+  /**
+   * Returns the max video frame rate that this codec can support at the provided resolution, or
+   * {@link C#RATE_UNSET} if this is not a video codec.
+   */
+  public float getMaxSupportedFrameRate(int width, int height) {
+    if (!isVideo) {
+      return C.RATE_UNSET;
+    }
+    if (maxFrameRate != C.RATE_UNSET
+        && maxFrameRateWidth == width
+        && maxFrameRateHeight == height) {
+      return maxFrameRate;
+    }
+    maxFrameRate = computeMaxSupportedFrameRate(width, height);
+    maxFrameRateWidth = width;
+    maxFrameRateHeight = height;
+    return maxFrameRate;
+  }
+
+  private float computeMaxSupportedFrameRate(int width, int height) {
+    // TODO: b/400765670 - Use the PerformancePoint API for this when it's available. Without
+    // that API, we binary search instead.
+    float maxFrameRate = 1024;
+    float minFrameRate = 0;
+    if (isVideoSizeAndRateSupported(width, height, maxFrameRate)) {
+      return maxFrameRate;
+    }
+    while (Math.abs(maxFrameRate - minFrameRate) > 5f) {
+      float testFrameRate = minFrameRate + (maxFrameRate - minFrameRate) / 2;
+      if (isVideoSizeAndRateSupported(width, height, testFrameRate)) {
+        minFrameRate = testFrameRate;
+      } else {
+        maxFrameRate = testFrameRate;
+      }
+    }
+    return minFrameRate;
+  }
+
+  /**
    * Returns the smallest video size greater than or equal to a specified size that also satisfies
    * the {@link MediaCodec}'s width and height alignment requirements.
    *
@@ -539,7 +709,7 @@ public final class MediaCodecInfo {
    *     codec.
    */
   @Nullable
-  public Point alignVideoSizeV21(int width, int height) {
+  public Point alignVideoSize(int width, int height) {
     if (capabilities == null) {
       return null;
     }
@@ -550,13 +720,31 @@ public final class MediaCodecInfo {
     return alignVideoSize(videoCapabilities, width, height);
   }
 
+  private static Point alignVideoSize(VideoCapabilities capabilities, int width, int height) {
+    int widthAlignment = capabilities.getWidthAlignment();
+    int heightAlignment = capabilities.getHeightAlignment();
+    return new Point(
+        Util.ceilDivide(width, widthAlignment) * widthAlignment,
+        Util.ceilDivide(height, heightAlignment) * heightAlignment);
+  }
+
+  /**
+   * @deprecated Use {@link #alignVideoSize(int, int)} instead.
+   */
+  @Deprecated
+  @InlineMe(replacement = "this.alignVideoSize(width, height)")
+  @Nullable
+  public final Point alignVideoSizeV21(int width, int height) {
+    return alignVideoSize(width, height);
+  }
+
   /**
    * Whether the decoder supports audio with a given sample rate.
    *
    * @param sampleRate The sample rate in Hz.
    * @return Whether the decoder supports audio with the given sample rate.
    */
-  public boolean isAudioSampleRateSupportedV21(int sampleRate) {
+  public boolean isAudioSampleRateSupported(int sampleRate) {
     if (capabilities == null) {
       logNoSupport("sampleRate.caps");
       return false;
@@ -574,12 +762,21 @@ public final class MediaCodecInfo {
   }
 
   /**
+   * @deprecated Use {@link #isAudioSampleRateSupported(int)} instead.
+   */
+  @Deprecated
+  @InlineMe(replacement = "this.isAudioSampleRateSupported(sampleRate)")
+  public final boolean isAudioSampleRateSupportedV21(int sampleRate) {
+    return isAudioSampleRateSupported(sampleRate);
+  }
+
+  /**
    * Whether the decoder supports audio with a given channel count.
    *
    * @param channelCount The channel count.
    * @return Whether the decoder supports audio with the given channel count.
    */
-  public boolean isAudioChannelCountSupportedV21(int channelCount) {
+  public boolean isAudioChannelCountSupported(int channelCount) {
     if (capabilities == null) {
       logNoSupport("channelCount.caps");
       return false;
@@ -596,6 +793,15 @@ public final class MediaCodecInfo {
       return false;
     }
     return true;
+  }
+
+  /**
+   * @deprecated Use {@link #isAudioChannelCountSupported(int)} instead.
+   */
+  @Deprecated
+  @InlineMe(replacement = "this.isAudioChannelCountSupported(channelCount)")
+  public final boolean isAudioChannelCountSupportedV21(int channelCount) {
+    return isAudioChannelCountSupported(channelCount);
   }
 
   private void logNoSupport(String message) {
@@ -627,7 +833,7 @@ public final class MediaCodecInfo {
   }
 
   private static int adjustMaxInputChannelCount(String name, String mimeType, int maxChannelCount) {
-    if (maxChannelCount > 1 || (Util.SDK_INT >= 26 && maxChannelCount > 0)) {
+    if (maxChannelCount > 1 || (SDK_INT >= 26 && maxChannelCount > 0)) {
       // The maximum channel count looks like it's been set correctly.
       return maxChannelCount;
     }
@@ -680,9 +886,10 @@ public final class MediaCodecInfo {
   }
 
   private static boolean isDetachedSurfaceSupported(@Nullable CodecCapabilities capabilities) {
-    return Util.SDK_INT >= 35
+    return SDK_INT >= 35
         && capabilities != null
-        && capabilities.isFeatureSupported(CodecCapabilities.FEATURE_DetachedSurface);
+        && capabilities.isFeatureSupported(CodecCapabilities.FEATURE_DetachedSurface)
+        && !needsDetachedSurfaceUnsupportedWorkaround();
   }
 
   private static boolean areSizeAndRateSupported(
@@ -701,26 +908,66 @@ public final class MediaCodecInfo {
       // floor to avoid situations where a range check in areSizeAndRateSupported fails due to
       // slightly exceeding the limits for a standard format (e.g., 1080p at 30 fps).
       double floorFrameRate = Math.floor(frameRate);
-      return capabilities.areSizeAndRateSupported(width, height, floorFrameRate);
+      if (!capabilities.areSizeAndRateSupported(width, height, floorFrameRate)) {
+        return false;
+      }
+      if (SDK_INT < 24) {
+        return true;
+      }
+      @Nullable
+      Range<Double> achievableFrameRates = capabilities.getAchievableFrameRatesFor(width, height);
+      if (achievableFrameRates == null) {
+        return true;
+      }
+      return floorFrameRate <= achievableFrameRates.getUpper();
     }
   }
 
-  private static Point alignVideoSize(VideoCapabilities capabilities, int width, int height) {
-    int widthAlignment = capabilities.getWidthAlignment();
-    int heightAlignment = capabilities.getHeightAlignment();
-    return new Point(
-        Util.ceilDivide(width, widthAlignment) * widthAlignment,
-        Util.ceilDivide(height, heightAlignment) * heightAlignment);
-  }
+  /**
+   * Called on devices with AC-4 decoders whose {@link CodecCapabilities} do not report profile
+   * levels. The returned {@link CodecProfileLevel CodecProfileLevels} are estimated based on other
+   * data in the {@link CodecCapabilities}.
+   *
+   * @param capabilities The {@link CodecCapabilities} for an AC-4 decoder, or {@code null} if not
+   *     known.
+   * @return The estimated {@link CodecProfileLevel CodecProfileLevels} for the decoder.
+   */
+  private static CodecProfileLevel[] estimateLegacyAc4ProfileLevels(
+      Context context, @Nullable CodecCapabilities capabilities) {
+    int maxInChannelCount = 2;
+    if (capabilities != null) {
+      @Nullable AudioCapabilities audioCapabilities = capabilities.getAudioCapabilities();
+      if (audioCapabilities != null) {
+        maxInChannelCount = audioCapabilities.getMaxInputChannelCount();
+      }
+    }
 
-  @RequiresApi(23)
-  private static int getMaxSupportedInstancesV23(CodecCapabilities capabilities) {
-    return capabilities.getMaxSupportedInstances();
+    int level = CodecProfileLevel.AC4Level3;
+    if (maxInChannelCount > 18) { // AC-4 Level 3 stream is up to 17.1 channel
+      level = CodecProfileLevel.AC4Level4;
+    }
+
+    // Automotive platform MediaCodec AC-4 decoders are not expected to support AC4Profile22 and
+    // deprecated profiles AC4Profile00, AC4Profile10 and AC4Profile11. See
+    // https://professionalsupport.dolby.com/s/article/Support-Dolby-Atmos-in-Android-Automotive-OS-media-apps?language=en_US
+    if (Util.isAutomotive(context)) {
+      return new CodecProfileLevel[] {
+        createCodecProfileLevel(CodecProfileLevel.AC4Profile21, level)
+      };
+    }
+
+    return new CodecProfileLevel[] {
+      createCodecProfileLevel(CodecProfileLevel.AC4Profile00, level),
+      createCodecProfileLevel(CodecProfileLevel.AC4Profile10, level),
+      createCodecProfileLevel(CodecProfileLevel.AC4Profile11, level),
+      createCodecProfileLevel(CodecProfileLevel.AC4Profile21, level),
+      createCodecProfileLevel(CodecProfileLevel.AC4Profile22, level)
+    };
   }
 
   /**
-   * Called on devices with {@link Util#SDK_INT} 23 and below, for VP9 decoders whose {@link
-   * CodecCapabilities} do not correctly report profile levels. The returned {@link
+   * Called on devices with {@link Build.VERSION#SDK_INT} 23 and below, for VP9 decoders whose
+   * {@link CodecCapabilities} do not correctly report profile levels. The returned {@link
    * CodecProfileLevel CodecProfileLevels} are estimated based on other data in the {@link
    * CodecCapabilities}.
    *
@@ -764,25 +1011,8 @@ public final class MediaCodecInfo {
       level = CodecProfileLevel.VP9Level1;
     }
 
-    CodecProfileLevel profileLevel = new CodecProfileLevel();
     // Since this method is for legacy devices only, assume that only profile 0 is supported.
-    profileLevel.profile = CodecProfileLevel.VP9Profile0;
-    profileLevel.level = level;
-
-    return new CodecProfileLevel[] {profileLevel};
-  }
-
-  /**
-   * Returns whether the decoder is known to fail when adapting, despite advertising itself as an
-   * adaptive decoder.
-   *
-   * @param name The decoder name.
-   * @return True if the decoder is known to fail when adapting.
-   */
-  private static boolean needsDisableAdaptationWorkaround(String name) {
-    return Util.SDK_INT <= 22
-        && ("ODROID-XU3".equals(Util.MODEL) || "Nexus 10".equals(Util.MODEL))
-        && ("OMX.Exynos.AVC.Decoder".equals(name) || "OMX.Exynos.AVC.Decoder.secure".equals(name));
+    return new CodecProfileLevel[] {createCodecProfileLevel(CodecProfileLevel.VP9Profile0, level)};
   }
 
   /**
@@ -794,7 +1024,10 @@ public final class MediaCodecInfo {
    *     new format's configuration data.
    */
   private static boolean needsAdaptationReconfigureWorkaround(String name) {
-    return Util.MODEL.startsWith("SM-T230") && "OMX.MARVELL.VIDEO.HW.CODA7542DECODER".equals(name);
+    if (!MediaLibraryInfo.enableWorkarounds()) {
+      return false;
+    }
+    return Build.MODEL.startsWith("SM-T230") && "OMX.MARVELL.VIDEO.HW.CODA7542DECODER".equals(name);
   }
 
   /**
@@ -822,7 +1055,10 @@ public final class MediaCodecInfo {
    * @return Whether to enable the workaround.
    */
   private static boolean needsRotatedVerticalResolutionWorkaround(String name) {
-    if ("OMX.MTK.VIDEO.DECODER.HEVC".equals(name) && "mcv5a".equals(Util.DEVICE)) {
+    if (!MediaLibraryInfo.enableWorkarounds()) {
+      return false;
+    }
+    if ("OMX.MTK.VIDEO.DECODER.HEVC".equals(name) && "mcv5a".equals(Build.DEVICE)) {
       // See https://github.com/google/ExoPlayer/issues/6612.
       return false;
     }
@@ -830,13 +1066,34 @@ public final class MediaCodecInfo {
   }
 
   /**
-   * Whether a profile is excluded from the list of supported profiles. This may happen when a
-   * device declares support for a profile it doesn't actually support.
+   * Returns whether a profile is excluded from the list of supported profiles. This may happen when
+   * a device declares support for a profile it doesn't actually support.
    */
   private static boolean needsProfileExcludedWorkaround(String mimeType, int profile) {
+    if (!MediaLibraryInfo.enableWorkarounds()) {
+      return false;
+    }
     // See https://github.com/google/ExoPlayer/issues/3537
     return MimeTypes.VIDEO_H265.equals(mimeType)
         && CodecProfileLevel.HEVCProfileMain10 == profile
-        && ("sailfish".equals(Util.DEVICE) || "marlin".equals(Util.DEVICE));
+        && ("sailfish".equals(Build.DEVICE) || "marlin".equals(Build.DEVICE));
+  }
+
+  /** Returns whether the device is known to have issues with the detached surface mode. */
+  private static boolean needsDetachedSurfaceUnsupportedWorkaround() {
+    // We deliberately don't check MediaLibraryInfo.enableWorkarounds() here, because this
+    // workaround needs to remain active even during certification testing (b/535214648).
+    Integer vendorApiLevel = VENDOR_API_LEVEL.get();
+    if (vendorApiLevel == null || vendorApiLevel > 202604) {
+      // Devices with vendor API level higher than SDK_INT 37 must only declare support for
+      // FEATURE_DetachedSurface if they actually support it.
+      return false;
+    }
+    return Build.MANUFACTURER.equals("Xiaomi")
+        || Build.MANUFACTURER.equals("OPPO")
+        || Build.MANUFACTURER.equals("realme")
+        || Build.MANUFACTURER.equals("motorola")
+        || Build.MANUFACTURER.equals("LENOVO")
+        || Build.MANUFACTURER.equals("Fairphone");
   }
 }

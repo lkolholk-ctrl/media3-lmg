@@ -1,0 +1,75 @@
+{
+  "upstream_tag": "1.11.0",
+  "upstream_commit": "91fd5df7ab6b5c2f1a589fbdee5ee8deeae97f02",
+  "lmg_base": "09b577b01a731885f1ee8707f9008de64badf223",
+  "identical_upstream_library_files": 6239,
+  "modified_upstream_library_files": [
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultMediaClock.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultRenderersFactory.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/ExoPlayer.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/ExoPlayerImpl.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/ExoPlayerImplInternal.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/MediaPeriodHolder.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/MediaPeriodQueue.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/SimpleExoPlayer.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/DefaultMediaClockTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/MediaPeriodQueueTest.java",
+    "libraries/test_utils/src/main/java/androidx/media3/test/utils/StubExoPlayer.java"
+  ],
+  "missing_upstream_library_files": [],
+  "validation": "136 JVM tests passed; 11 release AARs built. No emulator or device audio validation.",
+  "added_lmg_library_files": [
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/AudioFadeControl.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/CrossfadeConfig.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/CrossfadeTrackRouting.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/PlayerAudioFadeControl.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/CrossfadeConfigurationTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/CrossfadeTrackRoutingTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/ExoPlayerCrossfadeTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/PlayerAudioFadeControlCurvesTest.java",
+    "libraries/test_data/src/main/assets/.keep"
+  ],
+  "unchanged_original_fade_control_methods": 37,
+  "static_validation": {
+    "java_files_parsed": 2497,
+    "java_syntax_errors": 0,
+    "kotlin_build_files_parsed": 7,
+    "kotlin_syntax_errors": 0,
+    "adapter_method_arity_mismatches": 0,
+    "build_run": true,
+    "jvm_tests_run": true,
+    "device_tests_run": false
+  },
+  "fork_version": "1.11.0-lmg31",
+  "clock_only_changes_in_original_fade_methods": [
+    "prepareForCrossFade",
+    "setCrossFadeInProgress",
+    "doCrossFade",
+    "maybeDoFadeOut"
+  ],
+  "fade_formula_changes": false,
+  "unit_tests": {
+    "total": 136,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "classes": {
+      "PlayerAudioFadeControlCurvesTest": 11,
+      "CrossfadeConfigurationTest": 7,
+      "CrossfadeTrackRoutingTest": 2,
+      "MediaPeriodQueueTest": 61,
+      "DefaultMediaClockTest": 33,
+      "ExoPlayerTest.renderersLifecycle*": 20,
+      "ExoPlayerCrossfadeTest": 2
+    }
+  },
+  "release_build": {
+    "version": "1.11.0-lmg31",
+    "aar_count": 11,
+    "jdk": 21,
+    "gradle": "9.1.0",
+    "agp": "9.0.1",
+    "pom_and_module_dependencies_verified": true
+  },
+  "consumer_validation": "Isolated local app build stopped at user request. Final app validation will consume the GitHub release in the main LMG VK project."
+}

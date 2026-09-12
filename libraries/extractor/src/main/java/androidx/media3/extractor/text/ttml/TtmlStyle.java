@@ -96,6 +96,9 @@ import java.lang.annotation.Target;
   private @OptionalBoolean int textCombine;
   @Nullable private TextEmphasis textEmphasis;
   private float shearPercentage;
+  @Nullable private String origin;
+  @Nullable private String extent;
+  @Nullable private String displayAlign;
 
   public TtmlStyle() {
     linethrough = UNSPECIFIED;
@@ -277,6 +280,15 @@ import java.lang.annotation.Target;
       if (shearPercentage == UNSPECIFIED_SHEAR) {
         shearPercentage = ancestor.shearPercentage;
       }
+      if (origin == null) {
+        origin = ancestor.origin;
+      }
+      if (extent == null) {
+        extent = ancestor.extent;
+      }
+      if (displayAlign == null) {
+        displayAlign = ancestor.displayAlign;
+      }
       // attributes not inherited as of http://www.w3.org/TR/ttml1/
       if (chaining && !hasBackgroundColor && ancestor.hasBackgroundColor) {
         setBackgroundColor(ancestor.backgroundColor);
@@ -381,5 +393,38 @@ import java.lang.annotation.Target;
 
   public float getFontSize() {
     return fontSize;
+  }
+
+  @CanIgnoreReturnValue
+  public TtmlStyle setOrigin(@Nullable String origin) {
+    this.origin = origin;
+    return this;
+  }
+
+  @Nullable
+  public String getOrigin() {
+    return origin;
+  }
+
+  @CanIgnoreReturnValue
+  public TtmlStyle setExtent(@Nullable String extent) {
+    this.extent = extent;
+    return this;
+  }
+
+  @Nullable
+  public String getExtent() {
+    return extent;
+  }
+
+  @CanIgnoreReturnValue
+  public TtmlStyle setDisplayAlign(String displayAlign) {
+    this.displayAlign = displayAlign;
+    return this;
+  }
+
+  @Nullable
+  public String getDisplayAlign() {
+    return displayAlign;
   }
 }

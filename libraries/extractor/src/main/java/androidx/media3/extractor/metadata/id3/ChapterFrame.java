@@ -15,24 +15,26 @@
  */
 package androidx.media3.extractor.metadata.id3;
 
-import static androidx.media3.common.util.Util.castNonNull;
+import static com.google.common.base.Preconditions.checkArgument;
 
-import android.os.Parcel;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
+import androidx.media3.common.Label;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.common.util.Util;
+import androidx.media3.extractor.metadata.Chapter;
 import java.util.Arrays;
+import java.util.Objects;
 
 /** Chapter information ID3 frame. */
 @UnstableApi
-public final class ChapterFrame extends Id3Frame {
+public final class ChapterFrame extends Id3Frame implements Chapter {
 
   public static final String ID = "CHAP";
 
   public final String chapterId;
   public final int startTimeMs;
   public final int endTimeMs;
+  @Nullable private final Label title;
 
   /** The byte offset of the start of the chapter, or {@link C#INDEX_UNSET} if not set. */
   public final long startOffset;
@@ -50,26 +52,15 @@ public final class ChapterFrame extends Id3Frame {
       long endOffset,
       Id3Frame[] subFrames) {
     super(ID);
+    checkArgument(startTimeMs <= endTimeMs);
     this.chapterId = chapterId;
     this.startTimeMs = startTimeMs;
     this.endTimeMs = endTimeMs;
+    String title = findTitle(subFrames);
+    this.title = title != null ? new Label(/* language= */ null, title) : null;
     this.startOffset = startOffset;
     this.endOffset = endOffset;
     this.subFrames = subFrames;
-  }
-
-  /* package */ ChapterFrame(Parcel in) {
-    super(ID);
-    this.chapterId = castNonNull(in.readString());
-    this.startTimeMs = in.readInt();
-    this.endTimeMs = in.readInt();
-    this.startOffset = in.readLong();
-    this.endOffset = in.readLong();
-    int subFrameCount = in.readInt();
-    subFrames = new Id3Frame[subFrameCount];
-    for (int i = 0; i < subFrameCount; i++) {
-      subFrames[i] = in.readParcelable(Id3Frame.class.getClassLoader());
-    }
   }
 
   /** Returns the number of sub-frames. */
@@ -80,6 +71,43 @@ public final class ChapterFrame extends Id3Frame {
   /** Returns the sub-frame at {@code index}. */
   public Id3Frame getSubFrame(int index) {
     return subFrames[index];
+  }
+
+  // Chapter implementation.
+
+  @Override
+  public long getStartTimeMs() {
+    return startTimeMs;
+  }
+
+  @Override
+  public long getEndTimeMs() {
+    return endTimeMs;
+  }
+
+  @Override
+  public boolean isHidden() {
+    return false;
+  }
+
+  @Override
+  @Nullable
+  public Label getTitle() {
+    return title;
+  }
+
+  @Nullable
+  private static String findTitle(Id3Frame[] subFrames) {
+    for (Id3Frame frame : subFrames) {
+      if (frame instanceof TextInformationFrame
+          && ((TextInformationFrame) frame).id.equals("TIT2")) {
+        TextInformationFrame textFrame = (TextInformationFrame) frame;
+        if (!textFrame.values.isEmpty()) {
+          return textFrame.values.get(0);
+        }
+      }
+    }
+    return null;
   }
 
   @Override
@@ -95,7 +123,7 @@ public final class ChapterFrame extends Id3Frame {
         && endTimeMs == other.endTimeMs
         && startOffset == other.startOffset
         && endOffset == other.endOffset
-        && Util.areEqual(chapterId, other.chapterId)
+        && Objects.equals(chapterId, other.chapterId)
         && Arrays.equals(subFrames, other.subFrames);
   }
 
@@ -109,36 +137,4 @@ public final class ChapterFrame extends Id3Frame {
     result = 31 * result + (chapterId != null ? chapterId.hashCode() : 0);
     return result;
   }
-
-  @Override
-  public void writeToParcel(Parcel dest, int flags) {
-    dest.writeString(chapterId);
-    dest.writeInt(startTimeMs);
-    dest.writeInt(endTimeMs);
-    dest.writeLong(startOffset);
-    dest.writeLong(endOffset);
-    dest.writeInt(subFrames.length);
-    for (Id3Frame subFrame : subFrames) {
-      dest.writeParcelable(subFrame, 0);
-    }
-  }
-
-  @Override
-  public int describeContents() {
-    return 0;
-  }
-
-  public static final Creator<ChapterFrame> CREATOR =
-      new Creator<ChapterFrame>() {
-
-        @Override
-        public ChapterFrame createFromParcel(Parcel in) {
-          return new ChapterFrame(in);
-        }
-
-        @Override
-        public ChapterFrame[] newArray(int size) {
-          return new ChapterFrame[size];
-        }
-      };
 }

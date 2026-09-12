@@ -21,6 +21,7 @@ import androidx.media3.common.GlObjectsProvider;
 import androidx.media3.common.GlTextureInfo;
 import androidx.media3.common.VideoFrameProcessingException;
 import androidx.media3.common.util.GlUtil;
+import androidx.media3.common.util.Log;
 import androidx.media3.common.util.Size;
 import androidx.media3.common.util.UnstableApi;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -41,7 +42,8 @@ import java.util.concurrent.Executor;
  */
 @UnstableApi
 public abstract class BaseGlShaderProgram implements GlShaderProgram {
-  protected final TexturePool outputTexturePool;
+  private static final String TAG = "BaseGlShaderProgram";
+  /* package */ final TexturePool outputTexturePool;
   private InputListener inputListener;
   private OutputListener outputListener;
   private ErrorListener errorListener;
@@ -61,7 +63,12 @@ public abstract class BaseGlShaderProgram implements GlShaderProgram {
     outputTexturePool = new TexturePool(useHighPrecisionColorComponents, texturePoolCapacity);
     inputListener = new InputListener() {};
     outputListener = new OutputListener() {};
-    errorListener = (frameProcessingException) -> {};
+    errorListener =
+        (frameProcessingException) ->
+            Log.e(
+                TAG,
+                "Exception caught by default BaseGlShaderProgram errorListener.",
+                frameProcessingException);
     errorListenerExecutor = MoreExecutors.directExecutor();
     inputWidth = C.LENGTH_UNSET;
     inputHeight = C.LENGTH_UNSET;

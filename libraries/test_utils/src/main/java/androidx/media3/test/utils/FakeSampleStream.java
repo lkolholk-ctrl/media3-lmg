@@ -15,13 +15,15 @@
  */
 package androidx.media3.test.utils;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static androidx.annotation.VisibleForTesting.PRIVATE;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.decoder.DecoderInputBuffer;
@@ -96,13 +98,16 @@ public class FakeSampleStream implements SampleStream {
     }
 
     @Nullable private final Format format;
-    @Nullable private final SampleInfo sampleInfo;
+
+    @Nullable
+    @VisibleForTesting(otherwise = PRIVATE)
+    /* package */ final SampleInfo sampleInfo;
 
     /**
      * Creates an instance. Exactly one of {@code format} or {@code sampleInfo} must be non-null.
      */
     private FakeSampleStreamItem(@Nullable Format format, @Nullable SampleInfo sampleInfo) {
-      Assertions.checkArgument((format == null) != (sampleInfo == null));
+      checkArgument((format == null) != (sampleInfo == null));
       this.format = format;
       this.sampleInfo = sampleInfo;
     }
@@ -116,6 +121,7 @@ public class FakeSampleStream implements SampleStream {
   private boolean loadingFinished;
   @Nullable private Format downstreamFormat;
   @Nullable private Format notifiedDownstreamFormat;
+  private @SampleStream.Flags int flags;
 
   /**
    * Creates a fake sample stream which outputs the given {@link Format} followed by the provided
@@ -142,6 +148,11 @@ public class FakeSampleStream implements SampleStream {
     this.sampleStreamItems = new ArrayList<>();
     sampleStreamItems.add(FakeSampleStreamItem.format(initialFormat));
     sampleStreamItems.addAll(fakeSampleStreamItems);
+  }
+
+  /** Sets the flags to be returned by {@link #getFlags()}. */
+  public void setFlags(@SampleStream.Flags int flags) {
+    this.flags = flags;
   }
 
   /**
@@ -252,6 +263,11 @@ public class FakeSampleStream implements SampleStream {
   }
 
   @Override
+  public @SampleStream.Flags int getFlags() {
+    return flags;
+  }
+
+  @Override
   public boolean isReady() {
     return sampleQueue.isReady(loadingFinished);
   }
@@ -295,7 +311,8 @@ public class FakeSampleStream implements SampleStream {
     }
   }
 
-  private static class SampleInfo {
+  @VisibleForTesting(otherwise = PRIVATE)
+  /* package */ static class SampleInfo {
     public final byte[] data;
     public final @C.BufferFlags int flags;
     public final long timeUs;

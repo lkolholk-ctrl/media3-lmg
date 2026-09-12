@@ -15,12 +15,14 @@
  */
 package androidx.media3.cast;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import android.net.Uri;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.util.Assertions;
+import androidx.media3.common.util.Log;
 import androidx.media3.common.util.UnstableApi;
 import com.google.android.gms.cast.MediaInfo;
 import com.google.android.gms.cast.MediaMetadata;
@@ -36,6 +38,8 @@ import org.json.JSONObject;
 @UnstableApi
 public final class DefaultMediaItemConverter implements MediaItemConverter {
 
+  // Shortened to fit in 25 character limit for logcat tags.
+  private static final String TAG = "DefltMediaItemConverter";
   private static final String KEY_MEDIA_ITEM = "mediaItem";
   private static final String KEY_PLAYER_CONFIG = "exoPlayerConfig";
   private static final String KEY_MEDIA_ID = "mediaId";
@@ -46,11 +50,17 @@ public final class DefaultMediaItemConverter implements MediaItemConverter {
   private static final String KEY_UUID = "uuid";
   private static final String KEY_LICENSE_URI = "licenseUri";
   private static final String KEY_REQUEST_HEADERS = "requestHeaders";
+  private static final String KEY_LIVE_CONFIGURATION = "m3-liveConfiguration";
+  private static final String KEY_TARGET_OFFSET_MS = "m3-targetOffsetMs";
+  private static final String KEY_MIN_OFFSET_MS = "m3-minOffsetMs";
+  private static final String KEY_MAX_OFFSET_MS = "m3-maxOffsetMs";
+  private static final String KEY_MIN_PLAYBACK_SPEED = "m3-minPlaybackSpeed";
+  private static final String KEY_MAX_PLAYBACK_SPEED = "m3-maxPlaybackSpeed";
 
   @Override
   public MediaItem toMediaItem(MediaQueueItem mediaQueueItem) {
     @Nullable MediaInfo mediaInfo = mediaQueueItem.getMedia();
-    Assertions.checkNotNull(mediaInfo);
+    checkNotNull(mediaInfo);
     androidx.media3.common.MediaMetadata.Builder metadataBuilder =
         new androidx.media3.common.MediaMetadata.Builder();
     @Nullable MediaMetadata metadata = mediaInfo.getMetadata();
@@ -83,22 +93,52 @@ public final class DefaultMediaItemConverter implements MediaItemConverter {
         metadataBuilder.setTrackNumber(metadata.getInt(MediaMetadata.KEY_TRACK_NUMBER));
       }
     }
-    // `mediaQueueItem` came from `toMediaQueueItem()` so the custom JSON data must be set.
-    return getMediaItem(
-        Assertions.checkNotNull(mediaInfo.getCustomData()), metadataBuilder.build());
+    // TODO: b/526548538 - Get rid of custom keys in media3 when equivalent CastSDK fields are
+    // present.
+    @Nullable JSONObject customData = mediaInfo.getCustomData();
+    if (customData != null && customData.has(KEY_MEDIA_ITEM)) {
+      try {
+        return getMediaItem(customData, metadataBuilder.build());
+      } catch (RuntimeException e) {
+        Log.w(TAG, "Failed to parse customData, falling back to MediaInfo", e);
+      }
+    }
+    return toMediaItemFallback(mediaInfo, metadataBuilder.build());
+  }
+
+  private static MediaItem toMediaItemFallback(
+      MediaInfo mediaInfo, androidx.media3.common.MediaMetadata mediaMetadata) {
+    MediaItem.Builder builder = new MediaItem.Builder();
+    String contentId = mediaInfo.getContentId();
+    builder.setMediaId(contentId);
+    String contentUrl = mediaInfo.getContentUrl();
+    if (contentUrl != null) {
+      builder.setUri(Uri.parse(contentUrl));
+    } else if (contentId != null) {
+      // The web sender SDK indicates the content url is optional and, if absent, the media id will
+      // be used as media URL.
+      // See
+      // https://developers.google.com/cast/docs/reference/web_sender/chrome.cast.media.MediaInfo#contentUrl
+      Uri parsedContentId = Uri.parse(contentId);
+      if (parsedContentId.getScheme() != null) {
+        builder.setUri(parsedContentId);
+      }
+    }
+    if (mediaInfo.getContentType() != null) {
+      builder.setMimeType(mediaInfo.getContentType());
+    }
+    builder.setMediaMetadata(mediaMetadata);
+    MediaItem mediaItem = builder.build();
+    if (mediaItem.localConfiguration == null) {
+      throw new IllegalArgumentException("Insufficient media info to create a fallback MediaItem");
+    }
+    return mediaItem;
   }
 
   @Override
   public MediaQueueItem toMediaQueueItem(MediaItem mediaItem) {
-    Assertions.checkNotNull(mediaItem.localConfiguration);
-    if (mediaItem.localConfiguration.mimeType == null) {
-      throw new IllegalArgumentException("The item must specify its mimeType");
-    }
-    MediaMetadata metadata =
-        new MediaMetadata(
-            MimeTypes.isAudio(mediaItem.localConfiguration.mimeType)
-                ? MediaMetadata.MEDIA_TYPE_MUSIC_TRACK
-                : MediaMetadata.MEDIA_TYPE_MOVIE);
+    checkNotNull(mediaItem.localConfiguration);
+    MediaMetadata metadata = new MediaMetadata(getMediaType(mediaItem));
     if (mediaItem.mediaMetadata.title != null) {
       metadata.putString(MediaMetadata.KEY_TITLE, mediaItem.mediaMetadata.title.toString());
     }
@@ -131,15 +171,59 @@ public final class DefaultMediaItemConverter implements MediaItemConverter {
     String contentUrl = mediaItem.localConfiguration.uri.toString();
     String contentId =
         mediaItem.mediaId.equals(MediaItem.DEFAULT_MEDIA_ID) ? contentUrl : mediaItem.mediaId;
-    MediaInfo mediaInfo =
+    // If the MediaItem has a LiveConfiguration, we set the stream type to STREAM_TYPE_LIVE.
+    // Otherwise, we leave it unset letting the receiver decide whether the item is live.
+    boolean isExplicitlyLive =
+        !mediaItem.liveConfiguration.equals(MediaItem.LiveConfiguration.UNSET);
+    MediaInfo.Builder mediaInfoBuilder =
         new MediaInfo.Builder(contentId)
-            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
             .setContentType(mediaItem.localConfiguration.mimeType)
             .setContentUrl(contentUrl)
             .setMetadata(metadata)
-            .setCustomData(getCustomData(mediaItem))
-            .build();
+            .setCustomData(getCustomData(mediaItem));
+    if (isExplicitlyLive) {
+      mediaInfoBuilder.setStreamType(MediaInfo.STREAM_TYPE_LIVE);
+    }
+    MediaInfo mediaInfo = mediaInfoBuilder.build();
     return new MediaQueueItem.Builder(mediaInfo).build();
+  }
+
+  private static int getMediaType(MediaItem mediaItem) {
+    Integer media3MediaType = mediaItem.mediaMetadata.mediaType;
+    if (media3MediaType != null) {
+      switch (media3MediaType) {
+        case androidx.media3.common.MediaMetadata.MEDIA_TYPE_MOVIE:
+        case androidx.media3.common.MediaMetadata.MEDIA_TYPE_TRAILER:
+          return MediaMetadata.MEDIA_TYPE_MOVIE;
+        case androidx.media3.common.MediaMetadata.MEDIA_TYPE_TV_SHOW:
+          return MediaMetadata.MEDIA_TYPE_TV_SHOW;
+        case androidx.media3.common.MediaMetadata.MEDIA_TYPE_MUSIC:
+        case androidx.media3.common.MediaMetadata.MEDIA_TYPE_RADIO_STATION:
+          return MediaMetadata.MEDIA_TYPE_MUSIC_TRACK;
+        case androidx.media3.common.MediaMetadata.MEDIA_TYPE_AUDIO_BOOK_CHAPTER:
+          return MediaMetadata.MEDIA_TYPE_AUDIOBOOK_CHAPTER;
+        default:
+          // Fall through to use MIME type.
+          break;
+      }
+    }
+
+    String mimeType =
+        mediaItem.localConfiguration != null ? mediaItem.localConfiguration.mimeType : null;
+    if (mimeType == null) {
+      // TODO: b/432214377 - Revisit the media type once this ticket is addressed.
+      Log.w(
+          TAG,
+          "Converting MediaItem with null MIME type and no media type. Assuming "
+              + "MEDIA_TYPE_MOVIE. Song metadata may not be rendered correctly by the default"
+              + " receiver.");
+    }
+    // We default to MEDIA_TYPE_MOVIE because that ensures the default receiver will render video,
+    // if available. The disadvantage of guessing wrong is that song-related metadata may not be
+    // rendered.
+    return MimeTypes.isAudio(mimeType)
+        ? MediaMetadata.MEDIA_TYPE_MUSIC_TRACK
+        : MediaMetadata.MEDIA_TYPE_MOVIE;
   }
 
   // Deserialization.
@@ -159,10 +243,35 @@ public final class DefaultMediaItemConverter implements MediaItemConverter {
       if (mediaItemJson.has(KEY_DRM_CONFIGURATION)) {
         populateDrmConfiguration(mediaItemJson.getJSONObject(KEY_DRM_CONFIGURATION), builder);
       }
+      if (mediaItemJson.has(KEY_LIVE_CONFIGURATION)) {
+        builder.setLiveConfiguration(
+            getLiveConfiguration(mediaItemJson.getJSONObject(KEY_LIVE_CONFIGURATION)));
+      }
       return builder.build();
     } catch (JSONException e) {
       throw new RuntimeException(e);
     }
+  }
+
+  private static MediaItem.LiveConfiguration getLiveConfiguration(JSONObject json)
+      throws JSONException {
+    MediaItem.LiveConfiguration.Builder builder = new MediaItem.LiveConfiguration.Builder();
+    if (json.has(KEY_TARGET_OFFSET_MS)) {
+      builder.setTargetOffsetMs(json.getLong(KEY_TARGET_OFFSET_MS));
+    }
+    if (json.has(KEY_MIN_OFFSET_MS)) {
+      builder.setMinOffsetMs(json.getLong(KEY_MIN_OFFSET_MS));
+    }
+    if (json.has(KEY_MAX_OFFSET_MS)) {
+      builder.setMaxOffsetMs(json.getLong(KEY_MAX_OFFSET_MS));
+    }
+    if (json.has(KEY_MIN_PLAYBACK_SPEED)) {
+      builder.setMinPlaybackSpeed((float) json.getDouble(KEY_MIN_PLAYBACK_SPEED));
+    }
+    if (json.has(KEY_MAX_PLAYBACK_SPEED)) {
+      builder.setMaxPlaybackSpeed((float) json.getDouble(KEY_MAX_PLAYBACK_SPEED));
+    }
+    return builder.build();
   }
 
   private static void populateDrmConfiguration(JSONObject json, MediaItem.Builder mediaItem)
@@ -197,7 +306,7 @@ public final class DefaultMediaItemConverter implements MediaItemConverter {
   }
 
   private static JSONObject getMediaItemJson(MediaItem mediaItem) throws JSONException {
-    Assertions.checkNotNull(mediaItem.localConfiguration);
+    checkNotNull(mediaItem.localConfiguration);
     JSONObject json = new JSONObject();
     json.put(KEY_MEDIA_ID, mediaItem.mediaId);
     json.put(KEY_TITLE, mediaItem.mediaMetadata.title);
@@ -207,6 +316,31 @@ public final class DefaultMediaItemConverter implements MediaItemConverter {
       json.put(
           KEY_DRM_CONFIGURATION,
           getDrmConfigurationJson(mediaItem.localConfiguration.drmConfiguration));
+    }
+    if (!mediaItem.liveConfiguration.equals(MediaItem.LiveConfiguration.UNSET)) {
+      JSONObject liveConfigurationJson = getLiveConfigurationJson(mediaItem.liveConfiguration);
+      json.put(KEY_LIVE_CONFIGURATION, liveConfigurationJson);
+    }
+    return json;
+  }
+
+  private static JSONObject getLiveConfigurationJson(MediaItem.LiveConfiguration liveConfiguration)
+      throws JSONException {
+    JSONObject json = new JSONObject();
+    if (liveConfiguration.targetOffsetMs != C.TIME_UNSET) {
+      json.put(KEY_TARGET_OFFSET_MS, liveConfiguration.targetOffsetMs);
+    }
+    if (liveConfiguration.minOffsetMs != C.TIME_UNSET) {
+      json.put(KEY_MIN_OFFSET_MS, liveConfiguration.minOffsetMs);
+    }
+    if (liveConfiguration.maxOffsetMs != C.TIME_UNSET) {
+      json.put(KEY_MAX_OFFSET_MS, liveConfiguration.maxOffsetMs);
+    }
+    if (liveConfiguration.minPlaybackSpeed != C.RATE_UNSET) {
+      json.put(KEY_MIN_PLAYBACK_SPEED, liveConfiguration.minPlaybackSpeed);
+    }
+    if (liveConfiguration.maxPlaybackSpeed != C.RATE_UNSET) {
+      json.put(KEY_MAX_PLAYBACK_SPEED, liveConfiguration.maxPlaybackSpeed);
     }
     return json;
   }

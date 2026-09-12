@@ -15,10 +15,10 @@
  */
 package androidx.media3.exoplayer.drm;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static android.os.Build.VERSION.SDK_INT;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import android.annotation.SuppressLint;
@@ -33,6 +33,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.DrmInitData;
 import androidx.media3.common.DrmInitData.SchemeData;
 import androidx.media3.common.Format;
+import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.util.Log;
@@ -56,6 +57,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
@@ -441,7 +443,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
       @Nullable DrmSessionEventListener.EventDispatcher eventDispatcher, Format format) {
     // Don't verify the playback thread, preacquireSession can be called from any thread.
     checkState(prepareCallsCount > 0);
-    checkStateNotNull(playbackLooper);
+    checkNotNull(playbackLooper);
     PreacquiredSessionReference preacquiredSessionReference =
         new PreacquiredSessionReference(eventDispatcher);
     preacquiredSessionReference.acquire(format);
@@ -454,7 +456,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
       @Nullable DrmSessionEventListener.EventDispatcher eventDispatcher, Format format) {
     verifyPlaybackThread(/* allowBeforeSetPlayer= */ false);
     checkState(prepareCallsCount > 0);
-    checkStateNotNull(playbackLooper);
+    checkNotNull(playbackLooper);
     return acquireSession(
         playbackLooper,
         eventDispatcher,
@@ -499,7 +501,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
       // Only use an existing session if it has matching init data.
       session = null;
       for (DefaultDrmSession existingSession : sessions) {
-        if (Util.areEqual(existingSession.schemeDatas, schemeDatas)) {
+        if (Objects.equals(existingSession.schemeDatas, schemeDatas)) {
           session = existingSession;
           break;
         }
@@ -547,6 +549,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
     ExoMediaDrm exoMediaDrm = checkNotNull(this.exoMediaDrm);
     boolean avoidPlaceholderDrmSessions =
         exoMediaDrm.getCryptoType() == C.CRYPTO_TYPE_FRAMEWORK
+            && MediaLibraryInfo.enableWorkarounds()
             && FrameworkCryptoConfig.WORKAROUND_DEVICE_NEEDS_KEYS_TO_CONFIGURE_CODEC;
     // Avoid attaching a session to sparse formats.
     if (avoidPlaceholderDrmSessions
@@ -592,7 +595,7 @@ public class DefaultDrmSessionManager implements DrmSessionManager {
     } else if (C.CENC_TYPE_cbcs.equals(schemeType)) {
       // Support for cbcs (AES-CBC with pattern encryption) was added in API 24. However, the
       // implementation was not stable until API 25.
-      return Util.SDK_INT >= 25;
+      return SDK_INT >= 25;
     } else if (C.CENC_TYPE_cbc1.equals(schemeType) || C.CENC_TYPE_cens.equals(schemeType)) {
       // Support for cbc1 (AES-CTR with pattern encryption) and cens (AES-CBC without pattern
       // encryption) was also added in API 24 and made stable from API 25, however support was

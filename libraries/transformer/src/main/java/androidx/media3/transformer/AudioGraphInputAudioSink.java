@@ -16,10 +16,20 @@
 package androidx.media3.transformer;
 
 import static androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER;
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static androidx.media3.common.util.Util.getPcmFrameSize;
+import static androidx.media3.common.util.Util.isEncodingLinearPcm;
+import static androidx.media3.common.util.Util.sampleCountToDurationUs;
+import static androidx.media3.effect.DebugTraceUtil.COMPONENT_AUDIO_GRAPH_INPUT_AUDIO_SINK;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_DISCONTINUITY;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_FLUSH;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_INPUT_ENDED;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_INPUT_FORMAT;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_RESET;
+import static androidx.media3.transformer.TransformerUtil.getEditedMediaItem;
+import static androidx.media3.transformer.TransformerUtil.getOffsetToCompositionTimeUs;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.media.AudioTrack;
 import androidx.annotation.Nullable;
@@ -29,10 +39,15 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackParameters;
+import androidx.media3.common.Timeline;
 import androidx.media3.decoder.DecoderInputBuffer;
+import androidx.media3.effect.DebugTraceUtil;
+import androidx.media3.exoplayer.Renderer;
 import androidx.media3.exoplayer.audio.AudioSink;
+import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
 import java.nio.ByteBuffer;
 import java.util.Objects;
+import org.checkerframework.checker.nullness.qual.EnsuresNonNullIf;
 
 /**
  * An {@link AudioSink} implementation that feeds an {@link AudioGraphInput}.
@@ -58,6 +73,9 @@ import java.util.Objects;
      * <p>Data {@linkplain #handleBuffer written} to the sink will be {@linkplain
      * AudioGraphInput#queueInputBuffer() queued} to the {@link AudioGraphInput}.
      *
+     * <p>Call {@link #onAudioGraphInputReleased()} once the input has been {@linkplain
+     * AudioGraphInput#release() released}.
+     *
      * @param editedMediaItem The first {@link EditedMediaItem} queued to the {@link
      *     AudioGraphInput}.
      * @param format The {@link Format} used to {@linkplain AudioGraphInputAudioSink#configure
@@ -71,22 +89,30 @@ import java.util.Objects;
         throws ExportException;
 
     /**
+     * Notifies that this {@link AudioGraphInputAudioSink}'s {@link AudioGraphInput} has been
+     * {@linkplain AudioGraphInput#release() released} and is no longer in use.
+     */
+    void onAudioGraphInputReleased();
+
+    /**
      * Returns the position (in microseconds) that should be {@linkplain
      * AudioSink#getCurrentPositionUs returned} by this sink.
+     *
+     * @param sourceEnded Specify {@code true} if no more input buffers will be provided.
+     * @return The playback position relative to the start of playback, in microseconds.
      */
-    long getCurrentPositionUs();
+    long getCurrentPositionUs(boolean sourceEnded);
 
-    /** Returns whether the controller is ended. */
-    boolean isEnded();
-
-    /** See {@link #play()}. */
-    default void onPlay() {}
-
-    /** See {@link #pause()}. */
-    default void onPause() {}
-
-    /** See {@link #reset()}. */
-    default void onReset() {}
+    /**
+     * Returns whether global audio pipeline state allows this sink to signal {@link #isEnded()}.
+     *
+     * <p>{@link PlaybackAudioGraphWrapper} requires calls to {@link Renderer#render} to push output
+     * from the {@link AudioGraph} into the final audio sink. Therefore, one {@link
+     * AudioGraphInputAudioSink} needs to stay alive until all buffers have been queued into the
+     * final sink, even if that {@link AudioGraphInputAudioSink} instance has finished queuing data
+     * onto its {@link AudioGraphInput}.
+     */
+    boolean shouldEnd();
   }
 
   private final Controller controller;
@@ -95,57 +121,65 @@ import java.util.Objects;
   @Nullable private Format currentInputFormat;
   private boolean inputStreamEnded;
   private boolean signalledEndOfStream;
-  @Nullable private EditedMediaItemInfo currentEditedMediaItemInfo;
+  @Nullable private EditedMediaItem currentEditedMediaItem;
   private long offsetToCompositionTimeUs;
+  private long inputPositionUs;
+  private long outputStreamOffsetUs;
+  private long offsetToEditedMediaItemStartUs;
+  private boolean isConfigurationPending;
+  private boolean isFlushPending;
 
   public AudioGraphInputAudioSink(Controller controller) {
     this.controller = controller;
   }
 
-  /**
-   * Informs the audio sink there is a change on the {@link EditedMediaItem} currently rendered by
-   * the renderer.
-   *
-   * @param editedMediaItem The {@link EditedMediaItem}.
-   * @param offsetToCompositionTimeUs The offset to add to the audio buffer timestamps to convert
-   *     them to the composition time, in microseconds.
-   * @param isLastInSequence Whether this is the last item in the sequence.
-   */
-  public void onMediaItemChanged(
-      EditedMediaItem editedMediaItem, long offsetToCompositionTimeUs, boolean isLastInSequence) {
-    currentEditedMediaItemInfo = new EditedMediaItemInfo(editedMediaItem, isLastInSequence);
-    this.offsetToCompositionTimeUs = offsetToCompositionTimeUs;
-  }
-
   // AudioSink methods
 
   @Override
-  public void configure(Format inputFormat, int specifiedBufferSize, @Nullable int[] outputChannels)
-      throws ConfigurationException {
-    checkArgument(supportsFormat(inputFormat));
-    EditedMediaItem editedMediaItem = checkStateNotNull(currentEditedMediaItemInfo).editedMediaItem;
-    // TODO(b/303029969): Evaluate throwing vs ignoring for null outputChannels.
-    checkArgument(outputChannels == null);
-    currentInputFormat = inputFormat;
+  public void configure(AudioSinkConfig audioSinkConfig) {
+    checkArgument(supportsFormat(audioSinkConfig.format));
+    // TODO: b/303029969 - Evaluate throwing vs ignoring for null outputChannels.
+    checkArgument(audioSinkConfig.outputChannelMapping == null);
 
-    // During playback, AudioGraphInput doesn't know the full media duration upfront due to seeking.
-    // Pass in C.TIME_UNSET to AudioGraphInput.onMediaItemChanged.
-    if (outputGraphInput != null) {
-      outputGraphInput.onMediaItemChanged(
-          editedMediaItem, /* durationUs= */ C.TIME_UNSET, currentInputFormat, /* isLast= */ false);
-    }
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_GRAPH_INPUT_AUDIO_SINK,
+        Integer.toHexString(this.hashCode()),
+        EVENT_INPUT_FORMAT,
+        C.TIME_UNSET,
+        "AudioSinkConfig[format:%s, timeline:%s, MediaPeriodId:%s]",
+        audioSinkConfig.format,
+        audioSinkConfig.timeline,
+        String.valueOf(audioSinkConfig.mediaPeriodId));
+
+    currentInputFormat = audioSinkConfig.format;
+
+    MediaPeriodId mediaPeriodId = checkNotNull(audioSinkConfig.mediaPeriodId);
+    Timeline timeline = audioSinkConfig.timeline;
+    currentEditedMediaItem = getEditedMediaItem(timeline, mediaPeriodId);
+    this.offsetToCompositionTimeUs =
+        getOffsetToCompositionTimeUs(timeline, mediaPeriodId, outputStreamOffsetUs);
+    // We cannot use outputStreamOffsetUs for the first EditedMediaItem because the Timeline created
+    // by ConcatenatingMediaSource2 returns the original start of the period, without taking into
+    // account any clipping. For all other EditedMediaItems, outputStreamOffsetUs is aligned to the
+    // clipped start.
+    this.offsetToEditedMediaItemStartUs =
+        timeline.getIndexOfPeriod(mediaPeriodId.periodUid) == 0
+            ? -offsetToCompositionTimeUs
+            : outputStreamOffsetUs;
+
+    isConfigurationPending = true;
+  }
+
+  @Override
+  public void setOutputStreamOffsetUs(long outputStreamOffsetUs) {
+    this.outputStreamOffsetUs = outputStreamOffsetUs;
   }
 
   @Override
   public boolean isEnded() {
-    if (currentInputFormat == null) { // Sink not configured.
-      return inputStreamEnded;
-    }
-    // If we are playing the last media item in the sequence, we must also check that the controller
-    // is ended.
-    return inputStreamEnded
-        && (!checkStateNotNull(currentEditedMediaItemInfo).isLastInSequence
-            || controller.isEnded());
+    // Controller can keep renderer alive if needed.
+    return !isOutputInitialized()
+        || (inputStreamEnded && outputGraphInput.isEnded() && controller.shouldEnd());
   }
 
   @Override
@@ -153,13 +187,14 @@ import java.util.Objects;
       ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount)
       throws InitializationException {
     checkState(!inputStreamEnded);
-    EditedMediaItem editedMediaItem = checkStateNotNull(currentEditedMediaItemInfo).editedMediaItem;
+
+    EditedMediaItem editedMediaItem = checkNotNull(currentEditedMediaItem);
     if (outputGraphInput == null) {
 
       AudioGraphInput outputGraphInput;
       try {
         outputGraphInput =
-            controller.getAudioGraphInput(editedMediaItem, checkStateNotNull(currentInputFormat));
+            controller.getAudioGraphInput(editedMediaItem, checkNotNull(currentInputFormat));
       } catch (ExportException e) {
         throw new InitializationException(
             "Error creating AudioGraphInput",
@@ -171,10 +206,27 @@ import java.util.Objects;
       if (outputGraphInput == null) {
         return false;
       }
-
       this.outputGraphInput = outputGraphInput;
+      isConfigurationPending = true;
+    }
+
+    if (isConfigurationPending) {
+      // During playback, AudioGraphInput doesn't know the full media duration upfront due to
+      // seeking.
+      // TODO: b/406185875 - Propagate media duration after implementing handling for seeks in
+      //  transitions.
       this.outputGraphInput.onMediaItemChanged(
-          editedMediaItem, /* durationUs= */ C.TIME_UNSET, currentInputFormat, /* isLast= */ false);
+          editedMediaItem,
+          /* durationUs= */ C.TIME_UNSET,
+          currentInputFormat,
+          /* isLast= */ false,
+          /* positionOffsetUs= */ presentationTimeUs - offsetToEditedMediaItemStartUs);
+      isConfigurationPending = false;
+      isFlushPending = false;
+    } else if (isFlushPending) {
+      this.outputGraphInput.flush(
+          /* positionOffsetUs= */ presentationTimeUs - offsetToEditedMediaItemStartUs);
+      isFlushPending = false;
     }
 
     return handleBufferInternal(buffer, presentationTimeUs, /* flags= */ 0);
@@ -182,12 +234,20 @@ import java.util.Objects;
 
   @Override
   public void playToEndOfStream() {
-    inputStreamEnded = true;
-    if (currentInputFormat == null) { // Sink not configured.
+    if (!isOutputInitialized()) {
+      // AudioGraphInput has not been set up yet.
       return;
     }
-    // Queue end-of-stream only if playing the last media item in the sequence.
-    if (!signalledEndOfStream && checkStateNotNull(currentEditedMediaItemInfo).isLastInSequence) {
+    inputStreamEnded = true;
+    // Play to EoS only gets called at the end of the sequence. The end of an EditedMediaItem before
+    // a transition is signalled by a #handleDiscontinuity() or #flush() call.
+    if (!signalledEndOfStream) {
+      DebugTraceUtil.logEvent(
+          COMPONENT_AUDIO_GRAPH_INPUT_AUDIO_SINK,
+          Integer.toHexString(this.hashCode()),
+          EVENT_INPUT_ENDED,
+          inputPositionUs,
+          "");
       signalledEndOfStream =
           handleBufferInternal(
               EMPTY_BUFFER, C.TIME_END_OF_SOURCE, /* flags= */ C.BUFFER_FLAG_END_OF_STREAM);
@@ -197,7 +257,7 @@ import java.util.Objects;
   @Override
   public @SinkFormatSupport int getFormatSupport(Format format) {
     if (Objects.equals(format.sampleMimeType, MimeTypes.AUDIO_RAW)
-        && format.pcmEncoding == C.ENCODING_PCM_16BIT) {
+        && isEncodingLinearPcm(format.pcmEncoding)) {
       return SINK_FORMAT_SUPPORTED_DIRECTLY;
     }
 
@@ -211,41 +271,68 @@ import java.util.Objects;
 
   @Override
   public boolean hasPendingData() {
-    return false;
+    // TODO: b/487191706 - Investigate whether we can just check for pending data on AudioGraphInput
+    //  without stalling progress downstream. CompositionPlayer should check whether all renderers
+    //  are ready before starting playback.
+
+    // This is a best-effort approach that signals whether there are in-flight buffers between this
+    // instance and the final audio sink. However, this does not guarantee that those buffers are
+    // ready for immediate playback.
+    return isOutputInitialized() && getCompositionPlayerPositionUs() < inputPositionUs;
   }
 
   @Override
   public long getCurrentPositionUs(boolean sourceEnded) {
-    long currentPositionUs = controller.getCurrentPositionUs();
-    if (currentPositionUs != CURRENT_POSITION_NOT_SET) {
-      // Reset the position to the one expected by the player.
-      currentPositionUs -= offsetToCompositionTimeUs;
+    if (!isOutputInitialized()) {
+      return CURRENT_POSITION_NOT_SET;
     }
-    return currentPositionUs;
+
+    if (isEnded()) {
+      return inputPositionUs;
+    }
+    return getCompositionPlayerPositionUs();
   }
 
   @Override
-  public void play() {
-    controller.onPlay();
-  }
+  public void play() {}
 
   @Override
-  public void pause() {
-    controller.onPause();
-  }
+  public void pause() {}
 
   @Override
   public void flush() {
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_GRAPH_INPUT_AUDIO_SINK,
+        Integer.toHexString(this.hashCode()),
+        EVENT_FLUSH,
+        inputPositionUs,
+        "");
     inputStreamEnded = false;
     signalledEndOfStream = false;
+    isFlushPending = true;
   }
 
   @Override
   public void reset() {
-    flush();
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_GRAPH_INPUT_AUDIO_SINK,
+        Integer.toHexString(this.hashCode()),
+        EVENT_RESET,
+        inputPositionUs,
+        "");
+    if (outputGraphInput != null) {
+      outputGraphInput.release();
+      outputGraphInput = null;
+      controller.onAudioGraphInputReleased();
+    }
+    inputStreamEnded = false;
+    signalledEndOfStream = false;
     currentInputFormat = null;
-    currentEditedMediaItemInfo = null;
-    controller.onReset();
+    currentEditedMediaItem = null;
+    offsetToEditedMediaItemStartUs = 0;
+    offsetToCompositionTimeUs = 0;
+    isConfigurationPending = false;
+    isFlushPending = false;
   }
 
   // Unsupported interface functionality.
@@ -254,7 +341,14 @@ import java.util.Objects;
   public void setListener(AudioSink.Listener listener) {}
 
   @Override
-  public void handleDiscontinuity() {}
+  public void handleDiscontinuity() {
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_GRAPH_INPUT_AUDIO_SINK,
+        Integer.toHexString(this.hashCode()),
+        EVENT_DISCONTINUITY,
+        inputPositionUs,
+        "");
+  }
 
   @Override
   public void setAudioAttributes(AudioAttributes audioAttributes) {}
@@ -263,6 +357,11 @@ import java.util.Objects;
   @Override
   public AudioAttributes getAudioAttributes() {
     return null;
+  }
+
+  @Override
+  public long getAudioTrackBufferSizeUs() {
+    return C.TIME_UNSET;
   }
 
   @Override
@@ -298,33 +397,51 @@ import java.util.Objects;
 
   // Internal methods
 
+  @EnsuresNonNullIf(
+      expression = {"outputGraphInput"},
+      result = true)
+  private boolean isOutputInitialized() {
+    return outputGraphInput != null;
+  }
+
+  private long getCompositionPlayerPositionUs() {
+    long currentPositionUs = controller.getCurrentPositionUs(/* sourceEnded= */ inputStreamEnded);
+    if (currentPositionUs != CURRENT_POSITION_NOT_SET) {
+      // Reset the position to the one expected by the player.
+      currentPositionUs -= offsetToCompositionTimeUs;
+    }
+    return currentPositionUs;
+  }
+
   private boolean handleBufferInternal(ByteBuffer buffer, long presentationTimeUs, int flags) {
-    checkStateNotNull(currentInputFormat);
+    checkState(isOutputInitialized());
     checkState(!signalledEndOfStream);
-    AudioGraphInput outputGraphInput = checkNotNull(this.outputGraphInput);
+    AudioGraphInput outputGraphInput = this.outputGraphInput;
 
     @Nullable DecoderInputBuffer outputBuffer = outputGraphInput.getInputBuffer();
     if (outputBuffer == null) {
       return false;
     }
-    outputBuffer.ensureSpaceForWrite(buffer.remaining());
+    int bytesToWrite = buffer.remaining();
+    outputBuffer.ensureSpaceForWrite(bytesToWrite);
     checkNotNull(outputBuffer.data).put(buffer).flip();
+    // This is the presentation time relative to the composition.
     outputBuffer.timeUs =
         presentationTimeUs == C.TIME_END_OF_SOURCE
             ? C.TIME_END_OF_SOURCE
             : presentationTimeUs + offsetToCompositionTimeUs;
     outputBuffer.setFlags(flags);
 
-    return outputGraphInput.queueInputBuffer();
-  }
-
-  private static final class EditedMediaItemInfo {
-    public final EditedMediaItem editedMediaItem;
-    public final boolean isLastInSequence;
-
-    public EditedMediaItemInfo(EditedMediaItem editedMediaItem, boolean isLastInSequence) {
-      this.editedMediaItem = editedMediaItem;
-      this.isLastInSequence = isLastInSequence;
+    boolean bufferQueued = outputGraphInput.queueInputBuffer();
+    if (bufferQueued) {
+      checkNotNull(currentInputFormat);
+      int framesToWrite =
+          bytesToWrite
+              / getPcmFrameSize(currentInputFormat.pcmEncoding, currentInputFormat.channelCount);
+      inputPositionUs =
+          presentationTimeUs
+              + sampleCountToDurationUs(framesToWrite, currentInputFormat.sampleRate);
     }
+    return bufferQueued;
   }
 }

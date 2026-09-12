@@ -3,7 +3,7 @@
 *[Русская версия](NOTICE.ru.md)*
 
 This product is a **modified version of AndroidX Media3** (project `androidx/media`,
-tag `1.5.1`).
+tag `1.11.0`).
 
 Original code: Copyright (C) The Android Open Source Project, licensed under the
 Apache License 2.0 — full text in [`LICENSE`](LICENSE).
@@ -15,7 +15,7 @@ Apache License 2.0 terms.
 ## Statement of changes
 
 As required by section 4(b) of the Apache License 2.0, the files below were
-modified relative to upstream `1.5.1`. All changes are marked with comments in
+modified relative to upstream `1.11.0`. All changes are marked with comments in
 the code.
 
 ### Player code
@@ -41,16 +41,13 @@ the code.
 | `libraries/exoplayer/src/test/java/androidx/media3/exoplayer/PlayerAudioFadeControlCurvesTest.java` | **New file.** Curve shape tests. |
 | `.../exoplayer/CrossfadeConfigurationTest.java` | **New file.** Crossfade settings tests. |
 
+### Media3 1.11 migration
+
+`CrossfadeTrackRouting.java` is new. `MediaPeriodHolder` routes sample streams and selections together; `ExoPlayerImplInternal` integrates RendererHolder lifecycle, per-renderer queue advancement and playback-thread volume/audio focus. `PlayerAudioFadeControl` reapplies existing gains after volume changes. `CrossfadeTrackRoutingTest` and additional `MediaPeriodQueueTest.crossfade*` tests cover the new integration. See [migration details](MIGRATION-1.11.0.md).
+
 ### Build and publishing
 
-| File | Nature of changes |
-|---|---|
-| `build.gradle`, `common_library_config.gradle`, `publish.gradle` | Artifact coordinates changed from `androidx.media3` to `com.liquidmusicglass.media3`; publishing no longer depends on `lint`/`test` tasks. |
-| `missing_aar_type_workaround.gradle` | Accounts for the new artifact group. |
-| `constants.gradle` | Fork release version (`1.5.1-lmgN`). |
-| `settings.gradle` | Demo apps, testapp and test-only modules excluded: the fork builds library AARs only. |
-| `libraries/test_data` | Heavy test media assets removed. |
-| `.github/workflows/build-aars.yml` | **New file.** Builds AARs, runs the crossfade unit tests and publishes a maven repository to a GitHub Release. |
+The Kotlin DSL files in `build-logic/`, `build-logic-settings/` and the root `build.gradle.kts` use `com.liquidmusicglass.media3` for project/publication coordinates and composite dependency substitution. `settings.gradle.kts` selects library modules. `gradle/libs.versions.toml` is the fork version source. `.github/workflows/build-aars.yml` reads that version, selects the LMG tests and publishes SNAPSHOTs as CI artifacts. Upstream test media now remains in the test source set. The old Groovy build scripts were replaced by upstream Kotlin DSL.
 
 ## Origin of the crossfade implementation
 
@@ -76,3 +73,5 @@ Class packages remain `androidx.media3.*` — only the artifact coordinates
 changed. This means the fork and the original `androidx.media3` **cannot coexist**
 in one build: pulling in both fails with duplicate classes. That is intentional,
 so that substituting one for the other is visible rather than silent.
+
+PlayerAudioFadeControl update throttling uses ExoPlayer's monotonic clock. JVM regressions exercise overlap with independent deck clocks; DefaultMediaClock tests reflect the preserved LMG policy for two simultaneously enabled audio clocks.

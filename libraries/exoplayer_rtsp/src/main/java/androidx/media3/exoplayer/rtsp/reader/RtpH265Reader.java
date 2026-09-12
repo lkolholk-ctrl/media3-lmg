@@ -15,9 +15,8 @@
  */
 package androidx.media3.exoplayer.rtsp.reader;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
 import static androidx.media3.exoplayer.rtsp.reader.RtpReaderUtils.toSampleTimeUs;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import androidx.media3.common.C;
 import androidx.media3.common.ParserException;
@@ -65,11 +64,20 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
   private @C.BufferFlags int bufferFlags;
   private long firstReceivedTimestamp;
   private int previousSequenceNumber;
+  private long previousTimestamp;
 
   /** The combined size of a sample that is fragmented into multiple RTP packets. */
   private int fragmentedSampleSizeBytes;
 
   private long startTimeOffsetUs;
+
+  /**
+   * If a Fragmentation Unit is lost then following units corresponding to the same NAL unit should
+   * be discarded (RFC7798 Section 4.4.3).
+   */
+  private boolean isCurrentAccessUnitCorrupted;
+
+  private boolean isProcessingFragmentationUnit;
 
   /** Creates an instance. */
   public RtpH265Reader(RtpPayloadFormat payloadFormat) {
@@ -78,6 +86,9 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     this.payloadFormat = payloadFormat;
     firstReceivedTimestamp = C.TIME_UNSET;
     previousSequenceNumber = C.INDEX_UNSET;
+    previousTimestamp = C.TIME_UNSET;
+    isCurrentAccessUnitCorrupted = false;
+    isProcessingFragmentationUnit = false;
   }
 
   @Override
@@ -95,43 +106,67 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     if (data.getData().length == 0) {
       throw ParserException.createForMalformedManifest("Empty RTP data packet.", /* cause= */ null);
     }
-    // NAL Unit Header.type (RFC7798 Section 1.1.4).
-    int payloadType = (data.getData()[0] >> 1) & 0x3F;
+    checkNotNull(trackOutput);
 
-    checkStateNotNull(trackOutput);
-    if (payloadType >= 0 && payloadType < RTP_PACKET_TYPE_AP) {
-      processSingleNalUnitPacket(data);
-    } else if (payloadType == RTP_PACKET_TYPE_AP) {
-      // TODO: Support AggregationPacket mode.
-      throw new UnsupportedOperationException("need to implement processAggregationPacket");
-    } else if (payloadType == RTP_PACKET_TYPE_FU) {
-      processFragmentationUnitPacket(data, sequenceNumber);
-    } else {
-      throw ParserException.createForMalformedManifest(
-          String.format("RTP H265 payload type [%d] not supported.", payloadType),
-          /* cause= */ null);
+    // 1. Detect AU Boundary by timestamp change.
+    if (previousTimestamp != C.TIME_UNSET && timestamp != previousTimestamp) {
+      resetReaderStateForNewAccessUnit();
+    }
+
+    // 2. Handle Packet Processing.
+    if (!isCurrentAccessUnitCorrupted) {
+      // NAL Unit Header.type (RFC7798 Section 1.1.4).
+      int payloadType = (data.getData()[0] >> 1) & 0x3F;
+
+      // If we were processing an FU and get a non-FU packet, the FU was interrupted/corrupted.
+      if (isProcessingFragmentationUnit && payloadType != RTP_PACKET_TYPE_FU) {
+        isCurrentAccessUnitCorrupted = true;
+      }
+
+      if (!isCurrentAccessUnitCorrupted) {
+        if (payloadType >= 0 && payloadType < RTP_PACKET_TYPE_AP) {
+          processSingleNalUnitPacket(data);
+        } else if (payloadType == RTP_PACKET_TYPE_AP) {
+          processAggregationPacket(data);
+        } else if (payloadType == RTP_PACKET_TYPE_FU) {
+          processFragmentationUnitPacket(data, sequenceNumber);
+        } else {
+          throw ParserException.createForMalformedManifest(
+              Util.formatInvariant("RTP H265 payload type [%d] not supported.", payloadType),
+              /* cause= */ null);
+        }
+      }
+    }
+
+    // 3. Metadata and State Update.
+    if (firstReceivedTimestamp == C.TIME_UNSET) {
+      firstReceivedTimestamp = timestamp;
     }
 
     if (rtpMarker) {
-      if (firstReceivedTimestamp == C.TIME_UNSET) {
-        firstReceivedTimestamp = timestamp;
+      if (!isCurrentAccessUnitCorrupted) {
+        long timeUs =
+            toSampleTimeUs(
+                startTimeOffsetUs, timestamp, firstReceivedTimestamp, MEDIA_CLOCK_FREQUENCY);
+        trackOutput.sampleMetadata(
+            timeUs,
+            bufferFlags,
+            fragmentedSampleSizeBytes,
+            /* offset= */ 0,
+            /* cryptoData= */ null);
       }
-
-      long timeUs =
-          toSampleTimeUs(
-              startTimeOffsetUs, timestamp, firstReceivedTimestamp, MEDIA_CLOCK_FREQUENCY);
-      trackOutput.sampleMetadata(
-          timeUs, bufferFlags, fragmentedSampleSizeBytes, /* offset= */ 0, /* cryptoData= */ null);
-      fragmentedSampleSizeBytes = 0;
+      resetReaderStateForNewAccessUnit();
     }
 
+    previousTimestamp = timestamp;
     previousSequenceNumber = sequenceNumber;
   }
 
   @Override
   public void seek(long nextRtpTimestamp, long timeUs) {
     firstReceivedTimestamp = nextRtpTimestamp;
-    fragmentedSampleSizeBytes = 0;
+    previousTimestamp = C.TIME_UNSET;
+    resetReaderStateForNewAccessUnit();
     startTimeOffsetUs = timeUs;
   }
 
@@ -165,6 +200,68 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
     int nalHeaderType = (data.getData()[0] >> 1) & 0x3F;
     bufferFlags = getBufferFlagsFromNalType(nalHeaderType);
+  }
+
+  /**
+   * Processes Aggregation packet (RFC7798 Section 4.4.2).
+   *
+   * <p>Outputs 2 or more NAL Unit (with start code prepended) to {@link #trackOutput}. Sets {@link
+   * #bufferFlags} and {@link #fragmentedSampleSizeBytes} accordingly.
+   */
+  @RequiresNonNull("trackOutput")
+  private void processAggregationPacket(ParsableByteArray data) throws ParserException {
+    //  The structure of an Aggregation Packet.
+    //    0                   1                   2                   3
+    //    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    //   |    PayloadHdr (Type=48)       |                               |
+    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
+    //   |                                                               |
+    //   |             two or more aggregation units                     |
+    //   |                                                               |
+    //   |                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    //   |                               :...OPTIONAL RTP padding        |
+    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+    // The structure of aggregation unit
+    //   0                   1                   2                   3
+    //   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    //                   :       DONL (conditional)      |   NALU size   |
+    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    //   |   NALU size   |                                               |
+    //   +-+-+-+-+-+-+-+-+         NAL unit                              |
+    //   |                                                               |
+    //   |                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    //   |                               :
+    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+    // Since sprop-max-don-diff != 0 is not supported, DONL won't present in the packet.
+
+    int nalUnitsCount = 0;
+    data.setPosition(2); // skipping payload header (2 bytes)
+    while (data.bytesLeft() > 2) {
+      int nalUnitSize = data.readUnsignedShort(); // 2 bytes of NAL unit size
+      int nalHeaderType = NalUnitUtil.getH265NalUnitType(data.getData(), data.getPosition() - 3);
+      if (data.bytesLeft() < nalUnitSize) {
+        throw ParserException.createForMalformedManifest(
+            "Malformed Aggregation Packet. NAL unit size exceeds packet size.", /* cause= */ null);
+      }
+
+      fragmentedSampleSizeBytes += writeStartCode();
+      trackOutput.sampleData(data, nalUnitSize);
+      fragmentedSampleSizeBytes += nalUnitSize;
+      bufferFlags |= getBufferFlagsFromNalType(nalHeaderType);
+      nalUnitsCount++;
+    }
+    if (data.bytesLeft() > 0) {
+      throw ParserException.createForMalformedManifest(
+          "Malformed Aggregation Packet. Packet size exceeds NAL unit size.", /* cause= */ null);
+    }
+    if (nalUnitsCount < 2) {
+      throw ParserException.createForMalformedManifest(
+          "Aggregation Packet must contain at least 2 NAL units.", /* cause= */ null);
+    }
   }
 
   /**
@@ -216,6 +313,12 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     boolean isLastFuPacket = (fuHeader & 0x40) > 0;
 
     if (isFirstFuPacket) {
+      if (isProcessingFragmentationUnit) {
+        // Interruption: A new FU started before the previous one finished.
+        isCurrentAccessUnitCorrupted = true;
+        fragmentedSampleSizeBytes = 0;
+      }
+      isProcessingFragmentationUnit = true;
       // Prepends starter code.
       fragmentedSampleSizeBytes += writeStartCode();
 
@@ -224,14 +327,18 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
       // RTP byte 1: repurposed as HEVC HALU byte 0, copy NALU type.
       // RTP Byte 2: repurposed as HEVC HALU byte 1, layerId required to be zero, copying only tid.
       // Set data position from byte 1 as byte 0 is ignored.
-      data.getData()[1] = (byte) ((nalUnitType << 1) & 0x7F);
-      data.getData()[2] = (byte) tid;
-      fuScratchBuffer.reset(data.getData());
+      fuScratchBuffer.reset(data.getData().clone());
+      fuScratchBuffer.getData()[1] = (byte) ((nalUnitType << 1) & 0x7F);
+      fuScratchBuffer.getData()[2] = (byte) tid;
       fuScratchBuffer.setPosition(1);
     } else {
+      if (isCurrentAccessUnitCorrupted) {
+        return;
+      }
       // Check that this packet is in the sequence of the previous packet.
       int expectedSequenceNumber = (previousSequenceNumber + 1) % RtpPacket.MAX_SEQUENCE_NUMBER;
       if (packetSequenceNumber != expectedSequenceNumber) {
+        isCurrentAccessUnitCorrupted = true;
         Log.w(
             TAG,
             Util.formatInvariant(
@@ -251,8 +358,16 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     fragmentedSampleSizeBytes += fragmentSize;
 
     if (isLastFuPacket) {
+      isProcessingFragmentationUnit = false;
       bufferFlags = getBufferFlagsFromNalType(nalUnitType);
     }
+  }
+
+  private void resetReaderStateForNewAccessUnit() {
+    isCurrentAccessUnitCorrupted = false;
+    isProcessingFragmentationUnit = false;
+    fragmentedSampleSizeBytes = 0;
+    bufferFlags = 0;
   }
 
   private int writeStartCode() {

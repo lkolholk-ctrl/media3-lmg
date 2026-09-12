@@ -15,16 +15,16 @@
  */
 package androidx.media3.exoplayer.hls;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
 import static androidx.media3.extractor.ts.TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.annotation.SuppressLint;
 import android.net.Uri;
 import android.text.TextUtils;
 import androidx.annotation.Nullable;
+import androidx.media3.common.C;
 import androidx.media3.common.FileTypes;
 import androidx.media3.common.Format;
-import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.util.TimestampAdjuster;
 import androidx.media3.common.util.UnstableApi;
@@ -71,6 +71,7 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
 
   private SubtitleParser.Factory subtitleParserFactory;
   private boolean parseSubtitlesDuringExtraction;
+  private @C.VideoCodecFlags int codecsToParseWithinGopSampleDependencies;
 
   private final boolean exposeCea608WhenMissingDeclarations;
 
@@ -81,6 +82,7 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
    */
   public DefaultHlsExtractorFactory() {
     this(/* payloadReaderFactoryFlags= */ 0, /* exposeCea608WhenMissingDeclarations */ true);
+    codecsToParseWithinGopSampleDependencies = C.VIDEO_CODEC_FLAG_H264 | C.VIDEO_CODEC_FLAG_H265;
   }
 
   /**
@@ -179,6 +181,14 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
     return this;
   }
 
+  @CanIgnoreReturnValue
+  @Override
+  public DefaultHlsExtractorFactory experimentalSetCodecsToParseWithinGopSampleDependencies(
+      @C.VideoCodecFlags int codecsToParseWithinGopSampleDependencies) {
+    this.codecsToParseWithinGopSampleDependencies = codecsToParseWithinGopSampleDependencies;
+    return this;
+  }
+
   /**
    * {@inheritDoc}
    *
@@ -241,8 +251,8 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
             subtitleParserFactory,
             parseSubtitlesDuringExtraction,
             timestampAdjuster,
-            format,
-            muxedCaptionFormats);
+            muxedCaptionFormats,
+            codecsToParseWithinGopSampleDependencies);
       case FileTypes.TS:
         return createTsExtractor(
             payloadReaderFactoryFlags,
@@ -255,6 +265,7 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
       default:
         return null;
     }
+    // LINT.ThenChange(BundledHlsMediaChunkExtractor.java:extractor_instantiation)
   }
 
   private static TsExtractor createTsExtractor(
@@ -311,16 +322,16 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
       SubtitleParser.Factory subtitleParserFactory,
       boolean parseSubtitlesDuringExtraction,
       TimestampAdjuster timestampAdjuster,
-      Format format,
-      @Nullable List<Format> muxedCaptionFormats) {
-    // Only enable the EMSG TrackOutput if this is the 'variant' track (i.e. the main one) to avoid
-    // creating a separate EMSG track for every audio track in a video stream.
-    @FragmentedMp4Extractor.Flags
-    int flags = isFmp4Variant(format) ? FragmentedMp4Extractor.FLAG_ENABLE_EMSG_TRACK : 0;
+      @Nullable List<Format> muxedCaptionFormats,
+      @C.VideoCodecFlags int codecsToParseWithinGopSampleDependencies) {
+    @FragmentedMp4Extractor.Flags int flags = FragmentedMp4Extractor.FLAG_ENABLE_EMSG_TRACK;
     if (!parseSubtitlesDuringExtraction) {
       subtitleParserFactory = SubtitleParser.Factory.UNSUPPORTED;
       flags |= FragmentedMp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA;
     }
+    flags |=
+        FragmentedMp4Extractor.codecsToParseWithinGopSampleDependenciesAsFlags(
+            codecsToParseWithinGopSampleDependencies);
     return new FragmentedMp4Extractor(
         subtitleParserFactory,
         flags,
@@ -328,21 +339,6 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
         /* sideloadedTrack= */ null,
         muxedCaptionFormats != null ? muxedCaptionFormats : ImmutableList.of(),
         /* additionalEmsgTrackOutput= */ null);
-  }
-
-  /** Returns true if this {@code format} represents a 'variant' track (i.e. the main one). */
-  private static boolean isFmp4Variant(Format format) {
-    Metadata metadata = format.metadata;
-    if (metadata == null) {
-      return false;
-    }
-    for (int i = 0; i < metadata.length(); i++) {
-      Metadata.Entry entry = metadata.get(i);
-      if (entry instanceof HlsTrackMetadataEntry) {
-        return !((HlsTrackMetadataEntry) entry).variantInfos.isEmpty();
-      }
-    }
-    return false;
   }
 
   private static boolean sniffQuietly(Extractor extractor, ExtractorInput input)

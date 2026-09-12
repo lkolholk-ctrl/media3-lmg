@@ -15,11 +15,12 @@
  */
 package androidx.media3.extractor.mp4;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.common.util.Util.castNonNull;
 import static androidx.media3.common.util.Util.nullSafeArrayCopy;
 import static androidx.media3.extractor.mp4.BoxParser.parseTraks;
+import static androidx.media3.extractor.mp4.MimeTypeResolver.getContainerMimeType;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.max;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
@@ -31,6 +32,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.DrmInitData;
 import androidx.media3.common.DrmInitData.SchemeData;
 import androidx.media3.common.Format;
+import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
 import androidx.media3.common.util.Log;
@@ -42,10 +44,12 @@ import androidx.media3.container.Mp4Box;
 import androidx.media3.container.Mp4Box.ContainerBox;
 import androidx.media3.container.Mp4Box.LeafBox;
 import androidx.media3.container.NalUnitUtil;
-import androidx.media3.container.ReorderingSeiMessageQueue;
+import androidx.media3.container.ReorderingBufferQueue;
 import androidx.media3.extractor.Ac4Util;
 import androidx.media3.extractor.CeaUtil;
 import androidx.media3.extractor.ChunkIndex;
+import androidx.media3.extractor.ChunkIndexMerger;
+import androidx.media3.extractor.DtsUtil;
 import androidx.media3.extractor.Extractor;
 import androidx.media3.extractor.ExtractorInput;
 import androidx.media3.extractor.ExtractorOutput;
@@ -53,7 +57,9 @@ import androidx.media3.extractor.ExtractorsFactory;
 import androidx.media3.extractor.GaplessInfoHolder;
 import androidx.media3.extractor.PositionHolder;
 import androidx.media3.extractor.SeekMap;
+import androidx.media3.extractor.SeekPoint;
 import androidx.media3.extractor.SniffFailure;
+import androidx.media3.extractor.TrackAwareSeekMap;
 import androidx.media3.extractor.TrackOutput;
 import androidx.media3.extractor.metadata.emsg.EventMessage;
 import androidx.media3.extractor.metadata.emsg.EventMessageEncoder;
@@ -90,7 +96,9 @@ public class FragmentedMp4Extractor implements Extractor {
    * Flags controlling the behavior of the extractor. Possible flag values are {@link
    * #FLAG_WORKAROUND_EVERY_VIDEO_FRAME_IS_SYNC_FRAME}, {@link #FLAG_WORKAROUND_IGNORE_TFDT_BOX},
    * {@link #FLAG_ENABLE_EMSG_TRACK}, {@link #FLAG_WORKAROUND_IGNORE_EDIT_LISTS}, {@link
-   * #FLAG_EMIT_RAW_SUBTITLE_DATA} and {@link #FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES}.
+   * #FLAG_EMIT_RAW_SUBTITLE_DATA}, {@link #FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES}, {@link
+   * #FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265}, {@link #FLAG_MERGE_FRAGMENTED_SIDX} and {@link
+   * #FLAG_READ_MFRA_FOR_SEEK_MAP}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -103,7 +111,11 @@ public class FragmentedMp4Extractor implements Extractor {
         FLAG_ENABLE_EMSG_TRACK,
         FLAG_WORKAROUND_IGNORE_EDIT_LISTS,
         FLAG_EMIT_RAW_SUBTITLE_DATA,
-        FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES
+        FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES,
+        FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265,
+        FLAG_MERGE_FRAGMENTED_SIDX,
+        FLAG_READ_MFRA_FOR_SEEK_MAP,
+        FLAG_DISABLE_ARTWORK_METADATA
       })
   public @interface Flags {}
 
@@ -136,7 +148,7 @@ public class FragmentedMp4Extractor implements Extractor {
 
   /**
    * Flag to extract additional sample dependency information, and mark output buffers with {@link
-   * C#BUFFER_FLAG_NOT_DEPENDED_ON}.
+   * C#BUFFER_FLAG_NOT_DEPENDED_ON} for {@linkplain MimeTypes#VIDEO_H264 H.264} video.
    *
    * <p>This class always marks the samples at the start of each group of picture (GOP) with {@link
    * C#BUFFER_FLAG_KEY_FRAME}. Usually, key frames can be decoded independently, without depending
@@ -145,14 +157,25 @@ public class FragmentedMp4Extractor implements Extractor {
    * <p>Setting this flag enables elementary stream parsing to identify disposable samples that are
    * not depended on by other samples. Any disposable sample can be safely omitted, and the rest of
    * the track will remain valid.
-   *
-   * <p>Supported formats are:
-   *
-   * <ul>
-   *   <li>{@linkplain MimeTypes#VIDEO_H264 H.264}
-   * </ul>
    */
   public static final int FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES = 1 << 6; // 64
+
+  /**
+   * Flag to extract additional sample dependency information, and mark output buffers with {@link
+   * C#BUFFER_FLAG_NOT_DEPENDED_ON} for {@linkplain MimeTypes#VIDEO_H265 H.265} video.
+   *
+   * <p>See {@link #FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES}.
+   */
+  public static final int FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265 = 1 << 7;
+
+  /** Flag to enable reading and merging of all sidx boxes before continuing extraction. */
+  public static final int FLAG_MERGE_FRAGMENTED_SIDX = 1 << 8;
+
+  /** Flag to enable reading the 'mfra' box for seeking in fragmented MP4s. */
+  public static final int FLAG_READ_MFRA_FOR_SEEK_MAP = 1 << 9;
+
+  /** Flag to disable parsing of artwork metadata. */
+  public static final int FLAG_DISABLE_ARTWORK_METADATA = 1 << 10;
 
   /**
    * @deprecated Use {@link #newFactory(SubtitleParser.Factory)} instead.
@@ -184,6 +207,10 @@ public class FragmentedMp4Extractor implements Extractor {
   private static final int STATE_READING_ENCRYPTION_DATA = 2;
   private static final int STATE_READING_SAMPLE_START = 3;
   private static final int STATE_READING_SAMPLE_CONTINUE = 4;
+  private static final int STATE_READING_MFRO = 5;
+  private static final int STATE_READING_MFRA = 6;
+
+  private static final int MFRO_FIXED_BOX_SIZE = 16;
 
   private final SubtitleParser.Factory subtitleParserFactory;
   private final @Flags int flags;
@@ -198,7 +225,7 @@ public class FragmentedMp4Extractor implements Extractor {
   // Temporary arrays.
   private final ParsableByteArray nalStartCode;
   private final ParsableByteArray nalPrefix;
-  private final ParsableByteArray nalBuffer;
+  private final ParsableByteArray nalUnitWithoutHeaderBuffer;
   private final byte[] scratchBytes;
   private final ParsableByteArray scratch;
 
@@ -211,8 +238,10 @@ public class FragmentedMp4Extractor implements Extractor {
   private final ParsableByteArray atomHeader;
   private final ArrayDeque<ContainerBox> containerAtoms;
   private final ArrayDeque<MetadataSampleInfo> pendingMetadataSampleInfos;
-  private final ReorderingSeiMessageQueue reorderingSeiMessageQueue;
+  private final ReorderingBufferQueue reorderingBufferQueue;
   @Nullable private final TrackOutput additionalEmsgTrackOutput;
+
+  private final ChunkIndexMerger chunkIndexMerger;
 
   private ImmutableList<SniffFailure> lastSniffFailures;
   private int parserState;
@@ -240,6 +269,13 @@ public class FragmentedMp4Extractor implements Extractor {
 
   // Whether extractorOutput.seekMap has been called.
   private boolean haveOutputSeekMap;
+
+  // Whether the upfront forward scan for sidx boxes (triggered by FLAG_MERGE_FRAGMENTED_SIDX) has
+  // successfully completed and output the merged seek map.
+  private boolean upfrontSidxScanComplete;
+
+  private long seekPositionBeforeSidxProcessing;
+  private long seekPositionBeforeMfraProcessing;
 
   /**
    * @deprecated Use {@link #FragmentedMp4Extractor(SubtitleParser.Factory)} instead
@@ -405,8 +441,8 @@ public class FragmentedMp4Extractor implements Extractor {
     eventMessageEncoder = new EventMessageEncoder();
     atomHeader = new ParsableByteArray(Mp4Box.LONG_HEADER_SIZE);
     nalStartCode = new ParsableByteArray(NalUnitUtil.NAL_START_CODE);
-    nalPrefix = new ParsableByteArray(5);
-    nalBuffer = new ParsableByteArray();
+    nalPrefix = new ParsableByteArray(6);
+    nalUnitWithoutHeaderBuffer = new ParsableByteArray();
     scratchBytes = new byte[16];
     scratch = new ParsableByteArray(scratchBytes);
     containerAtoms = new ArrayDeque<>();
@@ -419,10 +455,30 @@ public class FragmentedMp4Extractor implements Extractor {
     extractorOutput = ExtractorOutput.PLACEHOLDER;
     emsgTrackOutputs = new TrackOutput[0];
     ceaTrackOutputs = new TrackOutput[0];
-    reorderingSeiMessageQueue =
-        new ReorderingSeiMessageQueue(
-            (presentationTimeUs, seiBuffer) ->
-                CeaUtil.consume(presentationTimeUs, seiBuffer, ceaTrackOutputs));
+    reorderingBufferQueue =
+        new ReorderingBufferQueue(
+            (presentationTimeUs, buffer) ->
+                CeaUtil.consume(presentationTimeUs, buffer, ceaTrackOutputs));
+    chunkIndexMerger = new ChunkIndexMerger();
+    seekPositionBeforeSidxProcessing = C.INDEX_UNSET;
+    seekPositionBeforeMfraProcessing = C.INDEX_UNSET;
+  }
+
+  /**
+   * Returns {@link Flags} denoting if an extractor should parse within GOP sample dependencies.
+   *
+   * @param videoCodecFlags The set of codecs for which to parse within GOP sample dependencies.
+   */
+  public static @Flags int codecsToParseWithinGopSampleDependenciesAsFlags(
+      @C.VideoCodecFlags int videoCodecFlags) {
+    @Flags int flags = 0;
+    if ((videoCodecFlags & C.VIDEO_CODEC_FLAG_H264) != 0) {
+      flags |= FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES;
+    }
+    if ((videoCodecFlags & C.VIDEO_CODEC_FLAG_H265) != 0) {
+      flags |= FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265;
+    }
+    return flags;
   }
 
   @Override
@@ -446,6 +502,8 @@ public class FragmentedMp4Extractor implements Extractor {
     enterReadingAtomHeaderState();
     initExtraTracks();
     if (sideloadedTrack != null) {
+      Format.Builder formatBuilder = sideloadedTrack.format.buildUpon();
+      formatBuilder.setContainerMimeType(getContainerMimeType(sideloadedTrack.format));
       TrackBundle bundle =
           new TrackBundle(
               extractorOutput.track(0, sideloadedTrack.type),
@@ -456,12 +514,16 @@ public class FragmentedMp4Extractor implements Extractor {
                   /* maximumSize= */ 0,
                   /* timestampsUs= */ new long[0],
                   /* flags= */ new int[0],
-                  /* durationUs= */ 0),
+                  /* syncSampleIndices= */ new int[0],
+                  /* hasOnlySyncSamples= */ false,
+                  /* durationUs= */ 0,
+                  /* sampleCount= */ 0),
               new DefaultSampleValues(
                   /* sampleDescriptionIndex= */ 0,
                   /* duration= */ 0,
                   /* size= */ 0,
-                  /* flags= */ 0));
+                  /* flags= */ 0),
+              formatBuilder.build());
       trackBundles.put(0, bundle);
       extractorOutput.endTracks();
     }
@@ -475,9 +537,10 @@ public class FragmentedMp4Extractor implements Extractor {
     }
     pendingMetadataSampleInfos.clear();
     pendingMetadataSampleBytes = 0;
-    reorderingSeiMessageQueue.flush();
+    reorderingBufferQueue.clear();
     pendingSeekTimeUs = timeUs;
     containerAtoms.clear();
+    seekPositionBeforeMfraProcessing = C.INDEX_UNSET;
     enterReadingAtomHeaderState();
   }
 
@@ -491,9 +554,32 @@ public class FragmentedMp4Extractor implements Extractor {
     while (true) {
       switch (parserState) {
         case STATE_READING_ATOM_HEADER:
-          if (!readAtomHeader(input)) {
-            reorderingSeiMessageQueue.flush();
-            return Extractor.RESULT_END_OF_INPUT;
+          if (!readAtomHeader(input, seekPosition)) {
+            if (seekPositionBeforeSidxProcessing != C.INDEX_UNSET) {
+              seekPosition.position = seekPositionBeforeSidxProcessing;
+              seekPositionBeforeSidxProcessing = C.INDEX_UNSET;
+              extractorOutput.seekMap(chunkIndexMerger.merge());
+              upfrontSidxScanComplete = true;
+              return Extractor.RESULT_SEEK;
+            } else {
+              reorderingBufferQueue.flush();
+              return Extractor.RESULT_END_OF_INPUT;
+            }
+          }
+          if (parserState == STATE_READING_MFRO) {
+            return Extractor.RESULT_SEEK;
+          }
+          break;
+        case STATE_READING_MFRO:
+          readMfro(input, seekPosition);
+          if (parserState == STATE_READING_MFRA || parserState == STATE_READING_ATOM_HEADER) {
+            return Extractor.RESULT_SEEK;
+          }
+          break;
+        case STATE_READING_MFRA:
+          readMfra(input, seekPosition);
+          if (parserState == STATE_READING_ATOM_HEADER) {
+            return Extractor.RESULT_SEEK;
           }
           break;
         case STATE_READING_ATOM_PAYLOAD:
@@ -515,7 +601,8 @@ public class FragmentedMp4Extractor implements Extractor {
     atomHeaderBytesRead = 0;
   }
 
-  private boolean readAtomHeader(ExtractorInput input) throws IOException {
+  private boolean readAtomHeader(ExtractorInput input, PositionHolder seekPosition)
+      throws IOException {
     if (atomHeaderBytesRead == 0) {
       // Read the standard length atom header.
       if (!input.readFully(atomHeader.getData(), 0, Mp4Box.HEADER_SIZE, true)) {
@@ -546,16 +633,48 @@ public class FragmentedMp4Extractor implements Extractor {
     }
 
     if (atomSize < atomHeaderBytesRead) {
-      throw ParserException.createForUnsupportedContainerFeature(
-          "Atom size less than header length (unsupported).");
+      if (atomType == Mp4Box.TYPE_free && atomHeaderBytesRead == Mp4Box.HEADER_SIZE) {
+        // Workaround for writers that could create a malformed 'free' box with a size less than
+        // its header, causing file corruption. [See internal: b/438187097].
+        atomSize = atomHeaderBytesRead;
+      } else {
+        throw ParserException.createForUnsupportedContainerFeature(
+            "Atom size less than header length (unsupported).");
+      }
+    }
+
+    if (seekPositionBeforeSidxProcessing != C.INDEX_UNSET) {
+      if (atomType == Mp4Box.TYPE_sidx) {
+        scratch.reset((int) atomSize);
+        System.arraycopy(atomHeader.getData(), 0, scratch.getData(), 0, Mp4Box.HEADER_SIZE);
+        input.readFully(
+            scratch.getData(), Mp4Box.HEADER_SIZE, (int) (atomSize - atomHeaderBytesRead));
+
+        LeafBox sidxBox = new LeafBox(Mp4Box.TYPE_sidx, scratch);
+        Pair<Long, ChunkIndex> result = parseSidx(sidxBox.data, input.getPeekPosition());
+        chunkIndexMerger.add(result.second);
+      } else {
+        input.skipFully((int) (atomSize - atomHeaderBytesRead), /* allowEndOfInput= */ true);
+      }
+      enterReadingAtomHeaderState();
+      return true;
     }
 
     long atomPosition = input.getPosition() - atomHeaderBytesRead;
     if (atomType == Mp4Box.TYPE_moof || atomType == Mp4Box.TYPE_mdat) {
       if (!haveOutputSeekMap) {
         // This must be the first moof or mdat in the stream.
-        extractorOutput.seekMap(new SeekMap.Unseekable(durationUs, atomPosition));
-        haveOutputSeekMap = true;
+        if (input.getLength() != C.LENGTH_UNSET
+            && seekPositionBeforeMfraProcessing == C.INDEX_UNSET
+            && (flags & FLAG_READ_MFRA_FOR_SEEK_MAP) != 0) {
+          seekPositionBeforeMfraProcessing = atomPosition;
+          seekPosition.position = input.getLength() - MFRO_FIXED_BOX_SIZE;
+          parserState = STATE_READING_MFRO;
+          return true;
+        } else {
+          extractorOutput.seekMap(new SeekMap.Unseekable(durationUs, atomPosition));
+          haveOutputSeekMap = true;
+        }
       }
     }
 
@@ -579,6 +698,9 @@ public class FragmentedMp4Extractor implements Extractor {
 
     if (shouldParseContainerAtom(atomType)) {
       long endPosition = input.getPosition() + atomSize - Mp4Box.HEADER_SIZE;
+      if (atomSize != atomHeaderBytesRead && atomType == Mp4Box.TYPE_meta) {
+        maybeSkipRemainingMetaAtomHeaderBytes(input);
+      }
       containerAtoms.push(new ContainerBox(atomType, endPosition));
       if (atomSize == atomHeaderBytesRead) {
         processAtomEnded(endPosition);
@@ -611,12 +733,20 @@ public class FragmentedMp4Extractor implements Extractor {
     return true;
   }
 
+  private void maybeSkipRemainingMetaAtomHeaderBytes(ExtractorInput input) throws IOException {
+    scratch.reset(Mp4Box.HEADER_SIZE);
+    input.peekFully(scratch.getData(), 0, Mp4Box.HEADER_SIZE);
+    BoxParser.maybeSkipRemainingMetaBoxHeaderBytes(scratch);
+    input.skipFully(scratch.getPosition());
+    input.resetPeekPosition();
+  }
+
   private void readAtomPayload(ExtractorInput input) throws IOException {
-    int atomPayloadSize = (int) atomSize - atomHeaderBytesRead;
+    int atomPayloadSize = (int) (atomSize - atomHeaderBytesRead);
     @Nullable ParsableByteArray atomData = this.atomData;
     if (atomData != null) {
       input.readFully(atomData.getData(), Mp4Box.HEADER_SIZE, atomPayloadSize);
-      onLeafAtomRead(new LeafBox(atomType, atomData), input.getPosition());
+      onLeafAtomRead(new LeafBox(atomType, atomData), input);
     } else {
       input.skipFully(atomPayloadSize);
     }
@@ -630,14 +760,23 @@ public class FragmentedMp4Extractor implements Extractor {
     enterReadingAtomHeaderState();
   }
 
-  private void onLeafAtomRead(LeafBox leaf, long inputPosition) throws ParserException {
+  private void onLeafAtomRead(LeafBox leaf, ExtractorInput input) throws IOException {
     if (!containerAtoms.isEmpty()) {
       containerAtoms.peek().add(leaf);
     } else if (leaf.type == Mp4Box.TYPE_sidx) {
-      Pair<Long, ChunkIndex> result = parseSidx(leaf.data, inputPosition);
+      Pair<Long, ChunkIndex> result = parseSidx(leaf.data, input.getPosition());
+      chunkIndexMerger.add(result.second);
       segmentIndexEarliestPresentationTimeUs = result.first;
-      extractorOutput.seekMap(result.second);
-      haveOutputSeekMap = true;
+      if (!upfrontSidxScanComplete) {
+        extractorOutput.seekMap(
+            chunkIndexMerger.size() == 1 ? result.second : chunkIndexMerger.merge());
+        haveOutputSeekMap = true;
+      }
+      if ((flags & FLAG_MERGE_FRAGMENTED_SIDX) != 0
+          && !upfrontSidxScanComplete
+          && chunkIndexMerger.size() > 1) {
+        seekPositionBeforeSidxProcessing = input.getPosition();
+      }
     } else if (leaf.type == Mp4Box.TYPE_emsg) {
       onEmsgLeafAtomRead(leaf.data);
     }
@@ -673,37 +812,82 @@ public class FragmentedMp4Extractor implements Extractor {
       }
     }
 
+    @Nullable Metadata mdtaMetadata = null;
+    @Nullable Mp4Box.ContainerBox meta = moov.getContainerBoxOfType(Mp4Box.TYPE_meta);
+    if (meta != null) {
+      mdtaMetadata = BoxParser.parseMdtaFromMeta(meta);
+    }
+    GaplessInfoHolder gaplessInfoHolder = new GaplessInfoHolder();
+    @Nullable Metadata udtaMetadata = null;
+    @Nullable Mp4Box.LeafBox udta = moov.getLeafBoxOfType(Mp4Box.TYPE_udta);
+    if (udta != null) {
+      udtaMetadata =
+          BoxParser.parseUdta(
+              udta, /* ignoreArtwork= */ (flags & FLAG_DISABLE_ARTWORK_METADATA) != 0);
+      gaplessInfoHolder.setFromMetadata(udtaMetadata);
+    }
+    Metadata mvhdMetadata =
+        new Metadata(
+            BoxParser.parseMvhd(checkNotNull(moov.getLeafBoxOfType(Mp4Box.TYPE_mvhd)).data));
+
     // Construction of tracks and sample tables.
     List<TrackSampleTable> sampleTables =
         parseTraks(
             moov,
-            new GaplessInfoHolder(),
+            gaplessInfoHolder,
             duration,
             drmInitData,
             /* ignoreEditLists= */ (flags & FLAG_WORKAROUND_IGNORE_EDIT_LISTS) != 0,
             /* isQuickTime= */ false,
-            this::modifyTrack);
+            this::modifyTrack,
+            /* omitTrackSampleTable= */ false);
 
     int trackCount = sampleTables.size();
     if (trackBundles.size() == 0) {
       // We need to create the track bundles.
+      String containerMimeType = getContainerMimeType(sampleTables);
       for (int i = 0; i < trackCount; i++) {
         TrackSampleTable sampleTable = sampleTables.get(i);
         Track track = sampleTable.track;
+        if (!track.shouldBeExposed) {
+          continue;
+        }
+        TrackOutput output = extractorOutput.track(i, track.type);
+        output.durationUs(track.durationUs);
+        Format.Builder formatBuilder = track.format.buildUpon();
+        formatBuilder.setContainerMimeType(containerMimeType);
+        MetadataUtil.setFormatGaplessInfo(track.type, gaplessInfoHolder, formatBuilder);
+        MetadataUtil.setFormatMetadata(
+            track.type,
+            mdtaMetadata,
+            formatBuilder,
+            track.format.metadata,
+            udtaMetadata,
+            mvhdMetadata);
         TrackBundle trackBundle =
             new TrackBundle(
-                extractorOutput.track(i, track.type),
+                output,
                 sampleTable,
-                getDefaultSampleValues(defaultSampleValuesArray, track.id));
+                getDefaultSampleValues(defaultSampleValuesArray, track.id),
+                formatBuilder.build());
         trackBundles.put(track.id, trackBundle);
         durationUs = max(durationUs, track.durationUs);
       }
       extractorOutput.endTracks();
     } else {
-      checkState(trackBundles.size() == trackCount);
+      int exposedTrackCount = 0;
+      for (int i = 0; i < trackCount; i++) {
+        if (sampleTables.get(i).track.shouldBeExposed) {
+          exposedTrackCount++;
+        }
+      }
+      checkState(trackBundles.size() == exposedTrackCount);
       for (int i = 0; i < trackCount; i++) {
         TrackSampleTable sampleTable = sampleTables.get(i);
         Track track = sampleTable.track;
+        if (!track.shouldBeExposed) {
+          continue;
+        }
         trackBundles
             .get(track.id)
             .reset(sampleTable, getDefaultSampleValues(defaultSampleValuesArray, track.id));
@@ -1142,18 +1326,19 @@ public class FragmentedMp4Extractor implements Extractor {
     // duration == 0 or (editListDurationUs + editListMediaTimeUs) >= track duration.
     // Other uses of edit lists are uncommon and unsupported.
     if (track.editListDurations == null
-        || track.editListDurations.length != 1
+        || track.editListDurations.length() != 1
         || track.editListMediaTimes == null) {
       return false;
     }
-    if (track.editListDurations[0] == 0) {
+    if (track.editListDurations.get(0) == 0) {
       return true;
     }
     long editListDurationUs =
         Util.scaleLargeTimestamp(
-            track.editListDurations[0], C.MICROS_PER_SECOND, track.movieTimescale);
+            track.editListDurations.get(0), C.MICROS_PER_SECOND, track.movieTimescale);
     long editListMediaTimeUs =
-        Util.scaleLargeTimestamp(track.editListMediaTimes[0], C.MICROS_PER_SECOND, track.timescale);
+        Util.scaleLargeTimestamp(
+            track.editListMediaTimes.get(0), C.MICROS_PER_SECOND, track.timescale);
     return editListDurationUs + editListMediaTimeUs >= track.durationUs;
   }
 
@@ -1206,7 +1391,7 @@ public class FragmentedMp4Extractor implements Extractor {
 
     // Currently we only support a single edit that moves the entire media timeline.
     if (isEdtsListDurationForEntireMediaTimeline(track)) {
-      edtsOffset = castNonNull(track.editListMediaTimes)[0];
+      edtsOffset = castNonNull(track.editListMediaTimes).get(0);
     }
 
     int[] sampleSizeTable = fragment.sampleSizeTable;
@@ -1353,17 +1538,16 @@ public class FragmentedMp4Extractor implements Extractor {
     sgpd.setPosition(Mp4Box.HEADER_SIZE);
     int sgpdVersion = BoxParser.parseFullBoxVersion(sgpd.readInt());
     sgpd.skipBytes(4); // grouping_type == seig.
-    if (sgpdVersion == 1) {
-      if (sgpd.readUnsignedInt() == 0) {
-        throw ParserException.createForUnsupportedContainerFeature(
-            "Variable length description in sgpd found (unsupported)");
-      }
-    } else if (sgpdVersion >= 2) {
+    long defaultLength = sgpdVersion >= 1 ? sgpd.readUnsignedInt() : 0;
+    if (sgpdVersion >= 2) {
       sgpd.skipBytes(4); // default_sample_description_index.
     }
     if (sgpd.readUnsignedInt() != 1) { // entry_count.
       throw ParserException.createForUnsupportedContainerFeature(
           "Entry count in sgpd != 1 (unsupported).");
+    }
+    if (sgpdVersion >= 1 && defaultLength == 0) {
+      sgpd.skipBytes(4); // description_length.
     }
 
     // CencSampleEncryptionInformationGroupEntry
@@ -1533,12 +1717,10 @@ public class FragmentedMp4Extractor implements Extractor {
     if (parserState == STATE_READING_SAMPLE_START) {
       sampleSize = trackBundle.getCurrentSampleSize();
       // We must check all NAL units in the Fragmented MP4 sample for dependencies.
-      // When FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES is unset, or codec is not supported,
+      // When reading sample dependencies is disabled, or codec is not supported,
       // set isSampleDependedOn = true and skip parsing the payload bytes.
       isSampleDependedOn =
-          (flags & FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES) == 0
-              || !Objects.equals(
-                  trackBundle.moovSampleTable.track.format.sampleMimeType, MimeTypes.VIDEO_H264);
+          !canReadWithinGopSampleDependencies(trackBundle.moovSampleTable.track.format);
 
       if (trackBundle.currentSampleIndex < trackBundle.firstSampleToOutputIndex) {
         input.skipFully(sampleSize);
@@ -1585,70 +1767,86 @@ public class FragmentedMp4Extractor implements Extractor {
       nalPrefixData[0] = 0;
       nalPrefixData[1] = 0;
       nalPrefixData[2] = 0;
-      int nalUnitPrefixLength = track.nalUnitLengthFieldLength + 1;
       int nalUnitLengthFieldLengthDiff = 4 - track.nalUnitLengthFieldLength;
       // NAL units are length delimited, but the decoder requires start code delimited units.
       // Loop until we've written the sample to the track output, replacing length delimiters with
       // start codes as we encounter them.
       while (sampleBytesWritten < sampleSize) {
         if (sampleCurrentNalBytesRemaining == 0) {
+          int numberOfNalUnitHeaderBytesToRead = 0;
+          if (ceaTrackOutputs.length > 0 || !isSampleDependedOn) {
+            // Try to read the NAL unit header if we're parsing captions or sample dependencies.
+            int nalUnitHeaderSize = NalUnitUtil.numberOfBytesInNalUnitHeader(track.format);
+            if (track.nalUnitLengthFieldLength + nalUnitHeaderSize
+                <= sampleSize - sampleBytesWritten) {
+              // In some malformed videos with padding, the NAL unit may be empty.
+              // See b/383201567#comment20
+              // Only try to read the header if there are enough bytes in this sample.
+              numberOfNalUnitHeaderBytesToRead = nalUnitHeaderSize;
+            }
+          }
+          // Read numberOfNalUnitHeaderBytesToRead in the same readFully call that reads the NAL
+          // length. This ensures sampleBytesRead, sampleBytesWritten and isSampleDependedOn remain
+          // in a consistent state if we have read failures.
+          int nalUnitPrefixLength =
+              track.nalUnitLengthFieldLength + numberOfNalUnitHeaderBytesToRead;
           // Read the NAL length so that we know where we find the next one, and its type.
           input.readFully(nalPrefixData, nalUnitLengthFieldLengthDiff, nalUnitPrefixLength);
           nalPrefix.setPosition(0);
           int nalLengthInt = nalPrefix.readInt();
-          if (nalLengthInt < 1) {
+          if (nalLengthInt < 0) {
             throw ParserException.createForMalformedContainer(
                 "Invalid NAL length", /* cause= */ null);
           }
-          sampleCurrentNalBytesRemaining = nalLengthInt - 1;
+          sampleCurrentNalBytesRemaining = nalLengthInt - numberOfNalUnitHeaderBytesToRead;
           // Write a start code for the current NAL unit.
           nalStartCode.setPosition(0);
           output.sampleData(nalStartCode, 4);
-          // Write the NAL unit type byte.
-          output.sampleData(nalPrefix, 1);
+          sampleBytesWritten += 4;
+          sampleSize += nalUnitLengthFieldLengthDiff;
           processSeiNalUnitPayload =
               ceaTrackOutputs.length > 0
-                  && NalUnitUtil.isNalUnitSei(track.format, nalPrefixData[4]);
-          sampleBytesWritten += 5;
-          sampleSize += nalUnitLengthFieldLengthDiff;
-          if (!isSampleDependedOn
-              && Objects.equals(
-                  trackBundle.moovSampleTable.track.format.sampleMimeType, MimeTypes.VIDEO_H264)
-              && NalUnitUtil.isH264NalUnitDependedOn(nalPrefixData[4])) {
+                  && numberOfNalUnitHeaderBytesToRead > 0
+                  && NalUnitUtil.isNalUnitSei(track.format, nalPrefixData, /* offset= */ 4);
+          // Write the extra NAL unit bytes to the output.
+          output.sampleData(nalPrefix, numberOfNalUnitHeaderBytesToRead);
+          sampleBytesWritten += numberOfNalUnitHeaderBytesToRead;
+          if (numberOfNalUnitHeaderBytesToRead > 0
+              && !isSampleDependedOn
+              && NalUnitUtil.isDependedOn(
+                  nalPrefixData,
+                  /* offset= */ 4,
+                  /* length= */ numberOfNalUnitHeaderBytesToRead,
+                  track.format)) {
             isSampleDependedOn = true;
           }
         } else {
           int writtenBytes;
           if (processSeiNalUnitPayload) {
-            // Read and write the payload of the SEI NAL unit.
-            nalBuffer.reset(sampleCurrentNalBytesRemaining);
-            input.readFully(nalBuffer.getData(), 0, sampleCurrentNalBytesRemaining);
-            output.sampleData(nalBuffer, sampleCurrentNalBytesRemaining);
+            // Read and write the remaining payload of the SEI NAL unit.
+            nalUnitWithoutHeaderBuffer.reset(sampleCurrentNalBytesRemaining);
+            input.readFully(
+                nalUnitWithoutHeaderBuffer.getData(), 0, sampleCurrentNalBytesRemaining);
+            output.sampleData(nalUnitWithoutHeaderBuffer, sampleCurrentNalBytesRemaining);
             writtenBytes = sampleCurrentNalBytesRemaining;
             // Unescape and process the SEI NAL unit.
             int unescapedLength =
-                NalUnitUtil.unescapeStream(nalBuffer.getData(), nalBuffer.limit());
-            // If the format is H.265/HEVC the NAL unit header has two bytes so skip one more byte.
-            nalBuffer.setPosition(
-                Objects.equals(track.format.sampleMimeType, MimeTypes.VIDEO_H265)
-                        || MimeTypes.containsCodecsCorrespondingToMimeType(
-                            track.format.codecs, MimeTypes.VIDEO_H265)
-                    ? 1
-                    : 0);
-            nalBuffer.setLimit(unescapedLength);
+                NalUnitUtil.unescapeStream(
+                    nalUnitWithoutHeaderBuffer.getData(), nalUnitWithoutHeaderBuffer.limit());
+            nalUnitWithoutHeaderBuffer.setPosition(0);
+            nalUnitWithoutHeaderBuffer.setLimit(unescapedLength);
 
             if (track.format.maxNumReorderSamples == Format.NO_VALUE) {
-              if (reorderingSeiMessageQueue.getMaxSize() != 0) {
-                reorderingSeiMessageQueue.setMaxSize(0);
+              if (reorderingBufferQueue.getMaxSize() != 0) {
+                reorderingBufferQueue.setMaxSize(0);
               }
-            } else if (reorderingSeiMessageQueue.getMaxSize()
-                != track.format.maxNumReorderSamples) {
-              reorderingSeiMessageQueue.setMaxSize(track.format.maxNumReorderSamples);
+            } else if (reorderingBufferQueue.getMaxSize() != track.format.maxNumReorderSamples) {
+              reorderingBufferQueue.setMaxSize(track.format.maxNumReorderSamples);
             }
-            reorderingSeiMessageQueue.add(sampleTimeUs, nalBuffer);
+            reorderingBufferQueue.add(sampleTimeUs, nalUnitWithoutHeaderBuffer);
 
             if ((trackBundle.getCurrentSampleFlags() & C.BUFFER_FLAG_END_OF_STREAM) != 0) {
-              reorderingSeiMessageQueue.flush();
+              reorderingBufferQueue.flush();
             }
           } else {
             // Write the payload of the NAL unit.
@@ -1659,6 +1857,15 @@ public class FragmentedMp4Extractor implements Extractor {
         }
       }
     } else {
+      Format pendingFormat = trackBundle.pendingFormat;
+      if (pendingFormat != null && DtsUtil.isDtsBaseAudioMimeType(track.format.sampleMimeType)) {
+        trackBundle.baseFormat =
+            DtsUtil.updateFormatWithDtsHdInfo(input, sampleSize, trackBundle.baseFormat);
+        Format outputFormat =
+            trackBundle.baseFormat.buildUpon().setDrmInitData(pendingFormat.drmInitData).build();
+        trackBundle.output.format(outputFormat);
+        trackBundle.pendingFormat = null;
+      }
       while (sampleBytesWritten < sampleSize) {
         int writtenBytes = output.sampleData(input, sampleSize - sampleBytesWritten, false);
         sampleBytesWritten += writtenBytes;
@@ -1666,7 +1873,7 @@ public class FragmentedMp4Extractor implements Extractor {
     }
 
     @C.BufferFlags int sampleFlags = trackBundle.getCurrentSampleFlags();
-    if ((flags & FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES) != 0 && !isSampleDependedOn) {
+    if (!isSampleDependedOn) {
       sampleFlags |= C.BUFFER_FLAG_NOT_DEPENDED_ON;
     }
 
@@ -1686,6 +1893,20 @@ public class FragmentedMp4Extractor implements Extractor {
     }
     parserState = STATE_READING_SAMPLE_START;
     return true;
+  }
+
+  /**
+   * Returns whether reading within GOP sample dependencies is enabled for the sample {@link
+   * Format}.
+   */
+  private boolean canReadWithinGopSampleDependencies(Format format) {
+    if (Objects.equals(format.sampleMimeType, MimeTypes.VIDEO_H264)) {
+      return (flags & FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES) != 0;
+    }
+    if (Objects.equals(format.sampleMimeType, MimeTypes.VIDEO_H265)) {
+      return (flags & FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265) != 0;
+    }
+    return false;
   }
 
   /**
@@ -1798,7 +2019,10 @@ public class FragmentedMp4Extractor implements Extractor {
         || atom == Mp4Box.TYPE_sgpd
         || atom == Mp4Box.TYPE_elst
         || atom == Mp4Box.TYPE_mehd
-        || atom == Mp4Box.TYPE_emsg;
+        || atom == Mp4Box.TYPE_emsg
+        || atom == Mp4Box.TYPE_udta
+        || atom == Mp4Box.TYPE_keys
+        || atom == Mp4Box.TYPE_ilst;
   }
 
   /** Returns whether the extractor should decode a container atom with type {@code atom}. */
@@ -1811,7 +2035,8 @@ public class FragmentedMp4Extractor implements Extractor {
         || atom == Mp4Box.TYPE_moof
         || atom == Mp4Box.TYPE_traf
         || atom == Mp4Box.TYPE_mvex
-        || atom == Mp4Box.TYPE_edts;
+        || atom == Mp4Box.TYPE_edts
+        || atom == Mp4Box.TYPE_meta;
   }
 
   /** Holds data corresponding to a metadata sample. */
@@ -1825,6 +2050,254 @@ public class FragmentedMp4Extractor implements Extractor {
       this.sampleTimeUs = sampleTimeUs;
       this.sampleTimeIsRelative = sampleTimeIsRelative;
       this.size = size;
+    }
+  }
+
+  /** Parses an mfro box (defined in 14496-12). */
+  private void readMfro(ExtractorInput input, PositionHolder seekPosition) throws IOException {
+    // An mfro box is always exactly 16 bytes long.
+    scratch.reset(MFRO_FIXED_BOX_SIZE);
+    if (!input.readFully(scratch.getData(), 0, MFRO_FIXED_BOX_SIZE, /* allowEndOfInput= */ true)) {
+      onMfraProcessingFinished(
+          new SeekMap.Unseekable(durationUs, seekPositionBeforeMfraProcessing), seekPosition);
+      return;
+    }
+    scratch.setPosition(0);
+    int size = scratch.readInt();
+    int type = scratch.readInt();
+    if (size != MFRO_FIXED_BOX_SIZE || type != Mp4Box.TYPE_mfro) {
+      onMfraProcessingFinished(
+          new SeekMap.Unseekable(durationUs, seekPositionBeforeMfraProcessing), seekPosition);
+      return;
+    }
+    scratch.skipBytes(4); // version and flags
+    long mfraSize = scratch.readUnsignedInt();
+    long mfraOffset = input.getLength() - mfraSize;
+    if (mfraSize <= 0
+        || mfraSize > Integer.MAX_VALUE
+        || mfraOffset < 0
+        || mfraOffset < seekPositionBeforeMfraProcessing) {
+      onMfraProcessingFinished(
+          new SeekMap.Unseekable(durationUs, seekPositionBeforeMfraProcessing), seekPosition);
+      return;
+    }
+    seekPosition.position = mfraOffset;
+    parserState = STATE_READING_MFRA;
+  }
+
+  /** Parses an mfra box (defined in 14496-12). */
+  private void readMfra(ExtractorInput input, PositionHolder seekPosition) throws IOException {
+    long mfraSize = input.getLength() - input.getPosition();
+    scratch.reset(Mp4Box.HEADER_SIZE);
+    if (!input.peekFully(scratch.getData(), 0, Mp4Box.HEADER_SIZE, /* allowEndOfInput= */ true)) {
+      onMfraProcessingFinished(
+          new SeekMap.Unseekable(durationUs, seekPositionBeforeMfraProcessing), seekPosition);
+      return;
+    }
+    scratch.setPosition(0);
+    int mfraBoxSize = scratch.readInt();
+    int mfraBoxType = scratch.readInt();
+    if (mfraBoxType != Mp4Box.TYPE_mfra) {
+      onMfraProcessingFinished(
+          new SeekMap.Unseekable(durationUs, seekPositionBeforeMfraProcessing), seekPosition);
+      return;
+    }
+
+    ParsableByteArray mfra = new ParsableByteArray((int) mfraSize);
+    input.readFully(mfra.getData(), 0, (int) mfraSize);
+
+    mfra.setPosition(mfraBoxSize == 1 ? Mp4Box.LONG_HEADER_SIZE : Mp4Box.HEADER_SIZE);
+
+    SparseArray<long[]> trackTimesUs = new SparseArray<>();
+    SparseArray<long[]> trackOffsets = new SparseArray<>();
+
+    while (mfra.bytesLeft() >= Mp4Box.HEADER_SIZE) {
+      int boxStartPosition = mfra.getPosition();
+      long boxSize = mfra.readUnsignedInt();
+      int boxType = mfra.readInt();
+      long actualBoxSize = boxSize;
+
+      if (boxSize == 1) {
+        if (mfra.bytesLeft() < Mp4Box.HEADER_SIZE) {
+          break;
+        }
+        actualBoxSize = mfra.readLong();
+      } else if (boxSize == 0) {
+        actualBoxSize = (long) mfra.limit() - boxStartPosition;
+      }
+
+      int headerSize = boxSize == 1 ? Mp4Box.LONG_HEADER_SIZE : Mp4Box.HEADER_SIZE;
+      if (actualBoxSize < headerSize || actualBoxSize > (long) mfra.limit() - boxStartPosition) {
+        break;
+      }
+
+      if (boxType == Mp4Box.TYPE_tfra) {
+        // Protect against malformed tfra boxes. We need at least 16 bytes for the
+        // basic fields (versionAndFlags, trackId, lengthFields, numberOfEntry).
+        if (actualBoxSize < headerSize + 16) {
+          mfra.setPosition((int) (boxStartPosition + actualBoxSize));
+          continue;
+        }
+
+        int versionAndFlags = mfra.readInt();
+        int version = BoxParser.parseFullBoxVersion(versionAndFlags);
+        int trackId = mfra.readInt();
+
+        TrackBundle trackBundle = trackBundles.get(trackId);
+        if (trackBundle == null) {
+          mfra.setPosition((int) (boxStartPosition + actualBoxSize));
+          continue;
+        }
+        long timescale = trackBundle.moovSampleTable.track.timescale;
+
+        int lengthFields = mfra.readInt();
+        int lengthSizeOfTrafNum = (lengthFields >> 4) & 3;
+        int lengthSizeOfTrunNum = (lengthFields >> 2) & 3;
+        int lengthSizeOfSampleNum = lengthFields & 3;
+        long numberOfEntry = mfra.readUnsignedInt();
+
+        // The time and moof_offset fields are 8 bytes each for version 1, and 4 bytes each for
+        // version 0.
+        long entrySize =
+            (version == 1 ? 16L : 8L)
+                + (lengthSizeOfTrafNum + 1)
+                + (lengthSizeOfTrunNum + 1)
+                + (lengthSizeOfSampleNum + 1);
+
+        if (numberOfEntry * entrySize > mfra.bytesLeft()) {
+          mfra.setPosition((int) (boxStartPosition + actualBoxSize));
+          continue;
+        }
+
+        long[] timesUs = new long[(int) numberOfEntry];
+        long[] offsets = new long[(int) numberOfEntry];
+
+        for (int i = 0; i < (int) numberOfEntry; i++) {
+          long time = version == 1 ? mfra.readUnsignedLongToLong() : mfra.readUnsignedInt();
+          long moofOffset = version == 1 ? mfra.readUnsignedLongToLong() : mfra.readUnsignedInt();
+
+          mfra.skipBytes(
+              (lengthSizeOfTrafNum + 1) + (lengthSizeOfTrunNum + 1) + (lengthSizeOfSampleNum + 1));
+
+          timesUs[i] =
+              timescale != C.TIME_UNSET
+                  ? Util.scaleLargeTimestamp(time, C.MICROS_PER_SECOND, timescale)
+                  : time;
+          offsets[i] = moofOffset;
+        }
+        trackTimesUs.put(trackId, timesUs);
+        trackOffsets.put(trackId, offsets);
+      }
+      mfra.setPosition((int) (boxStartPosition + actualBoxSize));
+    }
+
+    if (trackTimesUs.size() == 0) {
+      onMfraProcessingFinished(
+          new SeekMap.Unseekable(durationUs, seekPositionBeforeMfraProcessing), seekPosition);
+      return;
+    }
+
+    int firstVideoTrackId = C.INDEX_UNSET;
+    int firstAudioTrackId = C.INDEX_UNSET;
+    for (int i = 0; i < trackTimesUs.size(); i++) {
+      int trackId = trackTimesUs.keyAt(i);
+      TrackBundle trackBundle = trackBundles.get(trackId);
+      if (trackBundle == null) {
+        continue;
+      }
+      int trackType = trackBundle.moovSampleTable.track.type;
+      if (firstVideoTrackId == C.INDEX_UNSET && trackType == C.TRACK_TYPE_VIDEO) {
+        firstVideoTrackId = trackId;
+      } else if (firstAudioTrackId == C.INDEX_UNSET && trackType == C.TRACK_TYPE_AUDIO) {
+        firstAudioTrackId = trackId;
+      }
+    }
+    int primaryTrackId =
+        firstVideoTrackId != C.INDEX_UNSET
+            ? firstVideoTrackId
+            : firstAudioTrackId != C.INDEX_UNSET ? firstAudioTrackId : trackTimesUs.keyAt(0);
+
+    onMfraProcessingFinished(
+        new MfraSeekMap(
+            trackTimesUs,
+            trackOffsets,
+            durationUs,
+            seekPositionBeforeMfraProcessing,
+            primaryTrackId),
+        seekPosition);
+  }
+
+  private void onMfraProcessingFinished(SeekMap seekMap, PositionHolder seekPosition) {
+    extractorOutput.seekMap(seekMap);
+    haveOutputSeekMap = true;
+    seekPosition.position = seekPositionBeforeMfraProcessing;
+    enterReadingAtomHeaderState();
+  }
+
+  private static final class MfraSeekMap implements TrackAwareSeekMap {
+    private final SparseArray<long[]> trackTimesUs;
+    private final SparseArray<long[]> trackOffsets;
+    private final long durationUs;
+    private final long firstMediaDataPosition;
+    private final int primaryTrackId;
+
+    private MfraSeekMap(
+        SparseArray<long[]> trackTimesUs,
+        SparseArray<long[]> trackOffsets,
+        long durationUs,
+        long firstMediaDataPosition,
+        int primaryTrackId) {
+      this.trackTimesUs = trackTimesUs;
+      this.trackOffsets = trackOffsets;
+      this.durationUs = durationUs;
+      this.firstMediaDataPosition = firstMediaDataPosition;
+      this.primaryTrackId = primaryTrackId;
+    }
+
+    @Override
+    public boolean isSeekable() {
+      return true;
+    }
+
+    @Override
+    public boolean isSeekable(int trackId) {
+      return trackTimesUs.indexOfKey(trackId) >= 0;
+    }
+
+    @Override
+    public long getDurationUs() {
+      return durationUs;
+    }
+
+    @Override
+    public SeekMap.SeekPoints getSeekPoints(long timeUs) {
+      return getSeekPoints(timeUs, primaryTrackId);
+    }
+
+    @Override
+    public SeekMap.SeekPoints getSeekPoints(long timeUs, int trackId) {
+      @Nullable long[] timesUs = trackTimesUs.get(trackId);
+      @Nullable long[] offsets = trackOffsets.get(trackId);
+
+      // Fallback safely if the requested track is missing
+      if (timesUs == null || offsets == null) {
+        timesUs = trackTimesUs.get(primaryTrackId);
+        offsets = trackOffsets.get(primaryTrackId);
+        if (timesUs == null || offsets == null) {
+          timesUs = trackTimesUs.valueAt(0);
+          offsets = trackOffsets.valueAt(0);
+        }
+      }
+
+      // If the requested time is before the first indexed fragment, jump to the absolute start of
+      // the media data.
+      if (timesUs.length == 0 || timeUs < timesUs[0]) {
+        return new SeekMap.SeekPoints(new SeekPoint(0, firstMediaDataPosition));
+      }
+
+      int index =
+          Util.binarySearchFloor(timesUs, timeUs, /* inclusive= */ true, /* stayInBounds= */ true);
+      return new SeekMap.SeekPoints(new SeekPoint(timesUs[index], offsets[index]));
     }
   }
 
@@ -1847,26 +2320,41 @@ public class FragmentedMp4Extractor implements Extractor {
     private final ParsableByteArray encryptionSignalByte;
     private final ParsableByteArray defaultInitializationVector;
 
+    /**
+     * A {@link Format} that needs to be passed to {@link #output}, after being possibly modified
+     * based on sample data, before {@link TrackOutput#sampleMetadata} is called.
+     */
+    @Nullable private Format pendingFormat;
+
+    private Format baseFormat;
+
     private boolean currentlyInFragment;
 
     public TrackBundle(
         TrackOutput output,
         TrackSampleTable moovSampleTable,
-        DefaultSampleValues defaultSampleValues) {
+        DefaultSampleValues defaultSampleValues,
+        Format baseFormat) {
       this.output = output;
       this.moovSampleTable = moovSampleTable;
       this.defaultSampleValues = defaultSampleValues;
+      this.baseFormat = baseFormat;
       fragment = new TrackFragment();
       scratch = new ParsableByteArray();
       encryptionSignalByte = new ParsableByteArray(1);
       defaultInitializationVector = new ParsableByteArray();
+      if (DtsUtil.isDtsBaseAudioMimeType(baseFormat.sampleMimeType)) {
+        pendingFormat = baseFormat;
+      }
       reset(moovSampleTable, defaultSampleValues);
     }
 
     public void reset(TrackSampleTable moovSampleTable, DefaultSampleValues defaultSampleValues) {
       this.moovSampleTable = moovSampleTable;
       this.defaultSampleValues = defaultSampleValues;
-      output.format(moovSampleTable.track.format);
+      if (pendingFormat == null) {
+        output.format(baseFormat);
+      }
       resetFragmentInfo();
     }
 
@@ -1877,9 +2365,12 @@ public class FragmentedMp4Extractor implements Extractor {
               castNonNull(fragment.header).sampleDescriptionIndex);
       @Nullable String schemeType = encryptionBox != null ? encryptionBox.schemeType : null;
       DrmInitData updatedDrmInitData = drmInitData.copyWithSchemeType(schemeType);
-      Format format =
-          moovSampleTable.track.format.buildUpon().setDrmInitData(updatedDrmInitData).build();
-      output.format(format);
+      Format format = baseFormat.buildUpon().setDrmInitData(updatedDrmInitData).build();
+      if (pendingFormat != null) {
+        pendingFormat = format;
+      } else {
+        output.format(format);
+      }
     }
 
     /** Resets the current fragment, sample indices and {@link #currentlyInFragment} boolean. */

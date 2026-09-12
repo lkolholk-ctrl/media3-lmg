@@ -15,9 +15,7 @@
  */
 package androidx.media3.session;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
-import static androidx.media3.common.util.Util.castNonNull;
+import static androidx.media3.common.util.Util.ignoreFuture;
 import static androidx.media3.common.util.Util.postOrRun;
 import static androidx.media3.session.LegacyConversions.extractMaxCommandsForMediaItemFromRootHints;
 import static androidx.media3.session.LibraryResult.RESULT_SUCCESS;
@@ -26,6 +24,7 @@ import static androidx.media3.session.legacy.MediaBrowserCompat.EXTRA_PAGE;
 import static androidx.media3.session.legacy.MediaBrowserCompat.EXTRA_PAGE_SIZE;
 import static androidx.media3.session.legacy.MediaConstants.BROWSER_SERVICE_EXTRAS_KEY_CUSTOM_BROWSER_ACTION_ROOT_LIST;
 import static androidx.media3.session.legacy.MediaConstants.BROWSER_SERVICE_EXTRAS_KEY_SEARCH_SUPPORTED;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
@@ -50,15 +49,16 @@ import androidx.media3.session.legacy.MediaBrowserServiceCompat;
 import androidx.media3.session.legacy.MediaSessionManager.RemoteUserInfo;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.AsyncFunction;
+import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -70,15 +70,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
   private static final String TAG = "MLSLegacyStub";
 
-  private final ControllerCb browserLegacyCbForBroadcast;
-
   private final MediaLibrarySessionImpl librarySessionImpl;
 
   /** Creates a new instance. Caller must call {@link #initialize} to the instance. */
   public MediaLibraryServiceLegacyStub(MediaLibrarySessionImpl session) {
     super(session);
     librarySessionImpl = session;
-    browserLegacyCbForBroadcast = new BrowserLegacyCbForBroadcast();
   }
 
   @Override
@@ -89,68 +86,100 @@ import java.util.concurrent.atomic.AtomicReference;
     if (browserRoot == null) {
       return null;
     }
-    @Nullable ControllerInfo controller = getCurrentController();
-    if (controller == null) {
+
+    AtomicReference<@NullableType BrowserRoot> rootReference = new AtomicReference<>();
+    ConditionVariable haveRoot = new ConditionVariable();
+
+    RemoteUserInfo browserInfo = getCurrentBrowserInfo();
+    postOrRunOnApplicationHandler(
+        () -> getRootOnHandler(browserInfo, rootHints, rootReference, haveRoot));
+
+    try {
+      haveRoot.block();
+    } catch (InterruptedException e) {
+      Log.e(TAG, "Couldn't get a result from onGetRoot", e);
       return null;
+    }
+    return rootReference.get();
+  }
+
+  private void getRootOnHandler(
+      RemoteUserInfo browserInfo,
+      @Nullable Bundle rootHints,
+      AtomicReference<@NullableType BrowserRoot> rootReference,
+      ConditionVariable haveRoot) {
+    @Nullable
+    ControllerInfo controller = getConnectedControllersManager().getController(browserInfo);
+    if (controller == null) {
+      haveRoot.open();
+      return;
     }
     if (!getConnectedControllersManager()
         .isSessionCommandAvailable(
             controller, SessionCommand.COMMAND_CODE_LIBRARY_GET_LIBRARY_ROOT)) {
-      return null;
+      haveRoot.open();
+      return;
     }
     @Nullable
     LibraryParams params =
         LegacyConversions.convertToLibraryParams(librarySessionImpl.getContext(), rootHints);
-    AtomicReference<ListenableFuture<LibraryResult<MediaItem>>> futureReference =
-        new AtomicReference<>();
-    ConditionVariable haveFuture = new ConditionVariable();
-    postOrRun(
-        librarySessionImpl.getApplicationHandler(),
-        () -> {
-          futureReference.set(librarySessionImpl.onGetLibraryRootOnHandler(controller, params));
-          haveFuture.open();
-        });
-    @Nullable LibraryResult<MediaItem> result = null;
-    try {
-      haveFuture.block();
-      result = checkNotNull(futureReference.get().get(), "LibraryResult must not be null");
-    } catch (CancellationException | ExecutionException | InterruptedException e) {
-      Log.e(TAG, "Couldn't get a result from onGetLibraryRoot", e);
-    }
-    if (result != null && result.resultCode == RESULT_SUCCESS && result.value != null) {
-      @Nullable
-      Bundle extras =
-          result.params != null
-              ? LegacyConversions.convertToRootHints(result.params)
-              : new Bundle();
-      boolean isSearchSessionCommandAvailable =
-          getConnectedControllersManager()
-              .isSessionCommandAvailable(controller, SessionCommand.COMMAND_CODE_LIBRARY_SEARCH);
-      checkNotNull(extras)
-          .putBoolean(BROWSER_SERVICE_EXTRAS_KEY_SEARCH_SUPPORTED, isSearchSessionCommandAvailable);
-      ImmutableList<CommandButton> commandButtonsForMediaItems =
-          librarySessionImpl.getCommandButtonsForMediaItems();
-      if (!commandButtonsForMediaItems.isEmpty()) {
-        ArrayList<Bundle> browserActionBundles = new ArrayList<>();
-        for (int i = 0; i < commandButtonsForMediaItems.size(); i++) {
-          CommandButton commandButton = commandButtonsForMediaItems.get(i);
-          if (commandButton.sessionCommand != null
-              && commandButton.sessionCommand.commandCode == SessionCommand.COMMAND_CODE_CUSTOM) {
-            browserActionBundles.add(LegacyConversions.convertToBundle(commandButton));
+    ListenableFuture<LibraryResult<MediaItem>> future =
+        librarySessionImpl.onGetLibraryRootOnHandler(controller, params);
+
+    Futures.addCallback(
+        future,
+        new FutureCallback<LibraryResult<MediaItem>>() {
+          @Override
+          public void onSuccess(@Nullable LibraryResult<MediaItem> result) {
+            if (result != null && result.resultCode == RESULT_SUCCESS && result.value != null) {
+              @Nullable
+              Bundle extras =
+                  result.params != null
+                      ? LegacyConversions.convertToRootHints(result.params)
+                      : new Bundle();
+              boolean isSearchSessionCommandAvailable =
+                  getConnectedControllersManager()
+                      .isSessionCommandAvailable(
+                          controller, SessionCommand.COMMAND_CODE_LIBRARY_SEARCH);
+              checkNotNull(extras)
+                  .putBoolean(
+                      BROWSER_SERVICE_EXTRAS_KEY_SEARCH_SUPPORTED, isSearchSessionCommandAvailable);
+              ImmutableList<CommandButton> commandButtonsForMediaItems =
+                  librarySessionImpl.getCommandButtonsForMediaItems();
+              if (!commandButtonsForMediaItems.isEmpty()) {
+                ArrayList<Bundle> browserActionBundles = new ArrayList<>();
+                for (int i = 0; i < commandButtonsForMediaItems.size(); i++) {
+                  CommandButton commandButton = commandButtonsForMediaItems.get(i);
+                  if (commandButton.sessionCommand != null
+                      && commandButton.sessionCommand.commandCode
+                          == SessionCommand.COMMAND_CODE_CUSTOM) {
+                    browserActionBundles.add(LegacyConversions.convertToBundle(commandButton));
+                  }
+                }
+                if (!browserActionBundles.isEmpty()) {
+                  extras.putParcelableArrayList(
+                      BROWSER_SERVICE_EXTRAS_KEY_CUSTOM_BROWSER_ACTION_ROOT_LIST,
+                      browserActionBundles);
+                }
+              }
+              rootReference.set(new BrowserRoot(result.value.mediaId, extras));
+            } else {
+              rootReference.set(
+                  result != null && result.resultCode != RESULT_SUCCESS
+                      ? null
+                      : MediaUtils.defaultBrowserRoot);
+            }
+            haveRoot.open();
           }
-        }
-        if (!browserActionBundles.isEmpty()) {
-          extras.putParcelableArrayList(
-              BROWSER_SERVICE_EXTRAS_KEY_CUSTOM_BROWSER_ACTION_ROOT_LIST, browserActionBundles);
-        }
-      }
-      return new BrowserRoot(result.value.mediaId, extras);
-    }
-    // No library root, but keep browser compat connected to allow getting session unless the
-    // `Callback` implementation has not returned a `RESULT_SUCCESS`.
-    return result != null && result.resultCode != RESULT_SUCCESS
-        ? null
-        : MediaUtils.defaultBrowserRoot;
+
+          @Override
+          public void onFailure(Throwable t) {
+            Log.e(TAG, "Couldn't get a result from onGetLibraryRoot", t);
+            rootReference.set(MediaUtils.defaultBrowserRoot);
+            haveRoot.open();
+          }
+        },
+        this::postOrRunOnApplicationHandler);
   }
 
   // TODO(b/192455639): Optimize potential multiple calls of
@@ -159,17 +188,18 @@ import java.util.concurrent.atomic.AtomicReference;
   @SuppressLint("RestrictedApi")
   @Override
   public void onSubscribe(@Nullable String id, @Nullable Bundle option) {
-    @Nullable ControllerInfo controller = getCurrentController();
-    if (controller == null) {
-      return;
-    }
+    RemoteUserInfo browserInfo = getCurrentBrowserInfo();
     if (TextUtils.isEmpty(id)) {
-      Log.w(TAG, "onSubscribe(): Ignoring empty id from " + controller);
+      Log.w(TAG, "onSubscribe(): Ignoring empty id from " + browserInfo.getPackageName());
       return;
     }
-    postOrRun(
-        librarySessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         () -> {
+          @Nullable
+          ControllerInfo controller = getConnectedControllersManager().getController(browserInfo);
+          if (controller == null) {
+            return;
+          }
           if (!getConnectedControllersManager()
               .isSessionCommandAvailable(
                   controller, SessionCommand.COMMAND_CODE_LIBRARY_SUBSCRIBE)) {
@@ -185,17 +215,18 @@ import java.util.concurrent.atomic.AtomicReference;
   @SuppressLint("RestrictedApi")
   @Override
   public void onUnsubscribe(@Nullable String id) {
-    @Nullable ControllerInfo controller = getCurrentController();
-    if (controller == null) {
-      return;
-    }
+    RemoteUserInfo browserInfo = getCurrentBrowserInfo();
     if (TextUtils.isEmpty(id)) {
-      Log.w(TAG, "onUnsubscribe(): Ignoring empty id from " + controller);
+      Log.w(TAG, "onUnsubscribe(): Ignoring empty id from " + browserInfo.getPackageName());
       return;
     }
-    postOrRun(
-        librarySessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         () -> {
+          @Nullable
+          ControllerInfo controller = getConnectedControllersManager().getController(browserInfo);
+          if (controller == null) {
+            return;
+          }
           if (!getConnectedControllersManager()
               .isSessionCommandAvailable(
                   controller, SessionCommand.COMMAND_CODE_LIBRARY_UNSUBSCRIBE)) {
@@ -216,37 +247,38 @@ import java.util.concurrent.atomic.AtomicReference;
       @Nullable String parentId,
       Result<List<MediaBrowserCompat.MediaItem>> result,
       @Nullable Bundle options) {
-    @Nullable ControllerInfo controller = getCurrentController();
-    if (controller == null) {
-      result.sendResult(/* result= */ null);
-      return;
-    }
+    RemoteUserInfo browserInfo = getCurrentBrowserInfo();
     if (TextUtils.isEmpty(parentId)) {
-      Log.w(TAG, "onLoadChildren(): Ignoring empty parentId from " + controller);
+      Log.w(TAG, "onLoadChildren(): Ignoring empty parentId from " + browserInfo.getPackageName());
       result.sendResult(/* result= */ null);
       return;
     }
     result.detach();
-    postOrRun(
-        librarySessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         () -> {
+          @Nullable
+          ControllerInfo controller = getConnectedControllersManager().getController(browserInfo);
+          if (controller == null) {
+            result.sendResult(/* result= */ null);
+            return;
+          }
           if (!getConnectedControllersManager()
               .isSessionCommandAvailable(
                   controller, SessionCommand.COMMAND_CODE_LIBRARY_GET_CHILDREN)) {
             result.sendResult(/* result= */ null);
             return;
           }
+          @Nullable LibraryParams params = null;
           if (options != null) {
             options.setClassLoader(librarySessionImpl.getContext().getClassLoader());
             try {
               int page = options.getInt(EXTRA_PAGE);
               int pageSize = options.getInt(EXTRA_PAGE_SIZE);
+              params =
+                  LegacyConversions.convertToLibraryParams(
+                      librarySessionImpl.getContext(), options);
               if (page >= 0 && pageSize > 0) {
                 // Requesting the list of children through pagination.
-                @Nullable
-                LibraryParams params =
-                    LegacyConversions.convertToLibraryParams(
-                        librarySessionImpl.getContext(), options);
                 ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> future =
                     librarySessionImpl.onGetChildrenOnHandler(
                         controller, parentId, page, pageSize, params);
@@ -267,11 +299,7 @@ import java.util.concurrent.atomic.AtomicReference;
           // A MediaBrowserCompat called loadChildren with no pagination option.
           ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> future =
               librarySessionImpl.onGetChildrenOnHandler(
-                  controller,
-                  parentId,
-                  /* page= */ 0,
-                  /* pageSize= */ Integer.MAX_VALUE,
-                  /* params= */ null);
+                  controller, parentId, /* page= */ 0, /* pageSize= */ Integer.MAX_VALUE, params);
           ListenableFuture<@NullableType List<MediaBrowserCompat.MediaItem>> browserItemsFuture =
               Util.transformFutureAsync(future, createMediaItemsToBrowserItemsAsyncFunction());
           sendLibraryResultWithMediaItemsWhenReady(result, browserItemsFuture);
@@ -280,20 +308,21 @@ import java.util.concurrent.atomic.AtomicReference;
 
   @Override
   public void onLoadItem(String itemId, Result<MediaBrowserCompat.MediaItem> result) {
-    @Nullable ControllerInfo controller = getCurrentController();
-    if (controller == null) {
-      result.sendResult(/* result= */ null);
-      return;
-    }
+    RemoteUserInfo browserInfo = getCurrentBrowserInfo();
     if (TextUtils.isEmpty(itemId)) {
-      Log.w(TAG, "Ignoring empty itemId from " + controller);
+      Log.w(TAG, "Ignoring empty itemId from " + browserInfo.getPackageName());
       result.sendResult(/* result= */ null);
       return;
     }
     result.detach();
-    postOrRun(
-        librarySessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         () -> {
+          @Nullable
+          ControllerInfo controller = getConnectedControllersManager().getController(browserInfo);
+          if (controller == null) {
+            result.sendResult(/* result= */ null);
+            return;
+          }
           if (!getConnectedControllersManager()
               .isSessionCommandAvailable(
                   controller, SessionCommand.COMMAND_CODE_LIBRARY_GET_ITEM)) {
@@ -311,29 +340,31 @@ import java.util.concurrent.atomic.AtomicReference;
   @Override
   public void onSearch(
       String query, @Nullable Bundle extras, Result<List<MediaBrowserCompat.MediaItem>> result) {
-    @Nullable ControllerInfo controller = getCurrentController();
-    if (controller == null) {
-      result.sendResult(/* result= */ null);
-      return;
-    }
+    RemoteUserInfo browserInfo = getCurrentBrowserInfo();
     if (TextUtils.isEmpty(query)) {
-      Log.w(TAG, "Ignoring empty query from " + controller);
+      Log.w(TAG, "Ignoring empty query from " + browserInfo.getPackageName());
       result.sendResult(/* result= */ null);
-      return;
-    }
-    if (!(controller.getControllerCb() instanceof BrowserLegacyCb)) {
       return;
     }
     result.detach();
-    postOrRun(
-        librarySessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         () -> {
+          @Nullable
+          ControllerInfo controller = getConnectedControllersManager().getController(browserInfo);
+          if (controller == null) {
+            result.sendResult(/* result= */ null);
+            return;
+          }
+          if (!(controller.getControllerCb() instanceof BrowserLegacyCb)) {
+            result.sendResult(/* result= */ null);
+            return;
+          }
           if (!getConnectedControllersManager()
               .isSessionCommandAvailable(controller, SessionCommand.COMMAND_CODE_LIBRARY_SEARCH)) {
             result.sendResult(/* result= */ null);
             return;
           }
-          BrowserLegacyCb cb = (BrowserLegacyCb) checkStateNotNull(controller.getControllerCb());
+          BrowserLegacyCb cb = (BrowserLegacyCb) checkNotNull(controller.getControllerCb());
           cb.registerSearchRequest(controller, query, extras, result);
           @Nullable
           LibraryParams params =
@@ -345,22 +376,26 @@ import java.util.concurrent.atomic.AtomicReference;
 
   @Override
   public void onCustomAction(String action, Bundle extras, Result<Bundle> result) {
-    @Nullable ControllerInfo controller = getCurrentController();
-    if (controller == null) {
-      result.sendError(/* extras= */ null);
-      return;
-    }
     result.detach();
-    postOrRun(
-        librarySessionImpl.getApplicationHandler(),
+    RemoteUserInfo browserInfo = getCurrentBrowserInfo();
+    postOrRunOnApplicationHandler(
         () -> {
+          @Nullable
+          ControllerInfo controller = getConnectedControllersManager().getController(browserInfo);
+          if (controller == null) {
+            result.sendError(/* extras= */ null);
+            return;
+          }
           SessionCommand command = new SessionCommand(action, /* extras= */ Bundle.EMPTY);
           if (!getConnectedControllersManager().isSessionCommandAvailable(controller, command)) {
             result.sendError(/* extras= */ null);
             return;
           }
+          ProgressReporter progressReporter = new ProgressReporter(librarySessionImpl, result);
           ListenableFuture<SessionResult> future =
-              librarySessionImpl.onCustomCommandOnHandler(controller, command, extras);
+              librarySessionImpl.onCustomCommandOnHandler(
+                  controller, progressReporter, command, extras);
+          progressReporter.setFuture(future);
           sendCustomActionResultWhenReady(result, future);
         });
   }
@@ -374,16 +409,8 @@ import java.util.concurrent.atomic.AtomicReference;
         getMediaSessionManager().isTrustedForMediaControl(remoteUserInfo),
         new BrowserLegacyCb(remoteUserInfo),
         /* connectionHints= */ rootHints,
-        extractMaxCommandsForMediaItemFromRootHints(rootHints));
-  }
-
-  public ControllerCb getBrowserLegacyCbForBroadcast() {
-    return browserLegacyCbForBroadcast;
-  }
-
-  @Nullable
-  private ControllerInfo getCurrentController() {
-    return getConnectedControllersManager().getController(getCurrentBrowserInfo());
+        extractMaxCommandsForMediaItemFromRootHints(rootHints),
+        /* isPackageNameVerified= */ true);
   }
 
   private static void sendCustomActionResultWhenReady(
@@ -562,8 +589,8 @@ import java.util.concurrent.atomic.AtomicReference;
     };
   }
 
-  private static <T> void ignoreFuture(Future<T> unused) {
-    // no-op
+  private void postOrRunOnApplicationHandler(Runnable runnable) {
+    postOrRun(librarySessionImpl.getApplicationHandler(), runnable);
   }
 
   private static class SearchRequest {
@@ -625,18 +652,17 @@ import java.util.concurrent.atomic.AtomicReference;
       synchronized (lock) {
         for (int i = this.searchRequests.size() - 1; i >= 0; i--) {
           SearchRequest iter = this.searchRequests.get(i);
-          if (Util.areEqual(remoteUserInfo, iter.remoteUserInfo) && iter.query.equals(query)) {
+          if (Objects.equals(remoteUserInfo, iter.remoteUserInfo) && iter.query.equals(query)) {
             searchRequests.add(iter);
             this.searchRequests.remove(i);
           }
         }
-        if (searchRequests.size() == 0) {
+        if (searchRequests.isEmpty()) {
           return;
         }
       }
 
-      postOrRun(
-          librarySessionImpl.getApplicationHandler(),
+      postOrRunOnApplicationHandler(
           () -> {
             for (int i = 0; i < searchRequests.size(); i++) {
               SearchRequest request = searchRequests.get(i);
@@ -695,33 +721,30 @@ import java.util.concurrent.atomic.AtomicReference;
         return false;
       }
       BrowserLegacyCb other = (BrowserLegacyCb) obj;
-      return Util.areEqual(remoteUserInfo, other.remoteUserInfo);
+      return Objects.equals(remoteUserInfo, other.remoteUserInfo);
     }
   }
 
-  private final class BrowserLegacyCbForBroadcast implements ControllerCb {
+  private static class ProgressReporter implements MediaSession.ProgressReporter {
 
-    @Override
-    public void onChildrenChanged(
-        int seq, String parentId, int itemCount, @Nullable LibraryParams libraryParams)
-        throws RemoteException {
-      // This will trigger {@link MediaLibraryServiceLegacyStub#onLoadChildren}.
-      if (libraryParams == null || libraryParams.extras == null) {
-        notifyChildrenChanged(parentId);
-      } else {
-        notifyChildrenChanged(parentId, castNonNull(libraryParams.extras));
-      }
+    private final MediaLibrarySessionImpl session;
+    private final Result<Bundle> result;
+    @Nullable private ListenableFuture<SessionResult> future;
+
+    public ProgressReporter(MediaLibrarySessionImpl session, Result<Bundle> result) {
+      this.session = session;
+      this.result = result;
     }
 
     @Override
-    public void onSearchResultChanged(
-        int seq, String query, int itemCount, @Nullable LibraryParams params)
-        throws RemoteException {
-      // Shouldn't be called. If it's called, it's bug.
-      // This method in the base class is introduced to internally send return of
-      // {@link MediaLibrarySessionCallback#onSearchResultChanged}. However, for
-      // BrowserCompat, it should be done by {@link Result#sendResult} from
-      // {@link MediaLibraryServiceLegacyStub#onSearch} instead.
+    public void sendProgressUpdate(Bundle progressData) {
+      if ((future == null || !future.isDone()) && !session.isReleased()) {
+        result.sendProgressUpdate(progressData);
+      }
+    }
+
+    public void setFuture(ListenableFuture<SessionResult> future) {
+      this.future = future;
     }
   }
 }

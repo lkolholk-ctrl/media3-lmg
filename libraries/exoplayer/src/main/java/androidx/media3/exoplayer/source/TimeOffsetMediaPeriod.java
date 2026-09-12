@@ -15,10 +15,12 @@
  */
 package androidx.media3.exoplayer.source;
 
+import static androidx.media3.common.util.Util.castNonNull;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.StreamKey;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.decoder.DecoderInputBuffer;
 import androidx.media3.exoplayer.FormatHolder;
@@ -112,6 +114,11 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   }
 
   @Override
+  public void setUsesStreamPrerollFlags() {
+    castNonNull(mediaPeriod).setUsesStreamPrerollFlags();
+  }
+
+  @Override
   public long readDiscontinuity() {
     long discontinuityPositionUs = mediaPeriod.readDiscontinuity();
     return discontinuityPositionUs == C.TIME_UNSET
@@ -167,12 +174,22 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
   @Override
   public void onPrepared(MediaPeriod mediaPeriod) {
-    Assertions.checkNotNull(callback).onPrepared(/* mediaPeriod= */ this);
+    checkNotNull(callback).onPrepared(/* mediaPeriod= */ this);
   }
 
   @Override
   public void onContinueLoadingRequested(MediaPeriod source) {
-    Assertions.checkNotNull(callback).onContinueLoadingRequested(/* source= */ this);
+    checkNotNull(callback).onContinueLoadingRequested(/* source= */ this);
+  }
+
+  @Override
+  public long setEndPositionUs(long endPositionUs) {
+    long correctedEndPositionUs =
+        endPositionUs == C.TIME_END_OF_SOURCE ? C.TIME_END_OF_SOURCE : endPositionUs - timeOffsetUs;
+    long actualEndPositionUs = mediaPeriod.setEndPositionUs(correctedEndPositionUs);
+    return actualEndPositionUs == C.TIME_END_OF_SOURCE
+        ? C.TIME_END_OF_SOURCE
+        : actualEndPositionUs + timeOffsetUs;
   }
 
   private static final class TimeOffsetSampleStream implements SampleStream {
@@ -212,6 +229,11 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     @Override
     public int skipData(long positionUs) {
       return sampleStream.skipData(positionUs - timeOffsetUs);
+    }
+
+    @Override
+    public @SampleStream.Flags int getFlags() {
+      return sampleStream.getFlags();
     }
   }
 }

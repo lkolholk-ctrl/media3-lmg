@@ -15,20 +15,28 @@
  */
 package androidx.media3.effect;
 
-import static androidx.media3.common.util.Assertions.checkState;
+import static com.google.common.base.Preconditions.checkState;
 
+import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.GlObjectsProvider;
 import androidx.media3.common.GlTextureInfo;
 import androidx.media3.common.util.GlUtil;
 import com.google.common.collect.Iterables;
 import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Iterator;
-import java.util.Queue;
 
 /** Holds {@code capacity} textures, to re-use textures. */
 /* package */ final class TexturePool {
-  private final Queue<GlTextureInfo> freeTextures;
-  private final Queue<GlTextureInfo> inUseTextures;
+  public interface TextureAllocator {
+    int createTexture(int width, int height, boolean useHighPrecisionColorComponents)
+        throws GlUtil.GlException;
+  }
+
+  private final TextureAllocator textureAllocator;
+  private final Deque<GlTextureInfo> freeTextures;
+  private final Deque<GlTextureInfo> inUseTextures;
   private final int capacity;
   private final boolean useHighPrecisionColorComponents;
 
@@ -40,9 +48,15 @@ import java.util.Queue;
    * @param capacity The capacity of the texture pool.
    */
   public TexturePool(boolean useHighPrecisionColorComponents, int capacity) {
-    this.capacity = capacity;
-    this.useHighPrecisionColorComponents = useHighPrecisionColorComponents;
+    this(GlUtil::createTexture, useHighPrecisionColorComponents, capacity);
+  }
 
+  @VisibleForTesting
+  public TexturePool(
+      TextureAllocator textureAllocator, boolean useHighPrecisionColorComponents, int capacity) {
+    this.textureAllocator = textureAllocator;
+    this.useHighPrecisionColorComponents = useHighPrecisionColorComponents;
+    this.capacity = capacity;
     freeTextures = new ArrayDeque<>(capacity);
     inUseTextures = new ArrayDeque<>(capacity);
   }
@@ -94,6 +108,15 @@ import java.util.Queue;
     return texture;
   }
 
+  /** Returns the {@link GlTextureInfo} that is most recently {@linkplain #useTexture used}. */
+  @Nullable
+  public GlTextureInfo getMostRecentlyUsedTexture() {
+    if (inUseTextures.isEmpty()) {
+      return null;
+    }
+    return inUseTextures.getLast();
+  }
+
   /**
    * Frees the texture represented by {@code textureInfo}.
    *
@@ -142,7 +165,7 @@ import java.util.Queue;
     checkState(freeTextures.isEmpty());
     checkState(inUseTextures.isEmpty());
     for (int i = 0; i < capacity; i++) {
-      int texId = GlUtil.createTexture(width, height, useHighPrecisionColorComponents);
+      int texId = textureAllocator.createTexture(width, height, useHighPrecisionColorComponents);
       GlTextureInfo texture = glObjectsProvider.createBuffersForTexture(texId, width, height);
       freeTextures.add(texture);
     }

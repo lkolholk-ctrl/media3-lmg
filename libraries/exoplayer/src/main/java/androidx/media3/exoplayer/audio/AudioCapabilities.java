@@ -16,7 +16,8 @@
 package androidx.media3.exoplayer.audio;
 
 import static android.media.AudioFormat.CHANNEL_OUT_STEREO;
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static android.os.Build.VERSION.SDK_INT;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.Math.max;
 
 import android.annotation.SuppressLint;
@@ -29,6 +30,7 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.net.Uri;
+import android.os.Build;
 import android.provider.Settings.Global;
 import android.util.Pair;
 import android.util.SparseArray;
@@ -38,7 +40,9 @@ import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
+import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.audio.AudioManagerCompat;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import com.google.common.collect.ImmutableList;
@@ -49,6 +53,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** Represents the set of audio formats that a device is capable of playing. */
@@ -60,9 +65,19 @@ public final class AudioCapabilities {
   @VisibleForTesting /* package */ static final int DEFAULT_MAX_CHANNEL_COUNT = 10;
   @VisibleForTesting /* package */ static final int DEFAULT_SAMPLE_RATE_HZ = 48_000;
 
+  /** The default speaker layout channel masks when no device information is available. */
+  private static final ImmutableList<Integer> DEFAULT_SPEAKER_LAYOUT_CHANNEL_MASKS =
+      ImmutableList.of(CHANNEL_OUT_STEREO);
+
+  private static final ImmutableList<Integer> DEFAULT_EMPTY_SPATIALIZER_CHANNEL_MASKS =
+      ImmutableList.of();
+
   /** The minimum audio capabilities supported by all devices. */
   public static final AudioCapabilities DEFAULT_AUDIO_CAPABILITIES =
-      new AudioCapabilities(ImmutableList.of(AudioProfile.DEFAULT_AUDIO_PROFILE));
+      new AudioCapabilities(
+          ImmutableList.of(AudioProfile.DEFAULT_AUDIO_PROFILE),
+          DEFAULT_SPEAKER_LAYOUT_CHANNEL_MASKS,
+          DEFAULT_EMPTY_SPATIALIZER_CHANNEL_MASKS);
 
   /** Encodings supported when the device specifies external surround sound. */
   @SuppressLint("InlinedApi") // Compile-time access to integer constants defined in API 21.
@@ -106,20 +121,33 @@ public final class AudioCapabilities {
   }
 
   /**
+   * @deprecated Use {@link #getCapabilities(Context, AudioAttributes, AudioDeviceInfo,
+   *     List<Integer>)} instead.
+   */
+  @Deprecated
+  public static AudioCapabilities getCapabilities(
+      Context context, AudioAttributes audioAttributes, @Nullable AudioDeviceInfo routedDevice) {
+    return getCapabilities(
+        context, audioAttributes, routedDevice, DEFAULT_EMPTY_SPATIALIZER_CHANNEL_MASKS);
+  }
+
+  /**
    * Returns the current audio capabilities.
    *
    * @param context A context for obtaining the current audio capabilities.
    * @param audioAttributes The {@link AudioAttributes} to obtain capabilities for.
    * @param routedDevice The {@link AudioDeviceInfo} audio will be routed to if known, or null to
    *     assume the default route.
+   * @param spatializerChannelMasks The channel masks supported by the {@link
+   *     android.media.Spatializer}, if enabled/available.
    * @return The current audio capabilities for the device.
    */
   public static AudioCapabilities getCapabilities(
-      Context context, AudioAttributes audioAttributes, @Nullable AudioDeviceInfo routedDevice) {
-    @Nullable
-    AudioDeviceInfoApi23 routedDeviceApi23 =
-        Util.SDK_INT >= 23 && routedDevice != null ? new AudioDeviceInfoApi23(routedDevice) : null;
-    return getCapabilitiesInternal(context, audioAttributes, routedDeviceApi23);
+      Context context,
+      AudioAttributes audioAttributes,
+      @Nullable AudioDeviceInfo routedDevice,
+      List<Integer> spatializerChannelMasks) {
+    return getCapabilitiesInternal(context, audioAttributes, routedDevice, spatializerChannelMasks);
   }
 
   @SuppressWarnings("InlinedApi")
@@ -127,11 +155,14 @@ public final class AudioCapabilities {
   /* package */ static AudioCapabilities getCapabilitiesInternal(
       Context context,
       AudioAttributes audioAttributes,
-      @Nullable AudioDeviceInfoApi23 routedDevice) {
+      @Nullable AudioDeviceInfo routedDevice,
+      List<Integer> spatializerChannelMasks) {
     Intent intent =
         context.registerReceiver(
             /* receiver= */ null, new IntentFilter(AudioManager.ACTION_HDMI_AUDIO_PLUG));
-    return getCapabilitiesInternal(context, intent, audioAttributes, routedDevice);
+
+    return getCapabilitiesInternal(
+        context, intent, audioAttributes, routedDevice, spatializerChannelMasks);
   }
 
   @SuppressLint("InlinedApi")
@@ -139,27 +170,36 @@ public final class AudioCapabilities {
       Context context,
       @Nullable Intent intent,
       AudioAttributes audioAttributes,
-      @Nullable AudioDeviceInfoApi23 routedDevice) {
-    AudioManager audioManager =
-        (AudioManager) checkNotNull(context.getSystemService(Context.AUDIO_SERVICE));
-    AudioDeviceInfoApi23 currentDevice =
+      @Nullable AudioDeviceInfo routedDevice,
+      List<Integer> spatializerChannelMasks) {
+    AudioManager audioManager = AudioManagerCompat.getAudioManager(context);
+    AudioDeviceInfo currentDevice =
         routedDevice != null
             ? routedDevice
-            : Util.SDK_INT >= 33
+            : SDK_INT >= 33
                 ? Api33.getDefaultRoutedDeviceForAttributes(audioManager, audioAttributes)
                 : null;
 
-    if (Util.SDK_INT >= 33 && (Util.isTv(context) || Util.isAutomotive(context))) {
+    List<Integer> speakerLayoutChannelMasks =
+        currentDevice != null
+            ? SpeakerLayoutUtil.getLoudspeakerLayoutChannelMasks(currentDevice)
+            : DEFAULT_SPEAKER_LAYOUT_CHANNEL_MASKS;
+
+    if (SDK_INT >= 33 && (Util.isTv(context) || Util.isAutomotive(context))) {
       // TV or automotive devices generally shouldn't support audio offload for surround encodings,
       // so the encodings we get from AudioManager.getDirectProfilesForAttributes should include
       // the PCM encodings and surround encodings for passthrough mode.
-      return Api33.getCapabilitiesInternalForDirectPlayback(audioManager, audioAttributes);
+      return Api33.getCapabilitiesInternalForDirectPlayback(
+          audioManager, audioAttributes, speakerLayoutChannelMasks, spatializerChannelMasks);
     }
 
     // If a connection to Bluetooth device is detected, we only return the minimum capabilities that
     // is supported by all the devices.
-    if (Util.SDK_INT >= 23 && Api23.isBluetoothConnected(audioManager, currentDevice)) {
-      return DEFAULT_AUDIO_CAPABILITIES;
+    if (isBluetoothConnected(audioManager, currentDevice)) {
+      return new AudioCapabilities(
+          ImmutableList.of(AudioProfile.DEFAULT_AUDIO_PROFILE),
+          speakerLayoutChannelMasks,
+          spatializerChannelMasks);
     }
 
     ImmutableSet.Builder<Integer> supportedEncodings = new ImmutableSet.Builder<>();
@@ -169,10 +209,12 @@ public final class AudioCapabilities {
     // offload, as well as for encodings we want to list for passthrough mode. Therefore we only use
     // it on TV and automotive devices, which generally shouldn't support audio offload for surround
     // encodings.
-    if (Util.SDK_INT >= 29 && (Util.isTv(context) || Util.isAutomotive(context))) {
+    if (SDK_INT >= 29 && (Util.isTv(context) || Util.isAutomotive(context))) {
       supportedEncodings.addAll(Api29.getDirectPlaybackSupportedEncodings(audioAttributes));
       return new AudioCapabilities(
-          getAudioProfiles(Ints.toArray(supportedEncodings.build()), DEFAULT_MAX_CHANNEL_COUNT));
+          getAudioProfiles(Ints.toArray(supportedEncodings.build()), DEFAULT_MAX_CHANNEL_COUNT),
+          speakerLayoutChannelMasks,
+          spatializerChannelMasks);
     }
 
     ContentResolver contentResolver = context.getContentResolver();
@@ -195,13 +237,17 @@ public final class AudioCapabilities {
               Ints.toArray(supportedEncodings.build()),
               intent.getIntExtra(
                   AudioManager.EXTRA_MAX_CHANNEL_COUNT,
-                  /* defaultValue= */ DEFAULT_MAX_CHANNEL_COUNT)));
+                  /* defaultValue= */ DEFAULT_MAX_CHANNEL_COUNT)),
+          speakerLayoutChannelMasks,
+          spatializerChannelMasks);
     }
 
     return new AudioCapabilities(
         getAudioProfiles(
             Ints.toArray(supportedEncodings.build()),
-            /* maxChannelCount= */ DEFAULT_MAX_CHANNEL_COUNT));
+            /* maxChannelCount= */ DEFAULT_MAX_CHANNEL_COUNT),
+        speakerLayoutChannelMasks,
+        spatializerChannelMasks);
   }
 
   /**
@@ -217,16 +263,37 @@ public final class AudioCapabilities {
 
   private final SparseArray<AudioProfile> encodingToAudioProfile;
   private final int maxChannelCount;
+  private final ImmutableList<Integer> speakerLayoutChannelMasks;
+  private final ImmutableList<Integer> spatializerChannelMasks;
 
   /**
    * @deprecated Use {@link #getCapabilities(Context, AudioAttributes, AudioDeviceInfo)} instead.
    */
   @Deprecated
   public AudioCapabilities(@Nullable int[] supportedEncodings, int maxChannelCount) {
-    this(getAudioProfiles(supportedEncodings, maxChannelCount));
+    this(
+        getAudioProfiles(supportedEncodings, maxChannelCount),
+        DEFAULT_SPEAKER_LAYOUT_CHANNEL_MASKS,
+        DEFAULT_EMPTY_SPATIALIZER_CHANNEL_MASKS);
   }
 
-  private AudioCapabilities(List<AudioProfile> audioProfiles) {
+  /** Simple constructor for assertions in tests. */
+  @VisibleForTesting
+  /* package */ AudioCapabilities(
+      @Nullable int[] supportedEncodings,
+      int maxChannelCount,
+      List<Integer> speakerLayoutChannelMasks,
+      List<Integer> spatializerChannelMasks) {
+    this(
+        getAudioProfiles(supportedEncodings, maxChannelCount),
+        speakerLayoutChannelMasks,
+        spatializerChannelMasks);
+  }
+
+  private AudioCapabilities(
+      List<AudioProfile> audioProfiles,
+      List<Integer> speakerLayoutChannelMasks,
+      List<Integer> spatializerChannelMasks) {
     encodingToAudioProfile = new SparseArray<>();
     for (int i = 0; i < audioProfiles.size(); i++) {
       AudioProfile audioProfile = audioProfiles.get(i);
@@ -237,6 +304,8 @@ public final class AudioCapabilities {
       maxChannelCount = max(maxChannelCount, encodingToAudioProfile.valueAt(i).maxChannelCount);
     }
     this.maxChannelCount = maxChannelCount;
+    this.speakerLayoutChannelMasks = ImmutableList.copyOf(speakerLayoutChannelMasks);
+    this.spatializerChannelMasks = ImmutableList.copyOf(spatializerChannelMasks);
   }
 
   /**
@@ -252,6 +321,30 @@ public final class AudioCapabilities {
   /** Returns the maximum number of channels the device can play at the same time. */
   public int getMaxChannelCount() {
     return maxChannelCount;
+  }
+
+  /**
+   * Returns the best guess at the speaker layout channel masks for the current device.
+   *
+   * <p>These are ordered from highest channel count to lowest, also meaning from more likely to
+   * represent the complete physical layout to subsets. For example, a device with an actual 5.1
+   * layout might also report 3.1 and stereo.
+   *
+   * <p>The subsequent channel masks are useful when decoders might not be compatible with any
+   * arbitrary channel mask.
+   */
+  public ImmutableList<Integer> getSpeakerLayoutChannelMasks() {
+    return speakerLayoutChannelMasks;
+  }
+
+  /**
+   * Returns the channel masks supported by the {@link android.media.Spatializer}, if
+   * enabled/available.
+   *
+   * <p>This is only non-empty if the Spatialize is ready for use.
+   */
+  public ImmutableList<Integer> getSpatializerChannelMasks() {
+    return spatializerChannelMasks;
   }
 
   /**
@@ -323,17 +416,17 @@ public final class AudioCapabilities {
           audioProfile.getMaxSupportedChannelCountForPassthrough(sampleRate, audioAttributes);
     } else {
       channelCount = format.channelCount;
-      if (format.sampleMimeType.equals(MimeTypes.AUDIO_DTS_X) && Util.SDK_INT < 33) {
+      if (format.sampleMimeType.equals(MimeTypes.AUDIO_DTS_UHD_P2) && SDK_INT < 33) {
         // Some DTS:X TVs reports ACTION_HDMI_AUDIO_PLUG.EXTRA_MAX_CHANNEL_COUNT as 8
         // instead of 10. See https://github.com/androidx/media/issues/396
         if (channelCount > 10) {
           return null;
         }
-      } else if (!audioProfile.supportsChannelCount(channelCount)) {
+      } else if (!audioProfile.supportsChannelConfig(channelCount, format)) {
         return null;
       }
     }
-    int channelConfig = getChannelConfigForPassthrough(channelCount);
+    int channelConfig = getChannelConfigForPassthrough(channelCount, format);
     if (channelConfig == AudioFormat.CHANNEL_INVALID) {
       return null;
     }
@@ -350,12 +443,18 @@ public final class AudioCapabilities {
     }
     AudioCapabilities audioCapabilities = (AudioCapabilities) other;
     return Util.contentEquals(encodingToAudioProfile, audioCapabilities.encodingToAudioProfile)
-        && maxChannelCount == audioCapabilities.maxChannelCount;
+        && maxChannelCount == audioCapabilities.maxChannelCount
+        && Objects.equals(speakerLayoutChannelMasks, audioCapabilities.speakerLayoutChannelMasks)
+        && Objects.equals(spatializerChannelMasks, audioCapabilities.spatializerChannelMasks);
   }
 
   @Override
   public int hashCode() {
-    return maxChannelCount + 31 * Util.contentHashCode(encodingToAudioProfile);
+    int result = maxChannelCount;
+    result = 31 * result + Util.contentHashCode(encodingToAudioProfile);
+    result = 31 * result + Objects.hashCode(speakerLayoutChannelMasks);
+    result = 31 * result + Objects.hashCode(spatializerChannelMasks);
+    return result;
   }
 
   @Override
@@ -364,15 +463,19 @@ public final class AudioCapabilities {
         + maxChannelCount
         + ", audioProfiles="
         + encodingToAudioProfile
+        + ", speakerLayoutChannelMasks="
+        + speakerLayoutChannelMasks
+        + ", spatializerChannelMasks="
+        + spatializerChannelMasks
         + "]";
   }
 
   private static boolean deviceMaySetExternalSurroundSoundGlobalSetting() {
-    return "Amazon".equals(Util.MANUFACTURER) || "Xiaomi".equals(Util.MANUFACTURER);
+    return Build.MANUFACTURER.equals("Amazon") || Build.MANUFACTURER.equals("Xiaomi");
   }
 
-  private static int getChannelConfigForPassthrough(int channelCount) {
-    if (Util.SDK_INT <= 28) {
+  private static int getChannelConfigForPassthrough(int channelCount, Format format) {
+    if (SDK_INT <= 28) {
       // In passthrough mode the channel count used to configure the audio track doesn't affect how
       // the stream is handled, except that some devices do overly-strict channel configuration
       // checks. Therefore we override the channel count so that a known-working channel
@@ -386,11 +489,16 @@ public final class AudioCapabilities {
 
     // Workaround for Nexus Player not reporting support for mono passthrough. See
     // [Internal: b/34268671].
-    if (Util.SDK_INT <= 26 && "fugu".equals(Util.DEVICE) && channelCount == 1) {
+    if (MediaLibraryInfo.enableWorkarounds()
+        && SDK_INT <= 26
+        && "fugu".equals(Build.DEVICE)
+        && channelCount == 1) {
       channelCount = 2;
     }
 
-    return Util.getAudioTrackChannelConfig(channelCount);
+    return (format.channelMask != Format.NO_VALUE && format.channelCount == channelCount)
+        ? format.channelMask
+        : Util.getAudioTrackChannelConfig(channelCount);
   }
 
   // Suppression needed for IntDef casting.
@@ -443,10 +551,25 @@ public final class AudioCapabilities {
     return audioProfiles.build();
   }
 
+  private static boolean isBluetoothConnected(
+      AudioManager audioManager, @Nullable AudioDeviceInfo currentDevice) {
+    // Check the current device if known or all devices otherwise.
+    AudioDeviceInfo[] audioDeviceInfos =
+        currentDevice == null
+            ? checkNotNull(audioManager).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            : new AudioDeviceInfo[] {currentDevice};
+    for (AudioDeviceInfo audioDeviceInfo : audioDeviceInfos) {
+      if (DeviceTypeUtil.isBluetoothDevice(audioDeviceInfo.getType())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static final class AudioProfile {
 
     public static final AudioProfile DEFAULT_AUDIO_PROFILE =
-        (Util.SDK_INT >= 33)
+        (SDK_INT >= 33)
             ? new AudioProfile(
                 C.ENCODING_PCM_16BIT,
                 getAllChannelMasksForMaxChannelCount(DEFAULT_MAX_CHANNEL_COUNT))
@@ -473,12 +596,15 @@ public final class AudioCapabilities {
       this.channelMasks = null;
     }
 
-    public boolean supportsChannelCount(int channelCount) {
+    private boolean supportsChannelConfig(int channelCount, Format format) {
       if (channelMasks == null) {
         return channelCount <= maxChannelCount;
       }
 
-      int channelMask = Util.getAudioTrackChannelConfig(channelCount);
+      int channelMask =
+          (format.channelMask != Format.NO_VALUE && format.channelCount == channelCount)
+              ? format.channelMask
+              : Util.getAudioTrackChannelConfig(channelCount);
       if (channelMask == AudioFormat.CHANNEL_INVALID) {
         return false;
       }
@@ -490,7 +616,7 @@ public final class AudioCapabilities {
       if (channelMasks != null) {
         // We built the AudioProfile on API 33.
         return maxChannelCount;
-      } else if (Util.SDK_INT >= 29) {
+      } else if (SDK_INT >= 29) {
         return Api29.getMaxSupportedChannelCountForPassthrough(
             encoding, sampleRate, audioAttributes);
       }
@@ -516,7 +642,7 @@ public final class AudioCapabilities {
       AudioProfile audioProfile = (AudioProfile) other;
       return encoding == audioProfile.encoding
           && maxChannelCount == audioProfile.maxChannelCount
-          && Util.areEqual(channelMasks, audioProfile.channelMasks);
+          && Objects.equals(channelMasks, audioProfile.channelMasks);
     }
 
     @Override
@@ -539,50 +665,6 @@ public final class AudioCapabilities {
     }
   }
 
-  @RequiresApi(23)
-  private static final class Api23 {
-    private Api23() {}
-
-    public static boolean isBluetoothConnected(
-        AudioManager audioManager, @Nullable AudioDeviceInfoApi23 currentDevice) {
-      // Check the current device if known or all devices otherwise.
-      AudioDeviceInfo[] audioDeviceInfos =
-          currentDevice == null
-              ? checkNotNull(audioManager).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-              : new AudioDeviceInfo[] {currentDevice.audioDeviceInfo};
-      ImmutableSet<Integer> allBluetoothDeviceTypesSet = getAllBluetoothDeviceTypes();
-      for (AudioDeviceInfo audioDeviceInfo : audioDeviceInfos) {
-        if (allBluetoothDeviceTypesSet.contains(audioDeviceInfo.getType())) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    /**
-     * Returns all the possible bluetooth device types that can be returned by {@link
-     * AudioDeviceInfo#getType()}.
-     *
-     * <p>The types {@link AudioDeviceInfo#TYPE_BLUETOOTH_A2DP} and {@link
-     * AudioDeviceInfo#TYPE_BLUETOOTH_SCO} are included from API 23. And the types {@link
-     * AudioDeviceInfo#TYPE_BLE_HEADSET} and {@link AudioDeviceInfo#TYPE_BLE_SPEAKER} are added from
-     * API 31. And the type {@link AudioDeviceInfo#TYPE_BLE_BROADCAST} is added from API 33.
-     */
-    private static ImmutableSet<Integer> getAllBluetoothDeviceTypes() {
-      ImmutableSet.Builder<Integer> allBluetoothDeviceTypes =
-          new ImmutableSet.Builder<Integer>()
-              .add(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO);
-      if (Util.SDK_INT >= 31) {
-        allBluetoothDeviceTypes.add(
-            AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER);
-      }
-      if (Util.SDK_INT >= 33) {
-        allBluetoothDeviceTypes.add(AudioDeviceInfo.TYPE_BLE_BROADCAST);
-      }
-      return allBluetoothDeviceTypes.build();
-    }
-  }
-
   @RequiresApi(29)
   private static final class Api29 {
 
@@ -592,7 +674,7 @@ public final class AudioCapabilities {
         AudioAttributes audioAttributes) {
       ImmutableList.Builder<Integer> supportedEncodingsListBuilder = ImmutableList.builder();
       for (int encoding : ALL_SURROUND_ENCODINGS_AND_MAX_CHANNELS.keySet()) {
-        if (Util.SDK_INT < Util.getApiLevelThatAudioFormatIntroducedAudioEncoding(encoding)) {
+        if (SDK_INT < Util.getApiLevelThatAudioFormatIntroducedAudioEncoding(encoding)) {
           // Example: AudioFormat.ENCODING_DTS_UHD_P2 is supported only from API 34.
           continue;
         }
@@ -602,7 +684,7 @@ public final class AudioCapabilities {
                 .setEncoding(encoding)
                 .setSampleRate(DEFAULT_SAMPLE_RATE_HZ)
                 .build(),
-            audioAttributes.getAudioAttributesV21().audioAttributes)) {
+            audioAttributes.getPlatformAudioAttributes())) {
           supportedEncodingsListBuilder.add(encoding);
         }
       }
@@ -630,7 +712,7 @@ public final class AudioCapabilities {
                 .setChannelMask(channelConfig)
                 .build();
         if (AudioTrack.isDirectPlaybackSupported(
-            audioFormat, audioAttributes.getAudioAttributesV21().audioAttributes)) {
+            audioFormat, audioAttributes.getPlatformAudioAttributes())) {
           return channelCount;
         }
       }
@@ -644,35 +726,31 @@ public final class AudioCapabilities {
     private Api33() {}
 
     public static AudioCapabilities getCapabilitiesInternalForDirectPlayback(
-        AudioManager audioManager, AudioAttributes audioAttributes) {
+        AudioManager audioManager,
+        AudioAttributes audioAttributes,
+        List<Integer> speakerLayoutChannelMasks,
+        List<Integer> spatializerChannelMasks) {
       List<android.media.AudioProfile> directAudioProfiles =
-          audioManager.getDirectProfilesForAttributes(
-              audioAttributes.getAudioAttributesV21().audioAttributes);
-      return new AudioCapabilities(getAudioProfiles(directAudioProfiles));
+          audioManager.getDirectProfilesForAttributes(audioAttributes.getPlatformAudioAttributes());
+      return new AudioCapabilities(
+          getAudioProfiles(directAudioProfiles),
+          speakerLayoutChannelMasks,
+          spatializerChannelMasks);
     }
 
     @Nullable
-    public static AudioDeviceInfoApi23 getDefaultRoutedDeviceForAttributes(
+    public static AudioDeviceInfo getDefaultRoutedDeviceForAttributes(
         AudioManager audioManager, AudioAttributes audioAttributes) {
-      List<AudioDeviceInfo> audioDevices;
-      try {
-        audioDevices =
-            checkNotNull(audioManager)
-                .getAudioDevicesForAttributes(
-                    audioAttributes.getAudioAttributesV21().audioAttributes);
-      } catch (RuntimeException e) {
-        // Audio manager failed to retrieve devices.
-        // TODO: b/306324391 - Remove once https://github.com/robolectric/robolectric/commit/442dff
-        //  is released.
-        return null;
-      }
+      List<AudioDeviceInfo> audioDevices =
+          checkNotNull(audioManager)
+              .getAudioDevicesForAttributes(audioAttributes.getPlatformAudioAttributes());
       if (audioDevices.isEmpty()) {
         // Can't find current device.
         return null;
       }
       // List only has more than one element if output devices are duplicated, so we assume the
       // first device in the list has all the information we need.
-      return new AudioDeviceInfoApi23(audioDevices.get(0));
+      return audioDevices.get(0);
     }
   }
 }

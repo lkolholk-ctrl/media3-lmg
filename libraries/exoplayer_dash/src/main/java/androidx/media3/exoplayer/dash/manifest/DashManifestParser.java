@@ -18,6 +18,7 @@ package androidx.media3.exoplayer.dash.manifest;
 import static androidx.media3.exoplayer.dash.manifest.BaseUrl.DEFAULT_DVB_PRIORITY;
 import static androidx.media3.exoplayer.dash.manifest.BaseUrl.DEFAULT_WEIGHT;
 import static androidx.media3.exoplayer.dash.manifest.BaseUrl.PRIORITY_UNSET;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.net.Uri;
 import android.text.TextUtils;
@@ -26,13 +27,13 @@ import android.util.Pair;
 import android.util.Xml;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
+import androidx.media3.common.ColorInfo;
 import androidx.media3.common.DrmInitData;
 import androidx.media3.common.DrmInitData.SchemeData;
 import androidx.media3.common.Format;
 import androidx.media3.common.Label;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
@@ -47,6 +48,7 @@ import androidx.media3.exoplayer.upstream.ParsingLoadable;
 import androidx.media3.extractor.metadata.emsg.EventMessage;
 import androidx.media3.extractor.mp4.PsshAtomUtil;
 import com.google.common.base.Ascii;
+import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import java.io.ByteArrayOutputStream;
@@ -65,6 +67,7 @@ import org.xmlpull.v1.XmlPullParserFactory;
 import org.xmlpull.v1.XmlSerializer;
 
 /** A parser of media presentation description files. */
+@SuppressWarnings("nullness") // TODO: b/78934030 - Add missing nullness checks to this class.
 @UnstableApi
 public class DashManifestParser extends DefaultHandler
     implements ParsingLoadable.Parser<DashManifest> {
@@ -79,8 +82,22 @@ public class DashManifestParser extends DefaultHandler
 
   /**
    * Maps the value attribute of an AudioChannelConfiguration with schemeIdUri
-   * "urn:mpeg:mpegB:cicp:ChannelConfiguration", as defined by ISO 23001-8 clause 8.1, to a channel
-   * count.
+   * "tag:dolby.com,2015:dash:audio_channel_configuration:2015" to the corresponding number of
+   * channels for each speaker group, as defined by ETSI TS 103 190-2 v1.2.1 clause G.3.
+   *
+   * <p>Table A.27 in ETSI TS 103 190-2 v1.2.1 defines the speaker counts for each speaker group
+   * index. The channel count is calculated by summing the speaker counts for the present indexes.
+   *
+   * <p>For example, a value of "0x3" (binary "11") indicates the presence of speaker groups 0 and
+   * 1. This maps to 2 + 1 = 3 channels.
+   */
+  private static final int[] DOLBY_AC4_CHANNEL_CONFIGURATION_MAPPING =
+      new int[] {2, 1, 2, 2, 2, 2, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1, 2, 2, 2};
+
+  /**
+   * Maps the value attribute of an AudioChannelConfiguration with schemeIdUri
+   * "urn:mpeg:mpegB:cicp:ChannelConfiguration", as defined by ISO 23091-3:2018 clause 6.2, to a
+   * channel count.
    */
   private static final int[] MPEG_CHANNEL_CONFIGURATION_MAPPING =
       new int[] {
@@ -112,6 +129,10 @@ public class DashManifestParser extends DefaultHandler
       }
       return parseMediaPresentationDescription(xpp, uri);
     } catch (XmlPullParserException e) {
+      if (e.getDetail() instanceof IOException) {
+        // Forward IOException from input stream directly instead of wrapping in a ParserException
+        throw (IOException) e.getDetail();
+      }
       throw ParserException.createForMalformedManifest(/* message= */ null, /* cause= */ e);
     }
   }
@@ -134,13 +155,14 @@ public class DashManifestParser extends DefaultHandler
     long publishTimeMs = parseDateTime(xpp, "publishTime", C.TIME_UNSET);
     ProgramInformation programInformation = null;
     UtcTimingElement utcTiming = null;
-    Uri location = null;
+    List<Location> locations = new ArrayList<>();
     ServiceDescriptionElement serviceDescription = null;
     long baseUrlAvailabilityTimeOffsetUs = dynamic ? 0 : C.TIME_UNSET;
+    String documentBaseUriString = documentBaseUri.toString();
     BaseUrl documentBaseUrl =
         new BaseUrl(
-            documentBaseUri.toString(),
-            /* serviceLocation= */ documentBaseUri.toString(),
+            documentBaseUriString,
+            /* serviceLocation= */ documentBaseUriString,
             dvbProfileDeclared ? DEFAULT_DVB_PRIORITY : PRIORITY_UNSET,
             DEFAULT_WEIGHT);
     ArrayList<BaseUrl> parentBaseUrls = Lists.newArrayList(documentBaseUrl);
@@ -164,7 +186,13 @@ public class DashManifestParser extends DefaultHandler
       } else if (XmlPullParserUtil.isStartTag(xpp, "UTCTiming")) {
         utcTiming = parseUtcTiming(xpp);
       } else if (XmlPullParserUtil.isStartTag(xpp, "Location")) {
-        location = UriUtil.resolveToUri(documentBaseUri.toString(), xpp.nextText());
+        String serviceLocation = xpp.getAttributeValue(null, "serviceLocation");
+        String locationUrlString = xpp.nextText();
+        Uri resolvedUrl = Uri.parse(UriUtil.resolve(documentBaseUriString, locationUrlString));
+        locations.add(
+            serviceLocation != null
+                ? new Location(resolvedUrl, serviceLocation)
+                : new Location(resolvedUrl));
       } else if (XmlPullParserUtil.isStartTag(xpp, "ServiceDescription")) {
         serviceDescription = parseServiceDescription(xpp);
       } else if (XmlPullParserUtil.isStartTag(xpp, "Period") && !seenEarlyAccessPeriod) {
@@ -224,10 +252,16 @@ public class DashManifestParser extends DefaultHandler
         programInformation,
         utcTiming,
         serviceDescription,
-        location,
-        periods);
+        periods,
+        locations);
   }
 
+  /**
+   * @deprecated Use {@link #buildMediaPresentationDescription(long, long, long, boolean, long,
+   *     long, long, long, ProgramInformation, UtcTimingElement, ServiceDescriptionElement, List,
+   *     List)} instead.
+   */
+  @Deprecated
   protected DashManifest buildMediaPresentationDescription(
       long availabilityStartTime,
       long durationMs,
@@ -242,6 +276,36 @@ public class DashManifestParser extends DefaultHandler
       @Nullable ServiceDescriptionElement serviceDescription,
       @Nullable Uri location,
       List<Period> periods) {
+    return buildMediaPresentationDescription(
+        availabilityStartTime,
+        durationMs,
+        minBufferTimeMs,
+        dynamic,
+        minUpdateTimeMs,
+        timeShiftBufferDepthMs,
+        suggestedPresentationDelayMs,
+        publishTimeMs,
+        programInformation,
+        utcTiming,
+        serviceDescription,
+        periods,
+        location == null ? ImmutableList.of() : ImmutableList.of(new Location(location)));
+  }
+
+  protected DashManifest buildMediaPresentationDescription(
+      long availabilityStartTime,
+      long durationMs,
+      long minBufferTimeMs,
+      boolean dynamic,
+      long minUpdateTimeMs,
+      long timeShiftBufferDepthMs,
+      long suggestedPresentationDelayMs,
+      long publishTimeMs,
+      @Nullable ProgramInformation programInformation,
+      @Nullable UtcTimingElement utcTiming,
+      @Nullable ServiceDescriptionElement serviceDescription,
+      List<Period> periods,
+      List<Location> locations) {
     return new DashManifest(
         availabilityStartTime,
         durationMs,
@@ -254,8 +318,8 @@ public class DashManifestParser extends DefaultHandler
         programInformation,
         utcTiming,
         serviceDescription,
-        location,
-        periods);
+        periods,
+        locations);
   }
 
   protected UtcTimingElement parseUtcTiming(XmlPullParser xpp) {
@@ -399,6 +463,8 @@ public class DashManifestParser extends DefaultHandler
 
     String mimeType = xpp.getAttributeValue(null, "mimeType");
     String codecs = xpp.getAttributeValue(null, "codecs");
+    String supplementalCodecs = xpp.getAttributeValue(null, "scte214:supplementalCodecs");
+    String supplementalProfiles = xpp.getAttributeValue(null, "scte214:supplementalProfiles");
     int width = parseInt(xpp, "width", Format.NO_VALUE);
     int height = parseInt(xpp, "height", Format.NO_VALUE);
     float frameRate = parseFrameRate(xpp, Format.NO_VALUE);
@@ -441,7 +507,7 @@ public class DashManifestParser extends DefaultHandler
       } else if (XmlPullParserUtil.isStartTag(xpp, "Role")) {
         roleDescriptors.add(parseDescriptor(xpp, "Role"));
       } else if (XmlPullParserUtil.isStartTag(xpp, "AudioChannelConfiguration")) {
-        audioChannels = parseAudioChannelConfiguration(xpp);
+        audioChannels = parseAudioChannelConfiguration(xpp, codecs);
       } else if (XmlPullParserUtil.isStartTag(xpp, "Accessibility")) {
         accessibilityDescriptors.add(parseDescriptor(xpp, "Accessibility"));
       } else if (XmlPullParserUtil.isStartTag(xpp, "EssentialProperty")) {
@@ -455,6 +521,8 @@ public class DashManifestParser extends DefaultHandler
                 !baseUrls.isEmpty() ? baseUrls : parentBaseUrls,
                 mimeType,
                 codecs,
+                supplementalCodecs,
+                supplementalProfiles,
                 width,
                 height,
                 frameRate,
@@ -673,6 +741,8 @@ public class DashManifestParser extends DefaultHandler
       List<BaseUrl> parentBaseUrls,
       @Nullable String adaptationSetMimeType,
       @Nullable String adaptationSetCodecs,
+      @Nullable String adaptationSetSupplementalCodecs,
+      @Nullable String adaptationSetSupplementalProfiles,
       int adaptationSetWidth,
       int adaptationSetHeight,
       float adaptationSetFrameRate,
@@ -696,6 +766,10 @@ public class DashManifestParser extends DefaultHandler
 
     String mimeType = parseString(xpp, "mimeType", adaptationSetMimeType);
     String codecs = parseString(xpp, "codecs", adaptationSetCodecs);
+    String supplementalCodecs =
+        parseString(xpp, "scte214:supplementalCodecs", adaptationSetSupplementalCodecs);
+    String supplementalProfiles =
+        parseString(xpp, "scte214:supplementalProfiles", adaptationSetSupplementalProfiles);
     int width = parseInt(xpp, "width", adaptationSetWidth);
     int height = parseInt(xpp, "height", adaptationSetHeight);
     float frameRate = parseFrameRate(xpp, adaptationSetFrameRate);
@@ -720,7 +794,7 @@ public class DashManifestParser extends DefaultHandler
         }
         baseUrls.addAll(parseBaseUrl(xpp, parentBaseUrls, dvbProfileDeclared));
       } else if (XmlPullParserUtil.isStartTag(xpp, "AudioChannelConfiguration")) {
-        audioChannels = parseAudioChannelConfiguration(xpp);
+        audioChannels = parseAudioChannelConfiguration(xpp, codecs);
       } else if (XmlPullParserUtil.isStartTag(xpp, "SegmentBase")) {
         segmentBase = parseSegmentBase(xpp, (SingleSegmentBase) segmentBase);
       } else if (XmlPullParserUtil.isStartTag(xpp, "SegmentList")) {
@@ -781,9 +855,16 @@ public class DashManifestParser extends DefaultHandler
             adaptationSetRoleDescriptors,
             adaptationSetAccessibilityDescriptors,
             codecs,
+            supplementalCodecs,
+            supplementalProfiles,
             essentialProperties,
             supplementalProperties);
     segmentBase = segmentBase != null ? segmentBase : new SingleSegmentBase();
+    if (isStandaloneTextRepresentation(format) && segmentBase.presentationTimeOffset != 0) {
+      // DASH-IF IOP "Standalone Text Timing": @presentationTimeOffset SHALL be ignored for
+      // standalone text. See https://dashif.org/Guidelines-TimingModel/#standalone-text-timing
+      segmentBase = segmentBase.copyWithPresentationTimeOffset(0);
+    }
 
     return new RepresentationInfo(
         format,
@@ -810,6 +891,8 @@ public class DashManifestParser extends DefaultHandler
       List<Descriptor> roleDescriptors,
       List<Descriptor> accessibilityDescriptors,
       @Nullable String codecs,
+      @Nullable String supplementalCodecs,
+      @Nullable String supplementalProfiles,
       List<Descriptor> essentialProperties,
       List<Descriptor> supplementalProperties) {
     @Nullable String sampleMimeType = getSampleMimeType(containerMimeType, codecs);
@@ -818,6 +901,13 @@ public class DashManifestParser extends DefaultHandler
       if (MimeTypes.AUDIO_E_AC3_JOC.equals(sampleMimeType)) {
         codecs = MimeTypes.CODEC_E_AC3_JOC;
       }
+    }
+
+    @Nullable ColorInfo colorInfo = null;
+    if (MimeTypes.isDolbyVisionCodec(codecs, supplementalCodecs)) {
+      sampleMimeType = MimeTypes.VIDEO_DOLBY_VISION;
+      colorInfo = Util.getColorInfoForDolbyVision(codecs, supplementalCodecs, supplementalProfiles);
+      codecs = supplementalCodecs != null ? supplementalCodecs : codecs;
     }
     @C.SelectionFlags int selectionFlags = parseSelectionFlagsFromRoleDescriptors(roleDescriptors);
     @C.RoleFlags int roleFlags = parseRoleFlagsFromRoleDescriptors(roleDescriptors);
@@ -835,6 +925,7 @@ public class DashManifestParser extends DefaultHandler
             .setPeakBitrate(bitrate)
             .setSelectionFlags(selectionFlags)
             .setRoleFlags(roleFlags)
+            .setColorInfo(colorInfo)
             .setLanguage(language)
             .setTileCountHorizontal(tileCounts != null ? tileCounts.first : Format.NO_VALUE)
             .setTileCountVertical(tileCounts != null ? tileCounts.second : Format.NO_VALUE);
@@ -1487,7 +1578,7 @@ public class DashManifestParser extends DefaultHandler
 
   // AudioChannelConfiguration parsing.
 
-  protected int parseAudioChannelConfiguration(XmlPullParser xpp)
+  protected int parseAudioChannelConfiguration(XmlPullParser xpp, String codecs)
       throws XmlPullParserException, IOException {
     String schemeIdUri = parseString(xpp, "schemeIdUri", null);
     int audioChannels;
@@ -1508,6 +1599,9 @@ public class DashManifestParser extends DefaultHandler
       case "tag:dolby.com,2014:dash:audio_channel_configuration:2011":
       case "urn:dolby:dash:audio_channel_configuration:2011":
         audioChannels = parseDolbyChannelConfiguration(xpp);
+        break;
+      case "tag:dolby.com,2015:dash:audio_channel_configuration:2015":
+        audioChannels = parseDolbyAC4ChannelConfiguration(xpp, codecs);
         break;
       default:
         audioChannels = Format.NO_VALUE;
@@ -1799,7 +1893,7 @@ public class DashManifestParser extends DefaultHandler
     } else if (secondLanguage == null) {
       return firstLanguage;
     } else {
-      Assertions.checkState(firstLanguage.equals(secondLanguage));
+      checkState(firstLanguage.equals(secondLanguage));
       return firstLanguage;
     }
   }
@@ -1822,7 +1916,7 @@ public class DashManifestParser extends DefaultHandler
     } else if (secondType == C.TRACK_TYPE_UNKNOWN) {
       return firstType;
     } else {
-      Assertions.checkState(firstType == secondType);
+      checkState(firstType == secondType);
       return firstType;
     }
   }
@@ -1966,7 +2060,8 @@ public class DashManifestParser extends DefaultHandler
 
   /**
    * Parses the number of channels from the value attribute of an AudioChannelConfiguration with
-   * schemeIdUri "urn:mpeg:mpegB:cicp:ChannelConfiguration", as defined by ISO 23001-8 clause 8.1.
+   * schemeIdUri "urn:mpeg:mpegB:cicp:ChannelConfiguration", as defined by ISO 23091-3:2018 clause
+   * 6.2.
    *
    * @param xpp The parser from which to read.
    * @return The parsed number of channels, or {@link Format#NO_VALUE} if the channel count could
@@ -2043,6 +2138,65 @@ public class DashManifestParser extends DefaultHandler
     }
   }
 
+  /**
+   * Parses the number of channels from the value attribute of an AudioChannelConfiguration with
+   * schemeIdUri "tag:dolby.com,2015:dash:audio_channel_configuration:2015" as defined by table A.27
+   * in ETSI TS 103 190-2 v1.2.1.
+   *
+   * @param xpp The parser from which to read.
+   * @param codecs The codecs string from the current element being parsed.
+   * @return The parsed number of channels, or {@link Format#NO_VALUE} if the channel count could
+   *     not be parsed.
+   */
+  protected static int parseDolbyAC4ChannelConfiguration(XmlPullParser xpp, String codecs) {
+    @Nullable String value = xpp.getAttributeValue(null, "value");
+    // The value attribute must be set to a six-digit uppercase hexadecimal string.
+    if (value == null || value.length() != 6) {
+      return Format.NO_VALUE;
+    }
+
+    // Mask for bit 23, indicating object-based audio (See E.10.14 presentation_channel_mask_v1).
+    int objectBasedAudioFlag = 1 << 23;
+    int ac4ChannelMask = Integer.parseInt(value, /* radix= */ 16);
+    if ((ac4ChannelMask & objectBasedAudioFlag) != 0) {
+      // object-based audio content.
+      return parseDolbyAc4ObjectBasedChannelConfiguration(codecs);
+    }
+    // channel-based audio content.
+    return parseDolbyAc4ChannelBasedChannelConfiguration(ac4ChannelMask);
+  }
+
+  private static int parseDolbyAc4ObjectBasedChannelConfiguration(String codecs) {
+    String[] codecList = Util.splitCodecs(codecs);
+    if (codecList.length == 0) {
+      return Format.NO_VALUE;
+    }
+
+    // The AC-4 codec string format is "ac-4.xx.yy.zz", where zz is presentation level.
+    List<String> parts = Splitter.on('.').splitToList(Ascii.toLowerCase(codecList[0].trim()));
+    if (parts.size() != 4 || !parts.get(0).equals("ac-4")) {
+      return Format.NO_VALUE;
+    }
+
+    switch (parts.get(3)) {
+      case "03":
+        return 18; // AC-4 Level 3 object-based content is mapped to 17.1 channels.
+      case "04":
+        return 21; // AC-4 Level 4 object-based content is mapped to 20.1 channels.
+      default:
+        return Format.NO_VALUE;
+    }
+  }
+
+  private static int parseDolbyAc4ChannelBasedChannelConfiguration(int ac4ChannelMask) {
+    // Bits 0...18 indicate the presence of individual channel groups.
+    int channelCount = 0;
+    for (int i = 0; i < DOLBY_AC4_CHANNEL_CONFIGURATION_MAPPING.length; i++) {
+      channelCount += ((ac4ChannelMask >> i) & 0x1) * DOLBY_AC4_CHANNEL_CONFIGURATION_MAPPING[i];
+    }
+    return channelCount == 0 ? Format.NO_VALUE : channelCount;
+  }
+
   protected static long parseLastSegmentNumberSupplementalProperty(
       List<Descriptor> supplementalProperties) {
     for (int i = 0; i < supplementalProperties.size(); i++) {
@@ -2076,6 +2230,10 @@ public class DashManifestParser extends DefaultHandler
       }
     }
     return false;
+  }
+
+  private static boolean isStandaloneTextRepresentation(Format format) {
+    return format.containerMimeType != null && MimeTypes.isText(format.containerMimeType);
   }
 
   /** A parsed Representation element. */

@@ -46,6 +46,8 @@ public final class SubtitleTranscodingExtractorOutput implements ExtractorOutput
   private final SubtitleParser.Factory subtitleParserFactory;
   private final SparseArray<SubtitleTranscodingTrackOutput> textTrackOutputs;
 
+  private boolean hasTracksOtherThanTextAndMetadata;
+
   public SubtitleTranscodingExtractorOutput(
       ExtractorOutput delegate, SubtitleParser.Factory subtitleParserFactory) {
     this.delegate = delegate;
@@ -63,6 +65,9 @@ public final class SubtitleTranscodingExtractorOutput implements ExtractorOutput
 
   @Override
   public TrackOutput track(int id, @C.TrackType int type) {
+    if (type != C.TRACK_TYPE_TEXT && type != C.TRACK_TYPE_METADATA) {
+      hasTracksOtherThanTextAndMetadata = true;
+    }
     if (type != C.TRACK_TYPE_TEXT) {
       return delegate.track(id, type);
     }
@@ -79,6 +84,11 @@ public final class SubtitleTranscodingExtractorOutput implements ExtractorOutput
   @Override
   public void endTracks() {
     delegate.endTracks();
+    if (hasTracksOtherThanTextAndMetadata) {
+      for (int i = 0; i < textTrackOutputs.size(); i++) {
+        textTrackOutputs.valueAt(i).shouldSuppressParsingErrors(true);
+      }
+    }
   }
 
   @Override

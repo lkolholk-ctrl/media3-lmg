@@ -27,12 +27,12 @@ import androidx.media3.common.VideoFrameProcessor;
 import androidx.media3.common.audio.AudioProcessor.UnhandledAudioFormatException;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.common.util.Util;
 import com.google.common.collect.ImmutableBiMap;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.Objects;
 
 /** Thrown when a non-locally recoverable export failure occurs. */
 @UnstableApi
@@ -344,7 +344,7 @@ public final class ExportException extends Exception {
    * @param cause The cause of the failure.
    * @return The created instance.
    */
-  public static ExportException createForUnexpected(Exception cause) {
+  public static ExportException createForUnexpected(Throwable cause) {
     if (cause instanceof RuntimeException) {
       return new ExportException(
           "Unexpected runtime error", cause, ERROR_CODE_FAILED_RUNTIME_CHECK);
@@ -414,17 +414,17 @@ public final class ExportException extends Exception {
     @Nullable Throwable thisCause = getCause();
     @Nullable Throwable thatCause = other.getCause();
     if (thisCause != null && thatCause != null) {
-      if (!Util.areEqual(thisCause.getMessage(), thatCause.getMessage())) {
+      if (!Objects.equals(thisCause.getMessage(), thatCause.getMessage())) {
         return false;
       }
-      if (!Util.areEqual(thisCause.getClass(), thatCause.getClass())) {
+      if (!Objects.equals(thisCause.getClass(), thatCause.getClass())) {
         return false;
       }
     } else if (thisCause != null || thatCause != null) {
       return false;
     }
     return errorCode == other.errorCode
-        && Util.areEqual(getMessage(), other.getMessage())
+        && Objects.equals(getMessage(), other.getMessage())
         && timestampMs == other.timestampMs;
   }
 }

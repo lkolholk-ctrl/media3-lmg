@@ -16,7 +16,7 @@
 
 package androidx.media3.exoplayer.rtsp;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.os.Handler;
 import androidx.annotation.Nullable;
@@ -181,7 +181,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       // Resets the flag if user cancels loading.
       loadCancelled = false;
     } finally {
-      if (checkNotNull(dataChannel).needsClosingOnLoadCompletion()) {
+      if (dataChannel != null && dataChannel.needsClosingOnLoadCompletion()) {
         DataSourceUtil.closeQuietly(dataChannel);
         dataChannel = null;
       }

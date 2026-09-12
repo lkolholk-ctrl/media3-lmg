@@ -15,8 +15,8 @@
  */
 package androidx.media3.exoplayer;
 
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.exoplayer.MediaPeriodQueue.areDurationsCompatible;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.max;
 
 import androidx.annotation.Nullable;
@@ -25,7 +25,6 @@ import androidx.media3.common.Format;
 import androidx.media3.common.Timeline;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
-import androidx.media3.exoplayer.source.ClippingMediaPeriod;
 import androidx.media3.exoplayer.source.EmptySampleStream;
 import androidx.media3.exoplayer.source.MediaPeriod;
 import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
@@ -69,7 +68,7 @@ import java.io.IOException;
   public MediaPeriodInfo info;
 
   /**
-   * Whether all renderers are in the correct state for this {@link #mediaPeriod}.
+   * List of whether renderers are in the correct state for this {@link #mediaPeriod}.
    *
    * <p>Renderers that are needed must have been enabled with the {@link #sampleStreams} for this
    * {@link #mediaPeriod}. This means either {@link Renderer#enable(RendererConfiguration, Format[],
@@ -78,7 +77,7 @@ import java.io.IOException;
    *
    * <p>Renderers that are not needed must have been {@link Renderer#disable() disabled}.
    */
-  public boolean allRenderersInCorrectState;
+  private final boolean[] renderersInCorrectState;
 
   /**
    * LMG-fork (crossfade): индекс аудио-рендерера, назначенного этому периоду во
@@ -120,7 +119,8 @@ import java.io.IOException;
       MediaSourceList mediaSourceList,
       MediaPeriodInfo info,
       TrackSelectorResult emptyTrackSelectorResult,
-      long targetPreloadBufferDurationUs) {
+      long targetPreloadBufferDurationUs,
+      boolean usesStreamPrerollFlags) {
     this.rendererCapabilities = rendererCapabilities;
     this.rendererPositionOffsetUs = rendererPositionOffsetUs;
     this.trackSelector = trackSelector;
@@ -131,10 +131,12 @@ import java.io.IOException;
     this.trackGroups = TrackGroupArray.EMPTY;
     this.trackSelectorResult = emptyTrackSelectorResult;
     sampleStreams = new SampleStream[rendererCapabilities.length];
+    renderersInCorrectState = new boolean[rendererCapabilities.length];
     mayRetainStreamFlags = new boolean[rendererCapabilities.length];
-    mediaPeriod =
-        createMediaPeriod(
-            info.id, mediaSourceList, allocator, info.startPositionUs, info.endPositionUs);
+    mediaPeriod = mediaSourceList.createPeriod(info.id, allocator, info.startPositionUs);
+    if (usesStreamPrerollFlags) {
+      mediaPeriod.setUsesStreamPrerollFlags();
+    }
   }
 
   /**
@@ -172,6 +174,38 @@ import java.io.IOException;
    */
   public void setRendererIdx(int rendererIndex) {
     crossFadeRendererIndex = rendererIndex;
+  }
+
+  /** LMG: the selected audio slot, including a slot reassigned for overlap. */
+  public int getSelectedAudioRendererIndex() {
+    return getSelectedAudioRendererIndex(trackSelectorResult);
+  }
+
+  private int getSelectedAudioRendererIndex(TrackSelectorResult result) {
+    for (int i = 0; i < result.length; i++) {
+      if (rendererCapabilities[i].getTrackType() == C.TRACK_TYPE_AUDIO
+          && result.selections[i] != null) {
+        return i;
+      }
+    }
+    return C.INDEX_UNSET;
+  }
+
+  /**
+   * LMG: move the existing stream and its selection together to the overlap renderer.
+   * Google 1.11 reads these slots in RendererHolder for readiness, errors, seeks and
+   * transitions. Keeping the selection on the old renderer would bypass buffering.
+   * This does not seek or recreate the stream, or change its timestamps.
+   */
+  public void routeAudioForCrossfade(int targetIndex) {
+    int sourceIndex = getSelectedAudioRendererIndex();
+    checkState(sourceIndex != C.INDEX_UNSET);
+    checkState(rendererCapabilities[targetIndex].getTrackType() == C.TRACK_TYPE_AUDIO);
+    TrackSelectorResult routed =
+        CrossfadeTrackRouting.moveSelection(trackSelectorResult, sourceIndex, targetIndex);
+    CrossfadeTrackRouting.moveStream(sampleStreams, sourceIndex, targetIndex);
+    trackSelectorResult = routed;
+    crossFadeRendererIndex = targetIndex;
   }
 
   /**
@@ -246,7 +280,8 @@ import java.io.IOException;
         applyTrackSelection(
             selectorResult, requestedStartPositionUs, /* forceRecreateStreams= */ false);
     rendererPositionOffsetUs += info.startPositionUs - newStartPositionUs;
-    info = info.copyWithStartPositionUs(newStartPositionUs);
+    info =
+        info.copyWithStartPositionUs(newStartPositionUs, info.liveStreamStartPositionProjectionUs);
   }
 
   /**
@@ -290,6 +325,12 @@ import java.io.IOException;
       float playbackSpeed, Timeline timeline, boolean playWhenReady) throws ExoPlaybackException {
     TrackSelectorResult selectorResult =
         trackSelector.selectTracks(rendererCapabilities, getTrackGroups(), info.id, timeline);
+    // LMG: keep the selected audio on its live overlap renderer during reselection.
+    int audioIndex = getSelectedAudioRendererIndex(selectorResult);
+    if (crossFadeRendererIndex != C.INDEX_UNSET && audioIndex != C.INDEX_UNSET) {
+      selectorResult =
+          CrossfadeTrackRouting.moveSelection(selectorResult, audioIndex, crossFadeRendererIndex);
+    }
     for (int i = 0; i < selectorResult.length; i++) {
       if (selectorResult.isRendererEnabled(i)) {
         checkState(
@@ -441,15 +482,6 @@ import java.io.IOException;
     return trackSelectorResult;
   }
 
-  /** Updates the clipping to {@link MediaPeriodInfo#endPositionUs} if required. */
-  public void updateClipping() {
-    if (mediaPeriod instanceof ClippingMediaPeriod) {
-      long endPositionUs =
-          info.endPositionUs == C.TIME_UNSET ? C.TIME_END_OF_SOURCE : info.endPositionUs;
-      ((ClippingMediaPeriod) mediaPeriod).updateClipping(/* startUs= */ 0, endPositionUs);
-    }
-  }
-
   /**
    * Returns whether the media period has encountered an error that prevents it from being prepared
    * or reading data.
@@ -528,30 +560,10 @@ import java.io.IOException;
     return next == null;
   }
 
-  /** Returns a media period corresponding to the given {@code id}. */
-  private static MediaPeriod createMediaPeriod(
-      MediaPeriodId id,
-      MediaSourceList mediaSourceList,
-      Allocator allocator,
-      long startPositionUs,
-      long endPositionUs) {
-    MediaPeriod mediaPeriod = mediaSourceList.createPeriod(id, allocator, startPositionUs);
-    if (endPositionUs != C.TIME_UNSET) {
-      mediaPeriod =
-          new ClippingMediaPeriod(
-              mediaPeriod, /* enableInitialDiscontinuity= */ true, /* startUs= */ 0, endPositionUs);
-    }
-    return mediaPeriod;
-  }
-
   /** Releases the given {@code mediaPeriod}, logging and suppressing any errors. */
   private static void releaseMediaPeriod(MediaSourceList mediaSourceList, MediaPeriod mediaPeriod) {
     try {
-      if (mediaPeriod instanceof ClippingMediaPeriod) {
-        mediaSourceList.releasePeriod(((ClippingMediaPeriod) mediaPeriod).mediaPeriod);
-      } else {
-        mediaSourceList.releasePeriod(mediaPeriod);
-      }
+      mediaSourceList.releasePeriod(mediaPeriod);
     } catch (RuntimeException e) {
       // There's nothing we can do.
       Log.e(TAG, "Period release failed.", e);
@@ -567,6 +579,14 @@ import java.io.IOException;
   public void prepare(MediaPeriod.Callback callback, long startPositionUs) {
     prepareCalled = true;
     mediaPeriod.prepare(callback, startPositionUs);
+  }
+
+  public void setRendererToCorrectState(int index) {
+    renderersInCorrectState[index] = true;
+  }
+
+  public boolean isRendererInCorrectState(int index) {
+    return renderersInCorrectState[index];
   }
 
   /* package */ interface Factory {

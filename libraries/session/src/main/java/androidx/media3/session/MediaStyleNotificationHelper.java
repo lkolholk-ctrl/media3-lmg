@@ -16,8 +16,9 @@
 package androidx.media3.session;
 
 import static android.Manifest.permission.MEDIA_CONTENT_CONTROL;
+import static android.os.Build.VERSION.SDK_INT;
 import static androidx.core.app.NotificationCompat.COLOR_DEFAULT;
-import static androidx.media3.common.util.Assertions.checkArgument;
+import static com.google.common.base.Preconditions.checkArgument;
 
 import android.annotation.SuppressLint;
 import android.app.Notification;
@@ -31,18 +32,20 @@ import androidx.annotation.RequiresApi;
 import androidx.annotation.RequiresPermission;
 import androidx.core.app.NotificationBuilderWithBuilderAccessor;
 import androidx.core.graphics.drawable.IconCompat;
+import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
-import androidx.media3.common.util.Util;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
 /**
- * Class containing media specfic {@link androidx.core.app.NotificationCompat.Style styles} that you
- * can use with {@link androidx.core.app.NotificationCompat.Builder#setStyle}.
+ * Class containing media specific {@link androidx.core.app.NotificationCompat.Style styles} that
+ * you can use with {@link androidx.core.app.NotificationCompat.Builder#setStyle}.
  */
 @UnstableApi
 public class MediaStyleNotificationHelper {
+
+  private static final String TAG = "MediaStyleNotifHelper";
 
   public static final String EXTRA_MEDIA3_SESSION = "androidx.media3.session";
 
@@ -53,7 +56,7 @@ public class MediaStyleNotificationHelper {
    *
    * <p>In the expanded form, up to 5 {@link androidx.core.app.NotificationCompat.Action actions}
    * specified with {@link androidx.core.app.NotificationCompat.Builder #addAction(int,
-   * CharSequence, PendingIntent) addAction} will be shown as icon-only pushbuttons, suitable for
+   * CharSequence, PendingIntent) addAction} will be shown as icon-only push buttons, suitable for
    * transport controls. The Bitmap given to {@link androidx.core.app.NotificationCompat.Builder
    * #setLargeIcon(android.graphics.Bitmap) setLargeIcon()} will be treated as album artwork.
    *
@@ -100,8 +103,16 @@ public class MediaStyleNotificationHelper {
       if (extras == null) {
         return null;
       }
-      Bundle sessionTokenBundle = extras.getBundle(EXTRA_MEDIA3_SESSION);
-      return sessionTokenBundle == null ? null : SessionToken.fromBundle(sessionTokenBundle);
+      try {
+        Bundle sessionTokenBundle = extras.getBundle(EXTRA_MEDIA3_SESSION);
+        if (sessionTokenBundle == null) {
+          return null;
+        }
+        return SessionToken.fromBundle(sessionTokenBundle);
+      } catch (RuntimeException e) {
+        Log.w(TAG, "Failed to restore SessionToken from notification", e);
+        return null;
+      }
     }
 
     private static final int MAX_MEDIA_BUTTONS_IN_COMPACT = 3;
@@ -190,17 +201,12 @@ public class MediaStyleNotificationHelper {
 
     @Override
     public void apply(NotificationBuilderWithBuilderAccessor builder) {
-      // Avoid ambiguity with androidx.media3.session.Session.Token
-      @SuppressWarnings("UnnecessarilyFullyQualified")
       Notification.MediaStyle style =
-          new Notification.MediaStyle()
-              .setMediaSession(
-                  (android.media.session.MediaSession.Token)
-                      session.getSessionCompat().getSessionToken().getToken());
+          new Notification.MediaStyle().setMediaSession(session.getPlatformToken());
       if (actionsToShowInCompact != null) {
         style.setShowActionsInCompactView(actionsToShowInCompact);
       }
-      if (Util.SDK_INT >= 34 && remoteDeviceName != null) {
+      if (SDK_INT >= 34 && remoteDeviceName != null) {
         Api34Impl.setRemotePlaybackInfo(
             style, remoteDeviceName, remoteDeviceIconRes, remoteDeviceIntent);
         builder.getBuilder().setStyle(style);
@@ -332,7 +338,7 @@ public class MediaStyleNotificationHelper {
 
     @Override
     public void apply(NotificationBuilderWithBuilderAccessor builder) {
-      if (Util.SDK_INT < 24) {
+      if (SDK_INT < 24) {
         super.apply(builder);
         return;
       }
@@ -341,7 +347,7 @@ public class MediaStyleNotificationHelper {
       if (actionsToShowInCompact != null) {
         style.setShowActionsInCompactView(actionsToShowInCompact);
       }
-      if (Util.SDK_INT >= 34 && remoteDeviceName != null) {
+      if (SDK_INT >= 34 && remoteDeviceName != null) {
         Api34Impl.setRemotePlaybackInfo(
             style, remoteDeviceName, remoteDeviceIconRes, remoteDeviceIntent);
         builder.getBuilder().setStyle(style);
@@ -357,7 +363,7 @@ public class MediaStyleNotificationHelper {
     @Nullable
     @SuppressWarnings("nullness:override.return") // NotificationCompat doesn't annotate @Nullable
     public RemoteViews makeContentView(NotificationBuilderWithBuilderAccessor builder) {
-      if (Util.SDK_INT >= 24) {
+      if (SDK_INT >= 24) {
         // No custom content view required
         return null;
       }
@@ -385,7 +391,7 @@ public class MediaStyleNotificationHelper {
     @Nullable
     @SuppressWarnings("nullness:override.return") // NotificationCompat doesn't annotate @Nullable
     public RemoteViews makeBigContentView(NotificationBuilderWithBuilderAccessor builder) {
-      if (Util.SDK_INT >= 24) {
+      if (SDK_INT >= 24) {
         // No custom big content view required
         return null;
       }
@@ -414,7 +420,7 @@ public class MediaStyleNotificationHelper {
     @Nullable
     @SuppressWarnings("nullness:override.return") // NotificationCompat doesn't annotate @Nullable
     public RemoteViews makeHeadsUpContentView(NotificationBuilderWithBuilderAccessor builder) {
-      if (Util.SDK_INT >= 24) {
+      if (SDK_INT >= 24) {
         // No custom heads up content view required
         return null;
       }

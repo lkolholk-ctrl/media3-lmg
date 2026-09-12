@@ -56,6 +56,8 @@ public final class DumpableFormat implements Dumper.Dumpable {
         "maxNumReorderSamples", format, DEFAULT_FORMAT, format -> format.maxNumReorderSamples);
     dumper.addIfNonDefault("width", format, DEFAULT_FORMAT, format -> format.width);
     dumper.addIfNonDefault("height", format, DEFAULT_FORMAT, format -> format.height);
+    dumper.addIfNonDefault("decodedWidth", format, DEFAULT_FORMAT, format -> format.decodedWidth);
+    dumper.addIfNonDefault("decodedHeight", format, DEFAULT_FORMAT, format -> format.decodedHeight);
     dumper.addIfNonDefault(
         "frameRate",
         format,
@@ -64,7 +66,10 @@ public final class DumpableFormat implements Dumper.Dumpable {
     dumper.addIfNonDefault(
         "rotationDegrees", format, DEFAULT_FORMAT, format -> format.rotationDegrees);
     dumper.addIfNonDefault(
+        "mirrorHorizontal", format, DEFAULT_FORMAT, format -> format.mirrorHorizontal);
+    dumper.addIfNonDefault(
         "pixelWidthHeightRatio", format, DEFAULT_FORMAT, format -> format.pixelWidthHeightRatio);
+    dumper.addIfNonDefault("maxSubLayers", format, DEFAULT_FORMAT, format -> format.maxSubLayers);
     @Nullable ColorInfo colorInfo = format.colorInfo;
     if (colorInfo != null) {
       dumper.startBlock("colorInfo");
@@ -80,8 +85,17 @@ public final class DumpableFormat implements Dumper.Dumpable {
       dumper.endBlock();
     }
     dumper.addIfNonDefault("channelCount", format, DEFAULT_FORMAT, format -> format.channelCount);
+    dumper.addIfNonDefault(
+        "channelMask",
+        format,
+        DEFAULT_FORMAT,
+        format -> Util.formatInvariant("0x%08X", format.channelMask));
     dumper.addIfNonDefault("sampleRate", format, DEFAULT_FORMAT, format -> format.sampleRate);
-    dumper.addIfNonDefault("pcmEncoding", format, DEFAULT_FORMAT, format -> format.pcmEncoding);
+    dumper.addIfNonDefault(
+        "pcmEncoding",
+        format,
+        DEFAULT_FORMAT,
+        format -> Util.getEncodingString(format.pcmEncoding));
     dumper.addIfNonDefault("encoderDelay", format, DEFAULT_FORMAT, format -> format.encoderDelay);
     dumper.addIfNonDefault(
         "encoderPadding", format, DEFAULT_FORMAT, format -> format.encoderPadding);

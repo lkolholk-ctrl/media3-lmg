@@ -16,10 +16,11 @@
 package androidx.media3.common.audio;
 
 import static androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER;
-import static androidx.media3.common.util.Assertions.checkState;
+import static com.google.common.base.Preconditions.checkState;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.audio.AudioProcessor.AudioFormat;
+import androidx.media3.common.audio.AudioProcessor.StreamMetadata;
 import androidx.media3.common.util.UnstableApi;
 import com.google.common.collect.ImmutableList;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
@@ -40,7 +41,7 @@ import java.util.List;
  *   <li>Call {@link #configure(AudioFormat)} with the {@link AudioFormat} of the input data. This
  *       method will give back the {@link AudioFormat} that will be output from the pipeline when
  *       this configuration is in use.
- *   <li>Call {@link #flush()} to apply the pending configuration.
+ *   <li>Call {@link #flush(StreamMetadata)} to apply the pending configuration.
  *   <li>Check if the pipeline {@link #isOperational()}. If not, then the pipeline can not be used
  *       to process buffers in the current configuration. This is because none of the underlying
  *       {@link AudioProcessor} instances are {@linkplain AudioProcessor#isActive active}.
@@ -61,7 +62,7 @@ import java.util.List;
  *       this time.
  *   <li>{@link #queueEndOfStream()} to inform the pipeline the current input stream is at an end.
  *   <li>Repeatedly call {@link #getOutput()} until {@link #isEnded()} returns true.
- *   <li>Call {@link #flush()} to apply the new configuration and flush the pipeline.
+ *   <li>Call {@link #flush(StreamMetadata)} to apply the new configuration and flush the pipeline.
  *   <li>Begin {@linkplain #queueInput(ByteBuffer) queuing input} and handling the {@linkplain
  *       #getOutput() output} in the new configuration.
  * </ul>
@@ -87,7 +88,7 @@ public final class AudioProcessingPipeline {
   /** The {@link AudioFormat} currently being output by the pipeline. */
   private AudioFormat outputAudioFormat;
 
-  /** The {@link AudioFormat} that will be output following a {@link #flush()}. */
+  /** The {@link AudioFormat} that will be output following a {@link #flush(StreamMetadata)}. */
   private AudioFormat pendingOutputAudioFormat;
 
   /** Whether input has ended, either due to configuration change or end of stream. */
@@ -111,13 +112,14 @@ public final class AudioProcessingPipeline {
    * Configures the pipeline to process input audio with the specified format. Returns the
    * configured output audio format.
    *
-   * <p>To apply the new configuration for use, the pipeline must be {@linkplain #flush() flushed}.
-   * Before applying the new configuration, it is safe to queue input and get output in the old
-   * input/output formats/configuration. Call {@link #queueEndOfStream()} when no more input will be
-   * supplied for processing in the old configuration.
+   * <p>To apply the new configuration for use, the pipeline must be {@linkplain
+   * #flush(StreamMetadata) flushed}. Before applying the new configuration, it is safe to queue
+   * input and get output in the old input/output formats/configuration. Call {@link
+   * #queueEndOfStream()} when no more input will be supplied for processing in the old
+   * configuration.
    *
    * @param inputAudioFormat The format of audio that will be queued after the next call to {@link
-   *     #flush()}.
+   *     #flush(StreamMetadata)}.
    * @return The configured output audio format.
    * @throws AudioProcessor.UnhandledAudioFormatException If the specified format is not supported
    *     by the pipeline.
@@ -150,18 +152,46 @@ public final class AudioProcessingPipeline {
    *
    * <p>{@link #configure(AudioFormat)} must have been called at least once since the last call to
    * {@link #reset()} before calling this.
+   *
+   * <p>This method is equivalent to {@code flush(new StreamMetadata(C.TIME_UNSET))}.
+   *
+   * @deprecated Use {@link #flush(StreamMetadata)} instead.
    */
+  @Deprecated
   public void flush() {
+    flush(StreamMetadata.DEFAULT);
+  }
+
+  /**
+   * Clears any buffered data and pending output. If any underlying audio processors are {@linkplain
+   * AudioProcessor#isActive() active}, this also prepares them to receive a new stream of input in
+   * the last {@linkplain #configure(AudioFormat) configured} (pending) format.
+   *
+   * <p>{@link #configure(AudioFormat)} must have been called at least once since the last call to
+   * {@link #reset()} before calling this.
+   *
+   * @param streamMetadata Information about the input stream to be processed after the flush.
+   */
+  public void flush(StreamMetadata streamMetadata) {
     activeAudioProcessors.clear();
     outputAudioFormat = pendingOutputAudioFormat;
     inputEnded = false;
+    StreamMetadata previousStreamMetadata = streamMetadata;
 
     for (int i = 0; i < audioProcessors.size(); i++) {
       AudioProcessor audioProcessor = audioProcessors.get(i);
-      audioProcessor.flush();
-      if (audioProcessor.isActive()) {
-        activeAudioProcessors.add(audioProcessor);
+      audioProcessor.flush(previousStreamMetadata);
+      if (!audioProcessor.isActive()) {
+        continue;
       }
+      previousStreamMetadata =
+          previousStreamMetadata
+              .buildUpon()
+              .setPositionOffsetUs(
+                  audioProcessor.getDurationAfterProcessorApplied(
+                      previousStreamMetadata.positionOffsetUs))
+              .build();
+      activeAudioProcessors.add(audioProcessor);
     }
 
     outputBuffers = new ByteBuffer[activeAudioProcessors.size()];
@@ -174,7 +204,8 @@ public final class AudioProcessingPipeline {
    * Returns the {@link AudioFormat} of data being output through {@link #getOutput()}.
    *
    * @return The {@link AudioFormat} currently being output, or {@link AudioFormat#NOT_SET} if no
-   *     {@linkplain #configure(AudioFormat) configuration} has been {@linkplain #flush() applied}.
+   *     {@linkplain #configure(AudioFormat) configuration} has been {@linkplain
+   *     #flush(StreamMetadata) applied}.
    */
   public AudioFormat getOutputAudioFormat() {
     return outputAudioFormat;
@@ -184,9 +215,9 @@ public final class AudioProcessingPipeline {
    * Whether the pipeline can be used for processing buffers.
    *
    * <p>For this to happen the pipeline must be {@linkplain #configure(AudioFormat) configured},
-   * {@linkplain #flush() flushed} and have {@linkplain AudioProcessor#isActive() active}
-   * {@linkplain AudioProcessor underlying audio processors} that are ready to process buffers with
-   * the current configuration.
+   * {@linkplain #flush(StreamMetadata) flushed} and have {@linkplain AudioProcessor#isActive()
+   * active} {@linkplain AudioProcessor underlying audio processors} that are ready to process
+   * buffers with the current configuration.
    */
   public boolean isOperational() {
     return !activeAudioProcessors.isEmpty();
@@ -232,10 +263,10 @@ public final class AudioProcessingPipeline {
 
   /**
    * Queues an end of stream signal. After this method has been called, {@link
-   * #queueInput(ByteBuffer)} should not be called until after the next call to {@link #flush()}.
-   * Calling {@link #getOutput()} will return any remaining output data. Multiple calls may be
-   * required to read all of the remaining output data. {@link #isEnded()} will return {@code true}
-   * once all remaining output data has been read.
+   * #queueInput(ByteBuffer)} should not be called until after the next call to {@link
+   * #flush(StreamMetadata)}. Calling {@link #getOutput()} will return any remaining output data.
+   * Multiple calls may be required to read all of the remaining output data. {@link #isEnded()}
+   * will return {@code true} once all remaining output data has been read.
    */
   public void queueEndOfStream() {
     if (!isOperational() || inputEnded) {
@@ -269,9 +300,10 @@ public final class AudioProcessingPipeline {
   public void reset() {
     for (int i = 0; i < audioProcessors.size(); i++) {
       AudioProcessor audioProcessor = audioProcessors.get(i);
-      audioProcessor.flush();
+      audioProcessor.flush(StreamMetadata.DEFAULT);
       audioProcessor.reset();
     }
+    activeAudioProcessors.clear();
     outputBuffers = new ByteBuffer[0];
     outputAudioFormat = AudioFormat.NOT_SET;
     pendingOutputAudioFormat = AudioFormat.NOT_SET;

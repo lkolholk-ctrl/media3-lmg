@@ -15,14 +15,19 @@
  */
 package androidx.media3.common.audio;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
+import androidx.media3.common.Timeline;
+import androidx.media3.common.Timeline.Window;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
-import com.google.common.base.Objects;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Objects;
 
 /**
  * Interface for audio processors, which take audio data as input and transform it, potentially
@@ -107,7 +112,7 @@ public interface AudioProcessor {
 
     @Override
     public int hashCode() {
-      return Objects.hashCode(sampleRate, channelCount, encoding);
+      return Objects.hash(sampleRate, channelCount, encoding);
     }
   }
 
@@ -125,12 +130,152 @@ public interface AudioProcessor {
     }
   }
 
+  /**
+   * Record class that holds information about the underlying stream being processed by an {@link
+   * AudioProcessor}
+   */
+  final class StreamMetadata {
+
+    /** A {@link StreamMetadata} instance populated with default values. */
+    public static final StreamMetadata DEFAULT = new StreamMetadata.Builder().build();
+
+    /** A builder for {@link StreamMetadata}. */
+    public static final class Builder {
+      private long positionOffsetUs;
+      private Timeline timeline;
+      @Nullable private Object periodUid;
+
+      /** Creates a new builder. */
+      public Builder() {
+        positionOffsetUs = 0;
+        timeline = Timeline.EMPTY;
+        periodUid = null;
+      }
+
+      private Builder(StreamMetadata streamMetadata) {
+        positionOffsetUs = streamMetadata.positionOffsetUs;
+        timeline = streamMetadata.timeline;
+        periodUid = streamMetadata.periodUid;
+      }
+
+      /**
+       * Sets the stream position in microseconds from which the processor will start receiving
+       * input buffers after a call to {@link #flush(StreamMetadata)}.
+       *
+       * <p>The position offset is aligned to the {@link Window} start position.
+       *
+       * <p>The offset value is up-to-date at the time of the {@link #flush(StreamMetadata)} call,
+       * but might change due to updates to the media structure. In that case, the offset value will
+       * not be updated until the next call to {@link #flush(StreamMetadata)}.
+       *
+       * @param positionOffsetUs The stream position offset in microseconds.
+       * @return This builder.
+       */
+      @CanIgnoreReturnValue
+      public Builder setPositionOffsetUs(long positionOffsetUs) {
+        this.positionOffsetUs = positionOffsetUs;
+        return this;
+      }
+
+      /**
+       * Sets the {@link Timeline} of the current playback this audio processor is used for.
+       *
+       * @param timeline The {@link Timeline}.
+       * @return This builder.
+       */
+      @CanIgnoreReturnValue
+      public Builder setTimeline(Timeline timeline) {
+        this.timeline = timeline;
+        return this;
+      }
+
+      /**
+       * Sets the {@link Timeline.Period#uid period UID} of the current playback this audio
+       * processor is used for.
+       *
+       * <p>If the period UID is non-null and the provided {@link Timeline} non-empty, this UID must
+       * be present in the provided {@link Timeline}.
+       *
+       * @param periodUid The {@link Timeline.Period#uid period UID} or {@code null} to leave it
+       *     undefined.
+       * @return This builder.
+       */
+      @CanIgnoreReturnValue
+      public Builder setPeriodUid(@Nullable Object periodUid) {
+        this.periodUid = periodUid;
+        return this;
+      }
+
+      /** Builds a {@link StreamMetadata} instance. */
+      public StreamMetadata build() {
+        if (!timeline.isEmpty() && periodUid != null) {
+          checkArgument(timeline.getIndexOfPeriod(periodUid) != C.INDEX_UNSET);
+        }
+        return new StreamMetadata(this);
+      }
+    }
+
+    /**
+     * The position of the underlying stream in microseconds from which the processor will start
+     * receiving input buffers after a call to {@link #flush(StreamMetadata)}.
+     *
+     * <p>The position offset is aligned to the {@link Window} start position.
+     *
+     * <p>The value is up-to-date at the time of the {@link #flush(StreamMetadata)} call, but might
+     * change due to updates to the media structure. In that case, the value will not be updated
+     * until the next call to {@link #flush(StreamMetadata)}.
+     */
+    public final long positionOffsetUs;
+
+    /**
+     * The {@link Timeline} of the current playback this audio processor is used for, or {@link
+     * Timeline#EMPTY} if undefined.
+     *
+     * <p>The value is up-to-date at the time of the {@link #flush(StreamMetadata)} call, but might
+     * change due to updates to the media structure. In that case, the value will not be updated
+     * until the next call to {@link #flush(StreamMetadata)}.
+     */
+    public final Timeline timeline;
+
+    /**
+     * The {@link Timeline.Period#uid period UID} of the current playback this audio processor is
+     * used for, or {@code null} if undefined.
+     *
+     * <p>The value is up-to-date at the time of the {@link #flush(StreamMetadata)} call, but might
+     * change due to updates to the media structure. In that case, the value will not be updated
+     * until the next call to {@link #flush(StreamMetadata)}.
+     */
+    @Nullable public final Object periodUid;
+
+    /**
+     * @deprecated Use {@link Builder} instead.
+     */
+    @Deprecated
+    public StreamMetadata(long positionOffsetUs) {
+      this(new Builder().setPositionOffsetUs(positionOffsetUs));
+    }
+
+    private StreamMetadata(Builder builder) {
+      positionOffsetUs = builder.positionOffsetUs;
+      timeline = builder.timeline;
+      periodUid = builder.periodUid;
+    }
+
+    /** Creates a {@link Builder} populated with the values from this object. */
+    public Builder buildUpon() {
+      return new Builder(this);
+    }
+  }
+
   /** An empty, direct {@link ByteBuffer}. */
   ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder());
 
   /**
    * Returns the expected duration of the output stream when the processor is applied given a input
    * {@code durationUs}.
+   *
+   * <p>This method assumes {@code durationUs} of input is applied from the beginning of the stream
+   * (i.e. after a {@code flush(StreamMetadata.DEFAULT)} call).
    */
   default long getDurationAfterProcessorApplied(long durationUs) {
     return durationUs;
@@ -195,8 +340,26 @@ public interface AudioProcessor {
   /**
    * Clears any buffered data and pending output. If the audio processor is active, also prepares
    * the audio processor to receive a new stream of input in the last configured (pending) format.
+   *
+   * <p>This is equivalent to {@code flush(new StreamMetadata(C.TIME_UNSET))}.
+   *
+   * @deprecated Use {@link #flush(StreamMetadata)} instead.
    */
-  void flush();
+  @Deprecated
+  default void flush() {
+    throw new IllegalStateException(
+        "AudioProcessor must implement at least one #flush() overload.");
+  }
+
+  /**
+   * Prepares the audio processor to receive a new stream of input in the last {@linkplain
+   * #configure configured format} and clears any buffered data and pending output.
+   *
+   * <p>This method is a no-op if the processor is not {@linkplain #isActive() active}.
+   */
+  default void flush(StreamMetadata streamMetadata) {
+    flush();
+  }
 
   /** Resets the processor to its unconfigured state, releasing any resources. */
   void reset();

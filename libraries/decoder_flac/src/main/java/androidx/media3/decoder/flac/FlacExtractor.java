@@ -16,6 +16,7 @@
 package androidx.media3.decoder.flac;
 
 import static androidx.media3.common.util.Util.getPcmEncoding;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import androidx.annotation.IntDef;
@@ -24,7 +25,6 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.decoder.flac.FlacBinarySearchSeeker.OutputFrameHolder;
@@ -55,6 +55,7 @@ public final class FlacExtractor implements Extractor {
   /** Factory that returns one extractor which is a {@link FlacExtractor}. */
   public static final ExtractorsFactory FACTORY = () -> new Extractor[] {new FlacExtractor()};
 
+  // LINT.IfChange
   /*
    * Flags in the two FLAC extractors should be kept in sync. If we ever change this then
    * DefaultExtractorsFactory will need modifying, because it currently assumes this is the case.
@@ -68,7 +69,7 @@ public final class FlacExtractor implements Extractor {
   @Target(TYPE_USE)
   @IntDef(
       flag = true,
-      value = {FLAG_DISABLE_ID3_METADATA})
+      value = {FLAG_DISABLE_ID3_METADATA, FLAG_DISABLE_ARTWORK_METADATA})
   public @interface Flags {}
 
   /**
@@ -78,8 +79,15 @@ public final class FlacExtractor implements Extractor {
   public static final int FLAG_DISABLE_ID3_METADATA =
       androidx.media3.extractor.flac.FlacExtractor.FLAG_DISABLE_ID3_METADATA;
 
+  /** Flag to disable parsing of artwork metadata. */
+  public static final int FLAG_DISABLE_ARTWORK_METADATA =
+      androidx.media3.extractor.flac.FlacExtractor.FLAG_DISABLE_ARTWORK_METADATA;
+
+  // LINT.ThenChange(../../../../../../../../extractor/src/main/java/androidx/media3/extractor/flac/FlacExtractor.java)
+
   private final ParsableByteArray outputBuffer;
   private final boolean id3MetadataDisabled;
+  private final boolean ignoreArtwork;
 
   @Nullable private FlacDecoderJni decoderJni;
   private @MonotonicNonNull ExtractorOutput extractorOutput;
@@ -106,6 +114,7 @@ public final class FlacExtractor implements Extractor {
   public FlacExtractor(int flags) {
     outputBuffer = new ParsableByteArray();
     id3MetadataDisabled = (flags & FLAG_DISABLE_ID3_METADATA) != 0;
+    ignoreArtwork = (flags & FLAG_DISABLE_ARTWORK_METADATA) != 0;
   }
 
   @Override
@@ -122,14 +131,16 @@ public final class FlacExtractor implements Extractor {
 
   @Override
   public boolean sniff(ExtractorInput input) throws IOException {
-    id3Metadata = FlacMetadataReader.peekId3Metadata(input, /* parseData= */ !id3MetadataDisabled);
+    id3Metadata =
+        FlacMetadataReader.peekId3Metadata(
+            input, /* parseData= */ !id3MetadataDisabled, ignoreArtwork);
     return FlacMetadataReader.checkAndPeekStreamMarker(input);
   }
 
   @Override
   public int read(final ExtractorInput input, PositionHolder seekPosition) throws IOException {
     if (input.getPosition() == 0 && !id3MetadataDisabled && id3Metadata == null) {
-      id3Metadata = FlacMetadataReader.peekId3Metadata(input, /* parseData= */ true);
+      id3Metadata = FlacMetadataReader.peekId3Metadata(input, /* parseData= */ true, ignoreArtwork);
     }
 
     FlacDecoderJni decoderJni = initDecoderJni(input);
@@ -184,7 +195,7 @@ public final class FlacExtractor implements Extractor {
   @EnsuresNonNull({"decoderJni", "extractorOutput", "trackOutput"}) // Ensures initialized.
   @SuppressWarnings("nullness:contracts.postcondition")
   private FlacDecoderJni initDecoderJni(ExtractorInput input) {
-    FlacDecoderJni decoderJni = Assertions.checkNotNull(this.decoderJni);
+    FlacDecoderJni decoderJni = checkNotNull(this.decoderJni);
     decoderJni.setData(input);
     return decoderJni;
   }
@@ -222,6 +233,7 @@ public final class FlacExtractor implements Extractor {
       @Nullable
       Metadata metadata = streamMetadata.getMetadataCopyWithAppendedEntriesFrom(id3Metadata);
       outputFormat(streamMetadata, metadata, trackOutput);
+      trackOutput.durationUs(streamMetadata.getDurationUs());
     }
   }
 
@@ -274,6 +286,7 @@ public final class FlacExtractor implements Extractor {
       FlacStreamMetadata streamMetadata, @Nullable Metadata metadata, TrackOutput output) {
     Format mediaFormat =
         new Format.Builder()
+            .setContainerMimeType(MimeTypes.AUDIO_FLAC)
             .setSampleMimeType(MimeTypes.AUDIO_RAW)
             .setAverageBitrate(streamMetadata.getDecodedBitrate())
             .setPeakBitrate(streamMetadata.getDecodedBitrate())

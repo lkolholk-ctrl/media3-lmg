@@ -15,10 +15,10 @@
  */
 package androidx.media3.extractor.ts;
 
-import static androidx.media3.extractor.mp4.FragmentedMp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA;
 import static androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS;
 import static androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS;
 import static androidx.media3.extractor.ts.TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES;
+import static androidx.media3.extractor.ts.TsExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA;
 import static androidx.media3.extractor.ts.TsExtractor.MODE_MULTI_PMT;
 import static androidx.media3.extractor.ts.TsExtractor.MODE_SINGLE_PMT;
 import static com.google.common.truth.Truth.assertThat;
@@ -182,10 +182,34 @@ public final class TsExtractorTest {
   }
 
   @Test
-  public void sampleWithDtsHd() throws Exception {
+  public void sampleWithDtsExpress() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
-        "media/ts/sample_dts_hd.ts",
+        "media/ts/sample_dts_express.ts",
+        simulationConfig);
+  }
+
+  @Test
+  public void sampleWithDtsHdMa() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(
+            subtitlesParsedDuringExtraction,
+            MODE_SINGLE_PMT,
+            new TimestampAdjuster(0),
+            new DefaultTsPayloadReaderFactory(FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS)),
+        "media/ts/sample_dts_hd_ma.ts",
+        simulationConfig);
+  }
+
+  @Test
+  public void sampleWithDtsHdAcrossPesBoundary() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(
+            subtitlesParsedDuringExtraction,
+            MODE_SINGLE_PMT,
+            new TimestampAdjuster(0),
+            new DefaultTsPayloadReaderFactory(FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS)),
+        "media/ts/sample_dts_hd_across_pes.ts",
         simulationConfig);
   }
 
@@ -407,6 +431,7 @@ public final class TsExtractorTest {
                 .setSampleMimeType("mime")
                 .setLanguage("und")
                 .build());
+    tsExtractor.release();
   }
 
   @Test
@@ -439,6 +464,7 @@ public final class TsExtractorTest {
       }
     }
     assertThat(factory.sdtReader.consumedSdts).isEqualTo(2);
+    tsExtractor.release();
   }
 
   private static ExtractorAsserts.ExtractorFactory getExtractorFactory(
@@ -545,7 +571,7 @@ public final class TsExtractorTest {
     public void consume(ParsableByteArray data) {}
 
     @Override
-    public void packetFinished(boolean isEndOfInput) {
+    public void packetFinished() {
       packetsRead++;
     }
 

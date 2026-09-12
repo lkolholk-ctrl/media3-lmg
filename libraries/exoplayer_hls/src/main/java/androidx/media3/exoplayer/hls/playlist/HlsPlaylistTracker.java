@@ -18,11 +18,18 @@ package androidx.media3.exoplayer.hls.playlist;
 import android.net.Uri;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
+import androidx.media3.common.util.SystemClock;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.hls.HlsDataSourceFactory;
 import androidx.media3.exoplayer.source.MediaSourceEventListener.EventDispatcher;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
+import androidx.media3.exoplayer.upstream.CmcdConfiguration;
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy;
+import androidx.media3.exoplayer.upstream.contentsteering.ContentSteeringTracker;
+import androidx.media3.exoplayer.util.ReleasableExecutor;
+import com.google.common.base.Supplier;
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Tracks playlists associated to an HLS stream and provides snapshots.
@@ -48,11 +55,16 @@ public interface HlsPlaylistTracker {
      * @param dataSourceFactory The {@link HlsDataSourceFactory} to use for playlist loading.
      * @param loadErrorHandlingPolicy The {@link LoadErrorHandlingPolicy} for playlist load errors.
      * @param playlistParserFactory The {@link HlsPlaylistParserFactory} for playlist parsing.
+     * @param cmcdConfiguration The {@link CmcdConfiguration} to use for playlist loading.
+     * @param downloadExecutorSupplier A supplier for a {@link ReleasableExecutor} that is used for
+     *     loading the playlist.
      */
     HlsPlaylistTracker createTracker(
         HlsDataSourceFactory dataSourceFactory,
         LoadErrorHandlingPolicy loadErrorHandlingPolicy,
-        HlsPlaylistParserFactory playlistParserFactory);
+        HlsPlaylistParserFactory playlistParserFactory,
+        @Nullable CmcdConfiguration cmcdConfiguration,
+        @Nullable Supplier<ReleasableExecutor> downloadExecutorSupplier);
   }
 
   /** Listener for primary playlist changes. */
@@ -78,7 +90,7 @@ public interface HlsPlaylistTracker {
      * @param url The loaded url that caused the error.
      * @param loadErrorInfo The load error info.
      * @param forceRetry Whether retry should be forced without considering exclusion.
-     * @return True if excluding did not encounter errors. False otherwise.
+     * @return Whether the playlist will be excluded from future loads.
      */
     boolean onPlaylistError(
         Uri url, LoadErrorHandlingPolicy.LoadErrorInfo loadErrorInfo, boolean forceRetry);
@@ -126,11 +138,13 @@ public interface HlsPlaylistTracker {
    *     multivariant playlist.
    * @param eventDispatcher A dispatcher to notify of events.
    * @param primaryPlaylistListener A callback for the primary playlist change events.
+   * @param bandwidthMeter A {@link BandwidthMeter}.
    */
   void start(
       Uri initialPlaylistUri,
       EventDispatcher eventDispatcher,
-      PrimaryPlaylistListener primaryPlaylistListener);
+      PrimaryPlaylistListener primaryPlaylistListener,
+      BandwidthMeter bandwidthMeter);
 
   /**
    * Stops the playlist tracker and releases any acquired resources.
@@ -163,6 +177,25 @@ public interface HlsPlaylistTracker {
    */
   @Nullable
   HlsMultivariantPlaylist getMultivariantPlaylist();
+
+  /**
+   * Returns the {@linkplain ContentSteeringTracker content steering tracker}.
+   *
+   * @return The content steering tracker. Null if the initial playlist has yet to be loaded, or no
+   *     information for content steering is declared in the initial playlist.
+   */
+  @Nullable
+  ContentSteeringTracker getContentSteeringTracker();
+
+  /**
+   * Returns the {@link HlsRedundantGroup} list corresponding to the {@code type}.
+   *
+   * @param type The type of the requested {@link HlsRedundantGroup}.
+   * @return The list of requested {@link HlsRedundantGroup}. Null if the initial playlist has yet
+   *     to be loaded.
+   */
+  @Nullable
+  List<HlsRedundantGroup> getRedundantGroups(@HlsRedundantGroup.Type int type);
 
   /**
    * Returns the most recent snapshot available of the playlist referenced by the provided {@link
@@ -206,7 +239,7 @@ public interface HlsPlaylistTracker {
    * this method throws the underlying error.
    *
    * @param url The {@link Uri}.
-   * @throws IOException The underyling error.
+   * @throws IOException The underlying error.
    */
   void maybeThrowPlaylistRefreshError(Uri url) throws IOException;
 
@@ -244,4 +277,29 @@ public interface HlsPlaylistTracker {
    * @param url The {@link Uri} of the playlist to deactivate for playback.
    */
   default void deactivatePlaylistForPlayback(Uri url) {}
+
+  /**
+   * Returns whether the {@code playlistUrl} is excluded at the given {@code nowMs} time.
+   *
+   * @param playlistUrl The URL of the media playlist.
+   * @param nowMs The current value of {@link SystemClock#elapsedRealtime()}.
+   */
+  boolean isExcluded(Uri playlistUrl, long nowMs);
+
+  /**
+   * Returns whether all playlist URLs in the {@link HlsRedundantGroup} are {@linkplain
+   * #isExcluded(Uri, long) excluded} at the given {@code nowMs} time.
+   *
+   * @param redundantGroup The {@link HlsRedundantGroup}.
+   * @param nowMs The current value of {@link SystemClock#elapsedRealtime()}.
+   */
+  boolean isExcluded(HlsRedundantGroup redundantGroup, long nowMs);
+
+  /**
+   * Returns the {@link HlsRedundantGroup} where the {@code playlistUrl} belongs.
+   *
+   * @param playlistUrl The URL of the media playlist.
+   */
+  @Nullable
+  HlsRedundantGroup getRedundantGroup(Uri playlistUrl);
 }

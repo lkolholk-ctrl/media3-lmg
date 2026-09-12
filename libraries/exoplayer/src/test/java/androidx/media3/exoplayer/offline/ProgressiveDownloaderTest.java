@@ -22,24 +22,18 @@ import android.net.Uri;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PriorityTaskManager;
-import androidx.media3.common.util.Util;
-import androidx.media3.database.DatabaseProvider;
 import androidx.media3.datasource.DataSource;
-import androidx.media3.datasource.cache.Cache;
 import androidx.media3.datasource.cache.CacheDataSource;
-import androidx.media3.datasource.cache.NoOpCacheEvictor;
 import androidx.media3.datasource.cache.SimpleCache;
 import androidx.media3.test.utils.FailOnCloseDataSink;
 import androidx.media3.test.utils.FakeDataSet;
 import androidx.media3.test.utils.FakeDataSource;
-import androidx.media3.test.utils.TestUtil;
-import androidx.test.core.app.ApplicationProvider;
+import androidx.media3.test.utils.InMemoryDatabaseRule;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
-import java.io.File;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -47,25 +41,34 @@ import org.junit.runner.RunWith;
 @RunWith(AndroidJUnit4.class)
 public class ProgressiveDownloaderTest {
 
-  private File testDir;
-  private Cache downloadCache;
+  @Rule public final InMemoryDatabaseRule cacheRule = InMemoryDatabaseRule.create();
+
+  private SimpleCache cache;
 
   @Before
-  public void createDownloadCache() throws Exception {
-    testDir =
-        Util.createTempFile(
-            ApplicationProvider.getApplicationContext(), "ProgressiveDownloaderTest");
-    assertThat(testDir.delete()).isTrue();
-    assertThat(testDir.mkdirs()).isTrue();
-
-    DatabaseProvider databaseProvider = TestUtil.getInMemoryDatabaseProvider();
-    downloadCache = new SimpleCache(testDir, new NoOpCacheEvictor(), databaseProvider);
+  public void setUp() throws Exception {
+    cache = cacheRule.createSimpleCache();
   }
 
-  @After
-  public void deleteDownloadCache() {
-    downloadCache.release();
-    Util.recursiveDelete(testDir);
+  @Test
+  public void download_withNonDefaultByteRange_succeeds() throws Exception {
+    Uri uri = Uri.parse("test:///test.mp4");
+    FakeDataSet data = new FakeDataSet();
+    data.newData(uri).appendReadData(1024);
+    DataSource.Factory upstreamDataSource = new FakeDataSource.Factory().setFakeDataSet(data);
+    MediaItem mediaItem = MediaItem.fromUri(uri);
+    CacheDataSource.Factory cacheDataSourceFactory =
+        new CacheDataSource.Factory()
+            .setCache(cache)
+            .setUpstreamDataSourceFactory(upstreamDataSource);
+    ProgressiveDownloader downloader =
+        new ProgressiveDownloader(
+            mediaItem, cacheDataSourceFactory, /* position= */ 0, /* length= */ 100);
+    TestProgressListener progressListener = new TestProgressListener();
+
+    downloader.download(progressListener);
+
+    assertThat(progressListener.bytesDownloaded).isEqualTo(100);
   }
 
   @Test
@@ -80,7 +83,7 @@ public class ProgressiveDownloaderTest {
     MediaItem mediaItem = MediaItem.fromUri(uri);
     CacheDataSource.Factory cacheDataSourceFactory =
         new CacheDataSource.Factory()
-            .setCache(downloadCache)
+            .setCache(cache)
             .setUpstreamDataSourceFactory(upstreamDataSource);
     ProgressiveDownloader downloader = new ProgressiveDownloader(mediaItem, cacheDataSourceFactory);
 
@@ -105,12 +108,12 @@ public class ProgressiveDownloaderTest {
 
     AtomicBoolean failOnClose = new AtomicBoolean(/* initialValue= */ true);
     FailOnCloseDataSink.Factory dataSinkFactory =
-        new FailOnCloseDataSink.Factory(downloadCache, failOnClose);
+        new FailOnCloseDataSink.Factory(cache, failOnClose);
 
     MediaItem mediaItem = MediaItem.fromUri(uri);
     CacheDataSource.Factory cacheDataSourceFactory =
         new CacheDataSource.Factory()
-            .setCache(downloadCache)
+            .setCache(cache)
             .setCacheWriteDataSinkFactory(dataSinkFactory)
             .setUpstreamDataSourceFactory(upstreamDataSource);
     ProgressiveDownloader downloader = new ProgressiveDownloader(mediaItem, cacheDataSourceFactory);
@@ -161,7 +164,7 @@ public class ProgressiveDownloaderTest {
     MediaItem mediaItem = MediaItem.fromUri(uri);
     CacheDataSource.Factory cacheDataSourceFactory =
         new CacheDataSource.Factory()
-            .setCache(downloadCache)
+            .setCache(cache)
             .setUpstreamDataSourceFactory(upstreamDataSource)
             .setUpstreamPriorityTaskManager(priorityTaskManager);
     ProgressiveDownloader downloader = new ProgressiveDownloader(mediaItem, cacheDataSourceFactory);

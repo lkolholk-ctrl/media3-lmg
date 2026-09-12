@@ -15,11 +15,12 @@
  */
 package androidx.media3.exoplayer.e2etest;
 
-import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.run;
+import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.advance;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
+import static org.robolectric.annotation.Config.NEWEST_SDK;
 
 import android.content.Context;
 import android.graphics.SurfaceTexture;
@@ -33,9 +34,9 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.exoplayer.source.FilteringMediaSource;
 import androidx.media3.exoplayer.source.MediaSource;
 import androidx.media3.exoplayer.source.MergingMediaSource;
-import androidx.media3.test.utils.CapturingRenderersFactory;
 import androidx.media3.test.utils.DumpFileAsserts;
 import androidx.media3.test.utils.FakeClock;
+import androidx.media3.test.utils.robolectric.CapturingRenderersFactory;
 import androidx.media3.test.utils.robolectric.PlaybackOutput;
 import androidx.media3.test.utils.robolectric.ShadowMediaCodecConfig;
 import androidx.media3.test.utils.robolectric.TestPlayerRunHelper;
@@ -48,22 +49,25 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.ParameterizedRobolectricTestRunner;
+import org.robolectric.annotation.Config;
 
 /** End-to-end tests for playlists with merged media. */
+@Config(sdk = NEWEST_SDK) // This test is too slow to run on all SDKs.
 @RunWith(ParameterizedRobolectricTestRunner.class)
 public final class MergingPlaylistPlaybackTest {
 
   private static final String TEST_MP4_URI = "asset:///media/mp4/sample.mp4";
 
   @ParameterizedRobolectricTestRunner.Parameters(
-      name = "videoPrimary({0}), first({1}_{2}), second({3}_{4})")
+      name = "videoPrimary({0}), first({1}_{2}), second({3}_{4}), perStream({5})")
   public static List<Boolean[]> configs() {
     return Sets.cartesianProduct(
             /* videoIsPrimaryMergedSource */ ImmutableSet.of(true, false),
             /* firstItemVideoClipped */ ImmutableSet.of(true, false),
             /* firstItemAudioClipped */ ImmutableSet.of(true, false),
             /* secondItemVideoClipped */ ImmutableSet.of(true, false),
-            /* secondItemAudioClipped */ ImmutableSet.of(true, false))
+            /* secondItemAudioClipped */ ImmutableSet.of(true, false),
+            /* perStreamMediaProgressionEnabled */ ImmutableSet.of(true, false))
         .stream()
         .map(s -> s.toArray(new Boolean[0]))
         .collect(Collectors.toList());
@@ -84,18 +88,24 @@ public final class MergingPlaylistPlaybackTest {
   @ParameterizedRobolectricTestRunner.Parameter(4)
   public Boolean secondItemAudioClipped;
 
+  // TODO: b/510217604 - Remove parameterization.
+  @ParameterizedRobolectricTestRunner.Parameter(5)
+  public Boolean perStreamMediaProgressionEnabled;
+
   @Rule
   public ShadowMediaCodecConfig mediaCodecConfig =
-      ShadowMediaCodecConfig.forAllSupportedMimeTypes();
+      ShadowMediaCodecConfig.withAllDefaultSupportedCodecs();
 
   @Test
   public void transitionBetweenDifferentMergeConfigurations() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Player.Listener listener = mock(Player.Listener.class);
     player.addListener(listener);
@@ -108,13 +118,7 @@ public final class MergingPlaylistPlaybackTest {
     player.prepare();
     // Load all content prior to play to reduce flaky-ness resulting from the playback advancement
     // speed and handling of discontinuities.
-    long durationToBufferMs =
-        (firstItemVideoClipped || firstItemAudioClipped ? 300L : 1024L)
-            + (secondItemVideoClipped || secondItemAudioClipped ? 300L : 1024L);
-    run(player)
-        .untilBackgroundThreadCondition(
-            () -> player.getTotalBufferedDuration() >= durationToBufferMs);
-    run(player).untilPendingCommandsAreFullyHandled();
+    advance(player).untilFullyBuffered();
     // Reset the listener to avoid verifying the onIsLoadingChanged events from prepare().
     reset(listener);
     player.play();
@@ -135,6 +139,7 @@ public final class MergingPlaylistPlaybackTest {
             + secondItemVideoClipped
             + "_"
             + secondItemAudioClipped
+            + (perStreamMediaProgressionEnabled ? "_perStreamProgression" : "")
             + ".dump");
     verify(listener, never()).onIsLoadingChanged(true);
   }
@@ -142,11 +147,13 @@ public final class MergingPlaylistPlaybackTest {
   @Test
   public void multipleRepetitionsOfSameMergeConfiguration() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Player.Listener listener = mock(Player.Listener.class);
     player.addListener(listener);
@@ -160,12 +167,8 @@ public final class MergingPlaylistPlaybackTest {
     player.prepare();
     // Load all content prior to play to reduce flaky-ness resulting from the playback advancement
     // speed and handling of discontinuities.
-    long durationToBufferMs = (firstItemVideoClipped || firstItemAudioClipped ? 300L : 1024L) * 5;
-    run(player)
-        .untilBackgroundThreadCondition(
-            () -> player.getTotalBufferedDuration() >= durationToBufferMs);
+    advance(player).untilFullyBuffered();
     // Reset the listener to avoid verifying the onIsLoadingChanged events from prepare().
-    run(player).untilPendingCommandsAreFullyHandled();
     reset(listener);
     player.play();
     TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
@@ -181,6 +184,7 @@ public final class MergingPlaylistPlaybackTest {
             + firstItemVideoClipped
             + "_"
             + firstItemAudioClipped
+            + (perStreamMediaProgressionEnabled ? "_perStreamProgression" : "")
             + ".dump");
     verify(listener, never()).onIsLoadingChanged(true);
   }
@@ -198,13 +202,17 @@ public final class MergingPlaylistPlaybackTest {
             C.TRACK_TYPE_AUDIO);
     if (videoClipped) {
       videoSource =
-          new ClippingMediaSource(
-              videoSource, /* startPositionUs= */ 300_000, /* endPositionUs= */ 600_000);
+          new ClippingMediaSource.Builder(videoSource)
+              .setStartPositionMs(300)
+              .setEndPositionMs(600)
+              .build();
     }
     if (audioClipped) {
       audioSource =
-          new ClippingMediaSource(
-              audioSource, /* startPositionUs= */ 500_000, /* endPositionUs= */ 800_000);
+          new ClippingMediaSource.Builder(audioSource)
+              .setStartPositionMs(500)
+              .setEndPositionMs(800)
+              .build();
     }
     return new MergingMediaSource(
         /* adjustPeriodTimeOffsets= */ true,

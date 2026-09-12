@@ -17,10 +17,12 @@
 package androidx.media3.transformer;
 
 import android.media.MediaCodec.BufferInfo;
+import android.media.metrics.LogSessionId;
 import android.view.Surface;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
+import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.decoder.DecoderInputBuffer;
 import java.nio.ByteBuffer;
@@ -41,10 +43,13 @@ public interface Codec {
      *
      * @param format The {@link Format} (of the input data) used to determine the underlying decoder
      *     and its configuration values.
+     * @param logSessionId The optional {@link LogSessionId} of the {@link
+     *     android.media.metrics.EditingSession}.
      * @return A {@link Codec} for audio decoding.
      * @throws ExportException If no suitable {@link Codec} can be created.
      */
-    Codec createForAudioDecoding(Format format) throws ExportException;
+    Codec createForAudioDecoding(Format format, @Nullable LogSessionId logSessionId)
+        throws ExportException;
 
     /**
      * Returns a {@link Codec} for video decoding.
@@ -53,11 +58,17 @@ public interface Codec {
      *     and its configuration values.
      * @param outputSurface The {@link Surface} to which the decoder output is rendered.
      * @param requestSdrToneMapping Whether to request tone-mapping to SDR.
+     * @param logSessionId The optional {@link LogSessionId} of the {@link
+     *     android.media.metrics.EditingSession}.
      * @return A {@link Codec} for video decoding.
      * @throws ExportException If no suitable {@link Codec} can be created.
      */
     Codec createForVideoDecoding(
-        Format format, Surface outputSurface, boolean requestSdrToneMapping) throws ExportException;
+        Format format,
+        Surface outputSurface,
+        boolean requestSdrToneMapping,
+        @Nullable LogSessionId logSessionId)
+        throws ExportException;
   }
 
   /** A factory for {@linkplain Codec encoder} instances. */
@@ -69,19 +80,18 @@ public interface Codec {
      * <p>The caller should ensure the {@linkplain Format#sampleMimeType MIME type} is supported on
      * the device before calling this method.
      *
-     * <p>{@link Format#codecs} contains the codec string for the original input media that has been
-     * decoded and processed. This is provided only as a hint, and the factory may encode to a
-     * different format.
-     *
      * @param format The {@link Format} (of the output data) used to determine the underlying
      *     encoder and its configuration values. {@link Format#sampleMimeType}, {@link
      *     Format#sampleRate}, {@link Format#channelCount} and {@link Format#bitrate} are set to
      *     those of the desired output video format.
+     * @param logSessionId The optional {@link LogSessionId} of the {@link
+     *     android.media.metrics.EditingSession}.
      * @return A {@link Codec} for encoding audio to the requested {@link Format#sampleMimeType MIME
      *     type}.
      * @throws ExportException If no suitable {@link Codec} can be created.
      */
-    Codec createForAudioEncoding(Format format) throws ExportException;
+    Codec createForAudioEncoding(Format format, @Nullable LogSessionId logSessionId)
+        throws ExportException;
 
     /**
      * Returns a {@link Codec} for video encoding.
@@ -90,21 +100,31 @@ public interface Codec {
      * the device before calling this method. If encoding to HDR, the caller should also ensure the
      * {@linkplain Format#colorInfo color characteristics} are supported.
      *
-     * <p>{@link Format#codecs} contains the codec string for the original input media that has been
-     * decoded and processed. This is provided only as a hint, and the factory may encode to a
-     * different format.
-     *
      * @param format The {@link Format} (of the output data) used to determine the underlying
      *     encoder and its configuration values. {@link Format#sampleMimeType}, {@link Format#width}
      *     and {@link Format#height} are set to those of the desired output video format. {@link
      *     Format#frameRate} is set to the requested output frame rate, if available. {@link
      *     Format#colorInfo} is set to the requested output color characteristics, if available.
      *     {@link Format#rotationDegrees} is always 0.
+     * @param logSessionId The optional {@link LogSessionId} of the {@link
+     *     android.media.metrics.EditingSession}.
      * @return A {@link Codec} for encoding video to the requested {@linkplain Format#sampleMimeType
      *     MIME type}.
      * @throws ExportException If no suitable {@link Codec} can be created.
      */
-    Codec createForVideoEncoding(Format format) throws ExportException;
+    Codec createForVideoEncoding(Format format, @Nullable LogSessionId logSessionId)
+        throws ExportException;
+
+    /**
+     * Returns whether the requested video {@link Format} is supported by the encoder factory.
+     *
+     * <p>This is an experimental API and is currently being used for {@code FrameWriter}
+     * specifically.
+     */
+    @ExperimentalApi // TODO: b/498176910 - Remove once FrameWriter is production ready.
+    default boolean isVideoFormatSupported(Format format) {
+      return true;
+    }
 
     /** Returns whether the audio needs to be encoded because of encoder specific configuration. */
     default boolean audioNeedsEncoding() {
@@ -181,6 +201,17 @@ public interface Codec {
    * @throws ExportException If the underlying video encoder encounters a problem.
    */
   void signalEndOfInputStream() throws ExportException;
+
+  /**
+   * Returns the {@link Format} accepted by the codec.
+   *
+   * <p>This format may differ from the {@link Format} returned by {@link
+   * #getConfigurationFormat()}, depending on the underlying codec and configuration format
+   * requested.
+   *
+   * @throws ExportException If the underlying decoder or encoder encounters a problem.
+   */
+  Format getInputFormat() throws ExportException;
 
   /**
    * Returns the current output format, or {@code null} if unavailable.

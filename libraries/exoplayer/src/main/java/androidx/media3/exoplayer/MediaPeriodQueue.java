@@ -15,26 +15,36 @@
  */
 package androidx.media3.exoplayer;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static java.lang.Math.abs;
 import static java.lang.Math.max;
+import static java.lang.annotation.ElementType.TYPE_USE;
 
 import android.os.Handler;
 import android.util.Pair;
+import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AdPlaybackState;
 import androidx.media3.common.C;
 import androidx.media3.common.Player.RepeatMode;
 import androidx.media3.common.Timeline;
-import androidx.media3.common.util.Assertions;
+import androidx.media3.common.Timeline.Period;
+import androidx.media3.common.Timeline.Window;
 import androidx.media3.common.util.HandlerWrapper;
+import androidx.media3.common.util.NullableType;
 import androidx.media3.exoplayer.ExoPlayer.PreloadConfiguration;
 import androidx.media3.exoplayer.analytics.AnalyticsCollector;
 import androidx.media3.exoplayer.source.MediaPeriod;
 import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
 import com.google.common.collect.ImmutableList;
+import java.lang.annotation.Documented;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Holds a queue of media periods, from the currently playing media period at the front to the
@@ -70,6 +80,16 @@ import java.util.List;
    */
   private static final int MAXIMUM_BUFFER_AHEAD_PERIODS = 100;
 
+  /**
+   * The maximum acceptable difference between the effective start positions of live streams in
+   * playlists to not re-create the period. This happens when forward projecting the start position
+   * in a playlist, where subsequent Timeline refresh operations may move the effective start
+   * position of the stream. The default value is 5 seconds to account for potential snapping of
+   * this start position to chunk boundaries.
+   */
+  private static final long MAX_EFFECTIVE_START_POSITION_DIFF_WITH_PROJECTION_US =
+      5 * C.MICROS_PER_SECOND;
+
   private final Timeline.Period period;
   private final Timeline.Window window;
   private final AnalyticsCollector analyticsCollector;
@@ -81,7 +101,8 @@ import java.util.List;
   private boolean shuffleModeEnabled;
   private PreloadConfiguration preloadConfiguration;
   @Nullable private MediaPeriodHolder playing;
-  @Nullable private MediaPeriodHolder reading;
+  private final @NullableType MediaPeriodHolder[] readingPeriods;
+  private final @NullableType MediaPeriodHolder[] prewarmingPeriods;
   @Nullable private MediaPeriodHolder loading;
   @Nullable private MediaPeriodHolder preloading;
   private int length;
@@ -96,12 +117,15 @@ import java.util.List;
    * @param analyticsCollectorHandler The {@link Handler} to call {@link AnalyticsCollector} methods
    *     on.
    * @param mediaPeriodHolderFactory A {@link MediaPeriodHolder.Factory} to create holders.
+   * @param preloadConfiguration A {@link PreloadConfiguration} for preloading playlist items.
+   * @param rendererCount Number of {@link Renderer renderers} in use by the player.
    */
   public MediaPeriodQueue(
       AnalyticsCollector analyticsCollector,
       HandlerWrapper analyticsCollectorHandler,
       MediaPeriodHolder.Factory mediaPeriodHolderFactory,
-      PreloadConfiguration preloadConfiguration) {
+      PreloadConfiguration preloadConfiguration,
+      int rendererCount) {
     this.analyticsCollector = analyticsCollector;
     this.analyticsCollectorHandler = analyticsCollectorHandler;
     this.mediaPeriodHolderFactory = mediaPeriodHolderFactory;
@@ -109,30 +133,41 @@ import java.util.List;
     period = new Timeline.Period();
     window = new Timeline.Window();
     preloadPriorityList = new ArrayList<>();
+    readingPeriods = new MediaPeriodHolder[rendererCount];
+    prewarmingPeriods = new MediaPeriodHolder[rendererCount];
   }
 
   /**
-   * Sets the {@link RepeatMode} and returns whether the repeat mode change has been fully handled.
-   * If not, it is necessary to seek to the current playback position.
+   * Sets the {@link RepeatMode} and returns whether the repeat mode change has modified the reading
+   * or pre-warming media periods. If it has modified the reading period then it is necessary to
+   * seek to the current playback position. If it has modified the pre-warming period then it is
+   * necessary to reset any pre-warming renderers. A value of {@code 0} is returned if it has
+   * neither modified the reading period nor the pre-warming period.
    *
    * @param timeline The current timeline.
    * @param repeatMode The new repeat mode.
-   * @return Whether the repeat mode change has been fully handled.
+   * @return {@link UpdatePeriodQueueResult} with flags denoting if the repeat mode change altered
+   *     the current reading or pre-warming media periods.
    */
-  public boolean updateRepeatMode(Timeline timeline, @RepeatMode int repeatMode) {
+  public int updateRepeatMode(Timeline timeline, @RepeatMode int repeatMode) {
     this.repeatMode = repeatMode;
     return updateForPlaybackModeChange(timeline);
   }
 
   /**
-   * Sets whether shuffling is enabled and returns whether the shuffle mode change has been fully
-   * handled. If not, it is necessary to seek to the current playback position.
+   * Sets whether shuffling is enabled and returns whether the shuffle mode change has modified the
+   * reading or pre-warming media periods. If it has modified the reading period, then it is
+   * necessary to seek to the current playback position. If it has modified the pre-warming period
+   * then it is necessary to reset any pre-warming renderers. A value of {@code 0} is returned if it
+   * has neither modified the reading period nor the pre-warming period.
    *
    * @param timeline The current timeline.
    * @param shuffleModeEnabled Whether shuffling mode is enabled.
-   * @return Whether the shuffle mode change has been fully handled.
+   * @return {@link UpdatePeriodQueueResult} with flags denoting if the shuffle mode change altered
+   *     the current reading or pre-warming media periods.
    */
-  public boolean updateShuffleModeEnabled(Timeline timeline, boolean shuffleModeEnabled) {
+  public @UpdatePeriodQueueResult int updateShuffleModeEnabled(
+      Timeline timeline, boolean shuffleModeEnabled) {
     this.shuffleModeEnabled = shuffleModeEnabled;
     return updateForPlaybackModeChange(timeline);
   }
@@ -219,7 +254,8 @@ import java.util.List;
       loading.setNext(newPeriodHolder);
     } else {
       playing = newPeriodHolder;
-      reading = newPeriodHolder;
+      Arrays.fill(readingPeriods, newPeriodHolder);
+      Arrays.fill(prewarmingPeriods, newPeriodHolder);
     }
     oldFrontPeriodUid = null;
     loading = newPeriodHolder;
@@ -237,8 +273,7 @@ import java.util.List;
     MediaPeriodHolder loading = this.loading;
     List<MediaPeriodHolder> newPreloadPriorityList = new ArrayList<>();
     Pair<Object, Long> defaultPositionOfNextWindow =
-        getDefaultPeriodPositionOfNextWindow(
-            timeline, loading.info.id.periodUid, /* defaultPositionProjectionUs= */ 0L);
+        getDefaultPeriodPositionOfNextWindow(timeline, loading.info.id.periodUid);
     if (defaultPositionOfNextWindow != null
         && !timeline
             .getWindow(
@@ -314,23 +349,20 @@ import java.util.List;
             timeline,
             mediaPeriodId.periodUid,
             /* startPositionUs= */ positionUs,
+            /* liveStreamStartPositionProjectionUs= */ C.TIME_UNSET,
             /* requestedContentPositionUs= */ C.TIME_UNSET,
             mediaPeriodId.windowSequenceNumber);
   }
 
   @Nullable
   private Pair<Object, Long> getDefaultPeriodPositionOfNextWindow(
-      Timeline timeline, Object periodUid, long defaultPositionProjectionUs) {
+      Timeline timeline, Object periodUid) {
     int nextWindowIndex =
         timeline.getNextWindowIndex(
             timeline.getPeriodByUid(periodUid, period).windowIndex, repeatMode, shuffleModeEnabled);
     return nextWindowIndex != C.INDEX_UNSET
         ? timeline.getPeriodPositionUs(
-            window,
-            period,
-            nextWindowIndex,
-            /* windowPositionUs= */ C.TIME_UNSET,
-            defaultPositionProjectionUs)
+            window, period, nextWindowIndex, /* windowPositionUs= */ C.TIME_UNSET)
         : null;
   }
 
@@ -365,8 +397,64 @@ import java.util.List;
 
   /** Returns the reading period holder, or null if the queue is empty. */
   @Nullable
-  public MediaPeriodHolder getReadingPeriod() {
-    return reading;
+  public MediaPeriodHolder getReadingPeriod(int index) {
+    return readingPeriods[index];
+  }
+
+  /** Returns the earliest reading period holder in the queue, or null if the queue is empty. */
+  @Nullable
+  public MediaPeriodHolder getEarliestReadingPeriod() {
+    MediaPeriodHolder periodHolder = playing;
+    while (periodHolder != null) {
+      for (MediaPeriodHolder readingPeriod : readingPeriods) {
+        if (periodHolder.equals(readingPeriod)) {
+          return periodHolder;
+        }
+      }
+      periodHolder = periodHolder.getNext();
+    }
+    return periodHolder;
+  }
+
+  /** Returns the latest reading period holder in the queue, or null if the queue is empty. */
+  @Nullable
+  public MediaPeriodHolder getLatestReadingPeriod() {
+    if (readingPeriods.length == 0) {
+      return null;
+    }
+    MediaPeriodHolder periodHolder = playing;
+    MediaPeriodHolder latestReadingPeriod = readingPeriods[0];
+    while (periodHolder != null) {
+      for (MediaPeriodHolder readingPeriod : readingPeriods) {
+        if (periodHolder.equals(readingPeriod)) {
+          latestReadingPeriod = periodHolder;
+          break;
+        }
+      }
+      periodHolder = periodHolder.getNext();
+    }
+    return latestReadingPeriod;
+  }
+
+  /** Returns the prewarming period holder, or null if the queue is empty. */
+  @Nullable
+  public MediaPeriodHolder getPrewarmingPeriod(int index) {
+    return prewarmingPeriods[index];
+  }
+
+  /** Returns the earliest prewarming period holder in the queue, or null if the queue is empty. */
+  @Nullable
+  public MediaPeriodHolder getEarliestPrewarmingPeriod() {
+    MediaPeriodHolder periodHolder = playing;
+    while (periodHolder != null) {
+      for (MediaPeriodHolder prewarmingPeriod : prewarmingPeriods) {
+        if (periodHolder.equals(prewarmingPeriod)) {
+          return periodHolder;
+        }
+      }
+      periodHolder = periodHolder.getNext();
+    }
+    return periodHolder;
   }
 
   /**
@@ -375,9 +463,37 @@ import java.util.List;
    * @return The updated reading period holder.
    */
   public MediaPeriodHolder advanceReadingPeriod() {
-    reading = checkStateNotNull(reading).getNext();
+    for (int i = 0; i < readingPeriods.length; i++) {
+      MediaPeriodHolder unused = advanceReadingPeriod(i);
+    }
+    return checkNotNull(readingPeriods[0]);
+  }
+
+  /**
+   * Continues reading from the next period holder in the queue.
+   *
+   * @return The updated reading period holder.
+   */
+  public MediaPeriodHolder advanceReadingPeriod(int index) {
+    if (Objects.equals(prewarmingPeriods[index], readingPeriods[index])) {
+      prewarmingPeriods[index] = checkNotNull(readingPeriods[index]).getNext();
+    }
+    readingPeriods[index] = checkNotNull(readingPeriods[index]).getNext();
     notifyQueueUpdate();
-    return checkStateNotNull(reading);
+    return checkNotNull(readingPeriods[index]);
+  }
+
+  /** Continues pre-warming from the next period holder in the queue. */
+  public void advancePrewarmingPeriod() {
+    for (int i = 0; i < prewarmingPeriods.length; i++) {
+      advancePrewarmingPeriod(i);
+    }
+  }
+
+  /** Continues pre-warming from the next period holder in the queue. */
+  public void advancePrewarmingPeriod(int index) {
+    prewarmingPeriods[index] = checkNotNull(prewarmingPeriods[index]).getNext();
+    notifyQueueUpdate();
   }
 
   /**
@@ -391,9 +507,9 @@ import java.util.List;
     if (playing == null) {
       return null;
     }
-    if (playing == reading) {
-      reading = playing.getNext();
-    }
+    updateReadingMatchingPlayingPeriod();
+    updatePrewarmingMatchingPlayingPeriod();
+    checkNotNull(playing);
     playing.release();
     length--;
     if (length == 0) {
@@ -422,9 +538,8 @@ import java.util.List;
     if (playing == null) {
       return null;
     }
-    if (playing == reading) {
-      reading = playing.getNext();
-    }
+    updateReadingMatchingPlayingPeriod();
+    updatePrewarmingMatchingPlayingPeriod();
     // NB: НЕ вызываем playing.release() — период доигрывает fade-out.
     length--;
     if (length == 0) {
@@ -437,26 +552,63 @@ import java.util.List;
     return playing;
   }
 
+  private void updateReadingMatchingPlayingPeriod() {
+    checkNotNull(playing);
+    for (int i = 0; i < readingPeriods.length; i++) {
+      if (playing.equals(readingPeriods[i])) {
+        readingPeriods[i] = playing.getNext();
+      }
+    }
+  }
+
+  private void updatePrewarmingMatchingPlayingPeriod() {
+    checkNotNull(playing);
+    for (int i = 0; i < prewarmingPeriods.length; i++) {
+      if (playing.equals(prewarmingPeriods[i])) {
+        prewarmingPeriods[i] = playing.getNext();
+      }
+    }
+  }
+
   /**
-   * Removes all period holders after the given period holder. This process may also remove the
-   * currently reading period holder. If that is the case, the reading period holder is set to be
-   * the same as the playing period holder at the front of the queue.
+   * Removes all period holders after the given period holder.
+   *
+   * <p>This process may remove the currently reading period holder. If that is the case, the
+   * reading period holder is set to be the same as the playing period holder at the front of the
+   * queue.
+   *
+   * <p>This process may remove the currently pre-warming period holder. If that is the case, the
+   * pre-warming period holder is set to be the same as the reading period holder.
+   *
+   * <p>A value of {@code 0} is returned if the process has neither removed the reading period nor
+   * the pre-warming period.
    *
    * @param mediaPeriodHolder The media period holder that shall be the new end of the queue.
-   * @return Whether the reading period has been removed.
+   * @return {@link UpdatePeriodQueueResult} with flags denoting if the reading or pre-warming
+   *     periods were removed.
    */
-  public boolean removeAfter(MediaPeriodHolder mediaPeriodHolder) {
-    checkStateNotNull(mediaPeriodHolder);
+  public int removeAfter(MediaPeriodHolder mediaPeriodHolder) {
+    checkNotNull(mediaPeriodHolder);
     if (mediaPeriodHolder.equals(loading)) {
-      return false;
+      return 0;
     }
-    boolean removedReading = false;
+    int removedResult = 0;
     loading = mediaPeriodHolder;
     while (mediaPeriodHolder.getNext() != null) {
       mediaPeriodHolder = checkNotNull(mediaPeriodHolder.getNext());
-      if (mediaPeriodHolder == reading) {
-        reading = playing;
-        removedReading = true;
+      for (int i = 0; i < readingPeriods.length; i++) {
+        if (mediaPeriodHolder.equals(readingPeriods[i])) {
+          readingPeriods[i] = playing;
+          prewarmingPeriods[i] = playing;
+          removedResult |= UPDATE_PERIOD_QUEUE_ALTERED_READING_PERIOD;
+          removedResult |= UPDATE_PERIOD_QUEUE_ALTERED_PREWARMING_PERIOD;
+        }
+      }
+      for (int i = 0; i < prewarmingPeriods.length; i++) {
+        if (mediaPeriodHolder.equals(prewarmingPeriods[i])) {
+          prewarmingPeriods[i] = readingPeriods[i];
+          removedResult |= UPDATE_PERIOD_QUEUE_ALTERED_PREWARMING_PERIOD;
+        }
       }
       mediaPeriodHolder.release();
       // LMG-fork (crossfade): период освобождён — снимаем back-link на него.
@@ -465,7 +617,7 @@ import java.util.List;
     }
     checkNotNull(loading).setNext(null);
     notifyQueueUpdate();
-    return removedReading;
+    return removedResult;
   }
 
   /**
@@ -502,7 +654,7 @@ import java.util.List;
     if (length == 0) {
       return;
     }
-    MediaPeriodHolder front = Assertions.checkStateNotNull(playing);
+    MediaPeriodHolder front = checkNotNull(playing);
     oldFrontPeriodUid = front.uid;
     oldFrontPeriodWindowSequenceNumber = front.info.id.windowSequenceNumber;
     while (front != null) {
@@ -513,26 +665,37 @@ import java.util.List;
     }
     playing = null;
     loading = null;
-    reading = null;
+    Arrays.fill(readingPeriods, null);
+    Arrays.fill(prewarmingPeriods, null);
     length = 0;
     notifyQueueUpdate();
   }
 
   /**
    * Updates media periods in the queue to take into account the latest timeline, and returns
-   * whether the timeline change has been fully handled. If not, it is necessary to seek to the
-   * current playback position. The method assumes that the first media period in the queue is still
-   * consistent with the new timeline.
+   * whether the timeline change has modified the current reading or pre-warming periods. The method
+   * returns {@code 0} if all changes have been handled and the reading/pre-warming periods have not
+   * been affected. If the reading period has been affected, then it is necessary to seek to the
+   * current playback position. If the pre-warming period has been affected, then it is necessary to
+   * reset any pre-warming renderers. The method assumes that the first media period in the queue is
+   * still consistent with the new timeline.
    *
    * @param timeline The new timeline.
    * @param rendererPositionUs The current renderer position in microseconds.
-   * @param maxRendererReadPositionUs The maximum renderer position up to which renderers have read
-   *     the current reading media period in microseconds, or {@link C#TIME_END_OF_SOURCE} if they
-   *     have read to the end.
-   * @return Whether the timeline change has been handled completely.
+   * @param rendererReadingPositionsUs The positions up to which the renderers have read to in their
+   *     current reading media period in microseconds, or {@link C#TIME_END_OF_SOURCE} if they have
+   *     read to the end.
+   * @param rendererPrewarmingPositionsUs The positions up to which the renderers have read to in
+   *     their current pre-warming media period in microseconds, or {@link C#TIME_END_OF_SOURCE} if
+   *     they have read to the end.
+   * @return {@link UpdatePeriodQueueResult} denoting whether the timeline change has modified the
+   *     reading or pre-warming media periods.
    */
-  public boolean updateQueuedPeriods(
-      Timeline timeline, long rendererPositionUs, long maxRendererReadPositionUs) {
+  public @MediaPeriodQueue.UpdatePeriodQueueResult int updateQueuedPeriods(
+      Timeline timeline,
+      long rendererPositionUs,
+      long[] rendererReadingPositionsUs,
+      long[] rendererPrewarmingPositionsUs) {
     // TODO: Merge this into setTimeline so that the queue gets updated as soon as the new timeline
     // is set, once all cases handled by ExoPlayerImplInternal.handleMediaSourceListInfoRefreshed
     // can be handled here.
@@ -551,13 +714,16 @@ import java.util.List;
       } else {
         newPeriodInfo =
             getFollowingMediaPeriodInfo(timeline, previousPeriodHolder, rendererPositionUs);
-        if (newPeriodInfo == null) {
-          // We've loaded a next media period that is not in the new timeline.
-          return !removeAfter(previousPeriodHolder);
-        }
-        if (!canKeepMediaPeriodHolder(oldPeriodInfo, newPeriodInfo)) {
-          // The new media period has a different id or start position.
-          return !removeAfter(previousPeriodHolder);
+        if (newPeriodInfo == null || !canKeepMediaPeriodHolder(oldPeriodInfo, newPeriodInfo)) {
+          // We've loaded a next media period that is not in the new timeline
+          // or the new media period has a different id or start position.
+          return removeAfter(previousPeriodHolder);
+        } else if (oldPeriodInfo.startPositionUs != newPeriodInfo.startPositionUs) {
+          // If we can keep it, but the calculated start position changed, update back to the
+          // previous value to ensure it matches the actual data being loaded.
+          newPeriodInfo =
+              newPeriodInfo.copyWithStartPositionUs(
+                  oldPeriodInfo.startPositionUs, oldPeriodInfo.liveStreamStartPositionProjectionUs);
         }
       }
 
@@ -567,27 +733,86 @@ import java.util.List;
           newPeriodInfo.copyWithRequestedContentPositionUs(
               oldPeriodInfo.requestedContentPositionUs);
 
-      if (!areDurationsCompatible(oldPeriodInfo.durationUs, newPeriodInfo.durationUs)) {
-        // The period duration changed. Remove all subsequent periods and check whether we read
-        // beyond the new duration.
-        periodHolder.updateClipping();
+      if (oldPeriodInfo.durationUs != newPeriodInfo.durationUs) {
+        // Check whether we've read beyond the new duration.
         long newDurationInRendererTime =
             newPeriodInfo.durationUs == C.TIME_UNSET
                 ? Long.MAX_VALUE
                 : periodHolder.toRendererTime(newPeriodInfo.durationUs);
+        // Determine if any stream has over-read the boundary. Seamless transitions are exempt.
         boolean isReadingAndReadBeyondNewDuration =
-            periodHolder == reading
-                && !periodHolder.info.isFollowedByTransitionToSameStream
-                && (maxRendererReadPositionUs == C.TIME_END_OF_SOURCE
-                    || maxRendererReadPositionUs >= newDurationInRendererTime);
-        boolean readingPeriodRemoved = removeAfter(periodHolder);
-        return !readingPeriodRemoved && !isReadingAndReadBeyondNewDuration;
+            !periodHolder.info.isFollowedByTransitionToSameStream
+                && hasAnyRendererReadBeyondDuration(
+                    readingPeriods,
+                    rendererReadingPositionsUs,
+                    periodHolder,
+                    newDurationInRendererTime);
+
+        boolean isPrewarmingAndReadBeyondNewDuration =
+            hasAnyRendererReadBeyondDuration(
+                prewarmingPeriods,
+                rendererPrewarmingPositionsUs,
+                periodHolder,
+                newDurationInRendererTime);
+        // Remove all subsequent periods.
+        @MediaPeriodQueue.UpdatePeriodQueueResult int removeAfterResult = removeAfter(periodHolder);
+        if (removeAfterResult != 0) {
+          return removeAfterResult;
+        }
+        int result = 0;
+        if (isReadingAndReadBeyondNewDuration
+            && (oldPeriodInfo.durationUs != C.TIME_UNSET
+                || oldPeriodInfo.id.nextAdGroupIndex != C.INDEX_UNSET)) {
+          // Duration changes from unset to set are usually acceptable, unless they involve a
+          // post-roll ad whose position was previously unknown (e.g., at the end of a live stream).
+          result |= UPDATE_PERIOD_QUEUE_ALTERED_READING_PERIOD;
+        }
+        if (isPrewarmingAndReadBeyondNewDuration) {
+          result |= UPDATE_PERIOD_QUEUE_ALTERED_PREWARMING_PERIOD;
+        }
+        return result;
       }
 
       previousPeriodHolder = periodHolder;
       periodHolder = periodHolder.getNext();
     }
-    return true;
+    return 0;
+  }
+
+  /**
+   * Returns whether any renderer has progressed beyond the duration of the specified media period.
+   */
+  private boolean hasAnyRendererReadBeyondDuration(
+      @NullableType MediaPeriodHolder[] rendererPeriods,
+      long[] positionsUs,
+      MediaPeriodHolder periodHolder,
+      long durationInRendererTime) {
+    for (int i = 0; i < rendererPeriods.length; i++) {
+      MediaPeriodHolder rendererPeriod = rendererPeriods[i];
+      if (rendererPeriod == null) {
+        continue;
+      }
+      // A renderer is "beyond" if it moved to a later period or reached the boundary of this one.
+      if (isPeriodAfter(rendererPeriod, periodHolder)
+          || (rendererPeriod.equals(periodHolder)
+              && (positionsUs[i] == C.TIME_END_OF_SOURCE
+                  || positionsUs[i] >= durationInRendererTime))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Returns whether {@code current} follows {@code target} in the queue. */
+  private boolean isPeriodAfter(MediaPeriodHolder current, MediaPeriodHolder target) {
+    MediaPeriodHolder next = target.getNext();
+    while (next != null) {
+      if (next.equals(current)) {
+        return true;
+      }
+      next = next.getNext();
+    }
+    return false;
   }
 
   /**
@@ -604,32 +829,24 @@ import java.util.List;
     boolean isLastInPeriod = isLastInPeriod(id);
     boolean isLastInWindow = isLastInWindow(timeline, id);
     boolean isLastInTimeline = isLastInTimeline(timeline, id, isLastInPeriod);
+    long durationUs = getMediaPeriodDuration(timeline, info.id);
     timeline.getPeriodByUid(info.id.periodUid, period);
-    long endPositionUs =
-        id.isAd() || id.nextAdGroupIndex == C.INDEX_UNSET
-            ? C.TIME_UNSET
-            : period.getAdGroupTimeUs(id.nextAdGroupIndex);
-    long durationUs =
-        id.isAd()
-            ? period.getAdDurationUs(id.adGroupIndex, id.adIndexInAdGroup)
-            : (endPositionUs == C.TIME_UNSET || endPositionUs == C.TIME_END_OF_SOURCE
-                ? period.getDurationUs()
-                : endPositionUs);
     boolean isFollowedByTransitionToSameStream =
         id.isAd()
             ? period.isServerSideInsertedAdGroup(id.adGroupIndex)
             : (id.nextAdGroupIndex != C.INDEX_UNSET
-                && period.isServerSideInsertedAdGroup(id.nextAdGroupIndex));
+                && period.isServerSideInsertedAdGroup(id.nextAdGroupIndex)
+                && !period.isLivePostrollPlaceholder(id.nextAdGroupIndex));
     return new MediaPeriodInfo(
         id,
         info.startPositionUs,
+        info.liveStreamStartPositionProjectionUs,
         info.requestedContentPositionUs,
-        endPositionUs,
         durationUs,
         isFollowedByTransitionToSameStream,
         isLastInPeriod,
         isLastInWindow,
-        isLastInTimeline);
+        /* isFinal= */ isLastInTimeline);
   }
 
   /**
@@ -659,7 +876,8 @@ import java.util.List;
    * @param positionUs The next content position in the period to play.
    * @param windowSequenceNumber The sequence number of the window in the buffered sequence of
    *     windows this period is part of.
-   * @param period A scratch {@link Timeline.Period}.
+   * @param window A scratch {@link Window}.
+   * @param period A scratch {@link Period}.
    * @return The identifier for the first media period to play, taking into account unplayed ads.
    */
   private static MediaPeriodId resolveMediaPeriodIdForAds(
@@ -667,8 +885,8 @@ import java.util.List;
       Object periodUid,
       long positionUs,
       long windowSequenceNumber,
-      Timeline.Window window,
-      Timeline.Period period) {
+      Window window,
+      Period period) {
     timeline.getPeriodByUid(periodUid, period);
     timeline.getWindow(period.windowIndex, window);
     // Skip ignorable server side inserted ad periods.
@@ -714,18 +932,42 @@ import java.util.List;
    * played after a period position change, returning an identifier for an ad group if one needs to
    * be played before the specified position, or an identifier for a content media period if not.
    *
+   * @param playbackInfo The current playback information.
    * @param timeline The timeline the period is part of.
    * @param periodUid The uid of the timeline period to play.
    * @param positionUs The next content position in the period to play.
+   * @param enforceAdPlayback Whether to enforce playback of ads before {@code positionUs}.
+   * @param transitionsFromPlaceholderPeriod Whether the previous period was a placeholder.
    * @return The identifier for the first media period to play, taking into account unplayed ads.
    */
   public MediaPeriodId resolveMediaPeriodIdForAdsAfterPeriodPositionChange(
-      Timeline timeline, Object periodUid, long positionUs) {
+      PlaybackInfo playbackInfo,
+      Timeline timeline,
+      Object periodUid,
+      long positionUs,
+      boolean enforceAdPlayback,
+      boolean transitionsFromPlaceholderPeriod) {
     long windowSequenceNumber = resolvePeriodUidToWindowSequenceNumber(timeline, periodUid);
+    Object periodUidToPlay = periodUid;
+    if (!enforceAdPlayback && !transitionsFromPlaceholderPeriod) {
+      MediaPeriodId oldPeriodId = playbackInfo.periodId;
+      // Ad playback not enforced. Check whether we are still playing on the same ad.
+      MediaPeriodId resolvedPeriodId =
+          resolveMediaPeriodIdForAds(
+              timeline, periodUidToPlay, positionUs, windowSequenceNumber, window, period);
+      if (oldPeriodId.isAd() && oldPeriodId.equals(resolvedPeriodId)) {
+        // If we are still on the same ad and the ad is unavailable or available, we keep the old
+        // period ID to continue playing the ad.
+        return oldPeriodId;
+      }
+      // If not enforced, we only make sure windowSequenceNumber and nextAdGroupIndex are correct.
+      timeline.getPeriodByUid(periodUid, period);
+      int nextAdGroupIndex = period.getAdGroupIndexAfterPositionUs(positionUs);
+      return new MediaPeriodId(periodUid, windowSequenceNumber, nextAdGroupIndex);
+    }
     // Check for preceding ad periods in multi-period window.
     timeline.getPeriodByUid(periodUid, period);
     timeline.getWindow(period.windowIndex, window);
-    Object periodUidToPlay = periodUid;
     boolean seenAdPeriod = false;
     for (int i = timeline.getIndexOfPeriod(periodUid); i >= window.firstPeriodIndex; i--) {
       timeline.getPeriod(/* periodIndex= */ i, period, /* setIds= */ true);
@@ -740,8 +982,21 @@ import java.util.List;
         break;
       }
     }
-    return resolveMediaPeriodIdForAds(
-        timeline, periodUidToPlay, positionUs, windowSequenceNumber, window, period);
+    // Find ad at or before the position.
+    MediaPeriodId mediaPeriodId =
+        resolveMediaPeriodIdForAds(
+            timeline, periodUidToPlay, positionUs, windowSequenceNumber, window, period);
+    if (mediaPeriodId.adGroupIndex != C.INDEX_UNSET && !enforceAdPlayback) {
+      // If not enforced and transitioning from the placeholder, an exact match of the position to
+      // the ad group start is still played (preroll or an ad at startPositionUs > 0).
+      timeline.getPeriodByUid(mediaPeriodId.periodUid, period);
+      if (period.adPlaybackState.getAdGroup(mediaPeriodId.adGroupIndex).timeUs != positionUs) {
+        int nextAdGroupIndex = period.getAdGroupIndexAfterPositionUs(positionUs);
+        return new MediaPeriodId(
+            mediaPeriodId.periodUid, mediaPeriodId.windowSequenceNumber, nextAdGroupIndex);
+      }
+    }
+    return mediaPeriodId;
   }
 
   // Internal methods.
@@ -753,7 +1008,12 @@ import java.util.List;
       builder.add(period.info.id);
       period = period.getNext();
     }
-    @Nullable MediaPeriodId readingPeriodId = reading == null ? null : reading.info.id;
+    // TODO: Update analytics post to provide correct info on current reading period state
+    @Nullable
+    MediaPeriodId readingPeriodId =
+        (readingPeriods.length == 0 || readingPeriods[0] == null)
+            ? null
+            : readingPeriods[0].info.id;
     analyticsCollectorHandler.post(
         () -> analyticsCollector.updateMediaPeriodQueueInfo(builder.build(), readingPeriodId));
   }
@@ -831,7 +1091,24 @@ import java.util.List;
    * described by {@code newInfo}.
    */
   private boolean canKeepMediaPeriodHolder(MediaPeriodInfo oldInfo, MediaPeriodInfo newInfo) {
-    return oldInfo.startPositionUs == newInfo.startPositionUs && oldInfo.id.equals(newInfo.id);
+    if (!oldInfo.id.equals(newInfo.id)) {
+      return false;
+    }
+    if (oldInfo.startPositionUs == newInfo.startPositionUs) {
+      return true;
+    }
+    // The start position changed. If this is caused by an acceptable difference from the forward
+    // projection into live streams, keep the old period.
+    if (oldInfo.liveStreamStartPositionProjectionUs == C.TIME_UNSET
+        || newInfo.liveStreamStartPositionProjectionUs == C.TIME_UNSET) {
+      return false;
+    }
+    long oldEffectiveStartPositionUs =
+        oldInfo.startPositionUs - oldInfo.liveStreamStartPositionProjectionUs;
+    long newEffectiveStartPositionUs =
+        newInfo.startPositionUs - newInfo.liveStreamStartPositionProjectionUs;
+    return abs(newEffectiveStartPositionUs - oldEffectiveStartPositionUs)
+        < MAX_EFFECTIVE_START_POSITION_DIFF_WITH_PROJECTION_US;
   }
 
   /**
@@ -846,12 +1123,14 @@ import java.util.List;
    * handled. If not, it is necessary to seek to the current playback position.
    *
    * @param timeline The current timeline.
+   * @return {@link UpdatePeriodQueueResult} with flags denoting if the playback mode change altered
+   *     the current reading or pre-warming media periods.
    */
-  private boolean updateForPlaybackModeChange(Timeline timeline) {
+  private int updateForPlaybackModeChange(Timeline timeline) {
     // Find the last existing period holder that matches the new period order.
     MediaPeriodHolder lastValidPeriodHolder = playing;
     if (lastValidPeriodHolder == null) {
-      return true;
+      return 0;
     }
     int currentPeriodIndex = timeline.getIndexOfPeriod(lastValidPeriodHolder.uid);
     while (true) {
@@ -876,24 +1155,25 @@ import java.util.List;
     }
 
     // Release any period holders that don't match the new period order.
-    boolean readingPeriodRemoved = removeAfter(lastValidPeriodHolder);
+    @MediaPeriodQueue.UpdatePeriodQueueResult
+    int removeAfterResult = removeAfter(lastValidPeriodHolder);
 
     // Update the period info for the last holder, as it may now be the last period in the timeline.
     lastValidPeriodHolder.info = getUpdatedMediaPeriodInfo(timeline, lastValidPeriodHolder.info);
     // If renderers may have read from a period that's been removed, it is necessary to restart.
-    return !readingPeriodRemoved;
+    return removeAfterResult;
   }
 
   /**
    * Returns the first {@link MediaPeriodInfo} to play, based on the specified playback position.
    */
-  @Nullable
   private MediaPeriodInfo getFirstMediaPeriodInfo(PlaybackInfo playbackInfo) {
     return getMediaPeriodInfo(
         playbackInfo.timeline,
         playbackInfo.periodId,
         playbackInfo.requestedContentPositionUs,
-        /* startPositionUs= */ playbackInfo.positionUs);
+        /* startPositionUs= */ playbackInfo.positionUs,
+        /* liveStreamStartPositionProjectionUs= */ C.TIME_UNSET);
   }
 
   /**
@@ -949,16 +1229,22 @@ import java.util.List;
       return null;
     }
     long startPositionUs = 0;
+    long liveStreamStartPositionProjectionUs = C.TIME_UNSET;
     long contentPositionUs = 0;
     int nextWindowIndex =
         timeline.getPeriod(nextPeriodIndex, period, /* setIds= */ true).windowIndex;
     Object nextPeriodUid = checkNotNull(period.uid);
     long windowSequenceNumber = mediaPeriodInfo.id.windowSequenceNumber;
     if (timeline.getWindow(nextWindowIndex, window).firstPeriodIndex == nextPeriodIndex) {
-      // We're starting to buffer a new window. When playback transitions to this window we'll
-      // want it to be from its default start position, so project the default start position
-      // forward by the duration of the buffer, and start buffering from this point.
+      // We're starting to buffer a new window.
       contentPositionUs = C.TIME_UNSET;
+      if (shouldUseLiveStartPositionProjection(
+          timeline, period.windowIndex, period.durationUs, window)) {
+        // When playback transitions to this window we'll want it to be from its default start
+        // position, so project the default start position forward by the duration of the buffer,
+        // and start buffering from this point.
+        liveStreamStartPositionProjectionUs = max(0, bufferedDurationUs);
+      }
       @Nullable
       Pair<Object, Long> defaultPositionUs =
           timeline.getPeriodPositionUs(
@@ -966,7 +1252,7 @@ import java.util.List;
               period,
               nextWindowIndex,
               /* windowPositionUs= */ C.TIME_UNSET,
-              /* defaultPositionProjectionUs= */ max(0, bufferedDurationUs));
+              liveStreamStartPositionProjectionUs);
       if (defaultPositionUs == null) {
         return null;
       }
@@ -1010,7 +1296,12 @@ import java.util.List;
         startPositionUs = crossfadeEntryOffsetUs;
       }
     }
-    return getMediaPeriodInfo(timeline, periodId, contentPositionUs, startPositionUs);
+    return getMediaPeriodInfo(
+        timeline,
+        periodId,
+        contentPositionUs,
+        startPositionUs,
+        liveStreamStartPositionProjectionUs);
   }
 
   /** Смещение входа в следующий трек, мкс; 0 — начинать с начала. */
@@ -1055,9 +1346,14 @@ import java.util.List;
       } else {
         // Play content from the ad group position.
         long startPositionUs = mediaPeriodInfo.requestedContentPositionUs;
+        long liveStreamStartPositionProjectionUs = C.TIME_UNSET;
         if (startPositionUs == C.TIME_UNSET) {
-          // If we're transitioning from an ad group to content starting from its default position,
-          // project the start position forward as if this were a transition to a new window.
+          if (shouldUseLiveStartPositionProjection(
+              timeline, period.windowIndex, period.durationUs, window)) {
+            // If we're transitioning from an ad group to content starting from its default
+            // position, project the start position forward as if transitioning to a new window.
+            liveStreamStartPositionProjectionUs = max(0, bufferedDurationUs);
+          }
           @Nullable
           Pair<Object, Long> defaultPositionUs =
               timeline.getPeriodPositionUs(
@@ -1065,7 +1361,7 @@ import java.util.List;
                   period,
                   period.windowIndex,
                   /* windowPositionUs= */ C.TIME_UNSET,
-                  /* defaultPositionProjectionUs= */ max(0, bufferedDurationUs));
+                  liveStreamStartPositionProjectionUs);
           if (defaultPositionUs == null) {
             return null;
           }
@@ -1078,6 +1374,7 @@ import java.util.List;
             timeline,
             currentPeriodId.periodUid,
             max(minStartPositionUs, startPositionUs),
+            liveStreamStartPositionProjectionUs,
             mediaPeriodInfo.requestedContentPositionUs,
             currentPeriodId.windowSequenceNumber);
       }
@@ -1103,6 +1400,7 @@ import java.util.List;
             timeline,
             currentPeriodId.periodUid,
             startPositionUs,
+            /* liveStreamStartPositionProjectionUs= */ C.TIME_UNSET,
             /* requestedContentPositionUs= */ mediaPeriodInfo.durationUs,
             currentPeriodId.windowSequenceNumber);
       }
@@ -1125,7 +1423,11 @@ import java.util.List;
   }
 
   private MediaPeriodInfo getMediaPeriodInfo(
-      Timeline timeline, MediaPeriodId id, long requestedContentPositionUs, long startPositionUs) {
+      Timeline timeline,
+      MediaPeriodId id,
+      long requestedContentPositionUs,
+      long startPositionUs,
+      long liveStreamStartPositionProjectionUs) {
     timeline.getPeriodByUid(id.periodUid, period);
     if (id.isAd()) {
       return getMediaPeriodInfoForAd(
@@ -1140,6 +1442,7 @@ import java.util.List;
           timeline,
           id.periodUid,
           startPositionUs,
+          liveStreamStartPositionProjectionUs,
           requestedContentPositionUs,
           id.windowSequenceNumber);
     }
@@ -1171,8 +1474,8 @@ import java.util.List;
     return new MediaPeriodInfo(
         id,
         startPositionUs,
+        /* liveStreamStartPositionProjectionUs= */ C.TIME_UNSET,
         /* requestedContentPositionUs= */ contentPositionUs,
-        /* endPositionUs= */ C.TIME_UNSET,
         durationUs,
         isFollowedByTransitionToSameStream,
         /* isLastInTimelinePeriod= */ false,
@@ -1184,52 +1487,36 @@ import java.util.List;
       Timeline timeline,
       Object periodUid,
       long startPositionUs,
+      long liveStreamStartPositionProjectionUs,
       long requestedContentPositionUs,
       long windowSequenceNumber) {
     timeline.getPeriodByUid(periodUid, period);
     int nextAdGroupIndex = period.getAdGroupIndexAfterPositionUs(startPositionUs);
-    boolean isNextAdGroupPostrollPlaceholder =
-        nextAdGroupIndex != C.INDEX_UNSET && period.isLivePostrollPlaceholder(nextAdGroupIndex);
-    boolean clipPeriodAtContentDuration = false;
-    if (nextAdGroupIndex == C.INDEX_UNSET) {
-      // Clip SSAI streams when at the end of the period.
-      clipPeriodAtContentDuration =
-          period.getAdGroupCount() > 0
-              && period.isServerSideInsertedAdGroup(period.getRemovedAdGroupCount());
-    } else if (period.isServerSideInsertedAdGroup(nextAdGroupIndex)
+    if (nextAdGroupIndex != C.INDEX_UNSET
+        && period.isServerSideInsertedAdGroup(nextAdGroupIndex)
         && period.getAdGroupTimeUs(nextAdGroupIndex) == period.durationUs
         && period.hasPlayedAdGroup(nextAdGroupIndex)) {
-      // Clip period before played SSAI post-rolls.
+      // Ignore SSAI post-rolls if already played.
       nextAdGroupIndex = C.INDEX_UNSET;
-      clipPeriodAtContentDuration = true;
     }
-
+    boolean isFollowedByTransitionToSameStream =
+        nextAdGroupIndex != C.INDEX_UNSET
+            && period.isServerSideInsertedAdGroup(nextAdGroupIndex)
+            && !period.isLivePostrollPlaceholder(nextAdGroupIndex);
     MediaPeriodId id = new MediaPeriodId(periodUid, windowSequenceNumber, nextAdGroupIndex);
     boolean isLastInPeriod = isLastInPeriod(id);
     boolean isLastInWindow = isLastInWindow(timeline, id);
     boolean isLastInTimeline = isLastInTimeline(timeline, id, isLastInPeriod);
-    boolean isFollowedByTransitionToSameStream =
-        nextAdGroupIndex != C.INDEX_UNSET
-            && period.isServerSideInsertedAdGroup(nextAdGroupIndex)
-            && !isNextAdGroupPostrollPlaceholder;
-    long endPositionUs =
-        nextAdGroupIndex != C.INDEX_UNSET && !isNextAdGroupPostrollPlaceholder
-            ? period.getAdGroupTimeUs(nextAdGroupIndex)
-            : clipPeriodAtContentDuration ? period.durationUs : C.TIME_UNSET;
-    long durationUs =
-        endPositionUs == C.TIME_UNSET || endPositionUs == C.TIME_END_OF_SOURCE
-            ? period.durationUs
-            : endPositionUs;
+    long durationUs = getMediaPeriodDuration(timeline, id);
     if (durationUs != C.TIME_UNSET && startPositionUs >= durationUs) {
       // Ensure start position doesn't exceed duration.
-      boolean endAtLastFrame = isLastInTimeline || !clipPeriodAtContentDuration;
-      startPositionUs = max(0, durationUs - (endAtLastFrame ? 1 : 0));
+      startPositionUs = max(0, durationUs - 1);
     }
     return new MediaPeriodInfo(
         id,
         startPositionUs,
+        liveStreamStartPositionProjectionUs,
         requestedContentPositionUs,
-        endPositionUs,
         durationUs,
         isFollowedByTransitionToSameStream,
         isLastInPeriod,
@@ -1259,6 +1546,18 @@ import java.util.List;
         && isLastMediaPeriodInPeriod;
   }
 
+  private long getMediaPeriodDuration(Timeline timeline, MediaPeriodId id) {
+    timeline.getPeriodByUid(id.periodUid, period);
+    if (id.isAd()) {
+      return period.getAdDurationUs(id.adGroupIndex, id.adIndexInAdGroup);
+    } else if (id.nextAdGroupIndex != C.INDEX_UNSET) {
+      long adGroupTimeUs = period.getAdGroupTimeUs(id.nextAdGroupIndex);
+      return adGroupTimeUs == C.TIME_END_OF_SOURCE ? period.getDurationUs() : adGroupTimeUs;
+    } else {
+      return period.getDurationUs();
+    }
+  }
+
   private long getMinStartPositionAfterAdGroupUs(
       Timeline timeline, Object periodUid, int adGroupIndex) {
     timeline.getPeriodByUid(periodUid, period);
@@ -1268,4 +1567,38 @@ import java.util.List;
     }
     return startPositionUs + period.getContentResumeOffsetUs(adGroupIndex);
   }
+
+  private static boolean shouldUseLiveStartPositionProjection(
+      Timeline timeline, int windowIndex, long periodDurationUs, Timeline.Window window) {
+    if (periodDurationUs != C.TIME_UNSET) {
+      return false;
+    }
+    timeline.getWindow(windowIndex, window);
+    return window.isDynamic && !window.isPlaceholder;
+  }
+
+  /**
+   * Results for calls to {link MediaPeriodQueue} methods that may alter the reading or prewarming
+   * periods in the queue like {@link #updateQueuedPeriods}, {@link #removeAfter}, {@link
+   * #updateShuffleModeEnabled}, and {@link #updateRepeatMode}.
+   */
+  @Documented
+  @Retention(RetentionPolicy.SOURCE)
+  @Target(TYPE_USE)
+  @IntDef(
+      flag = true,
+      value = {
+        UPDATE_PERIOD_QUEUE_ALTERED_READING_PERIOD,
+        UPDATE_PERIOD_QUEUE_ALTERED_PREWARMING_PERIOD
+      })
+  /* package */ @interface UpdatePeriodQueueResult {}
+
+  /** The update altered the reading period which means that a seek is required. */
+  /* package */ static final int UPDATE_PERIOD_QUEUE_ALTERED_READING_PERIOD = 1;
+
+  /**
+   * The update altered the pre-warming period which means that pre-warming renderers should be
+   * reset.
+   */
+  /* package */ static final int UPDATE_PERIOD_QUEUE_ALTERED_PREWARMING_PERIOD = 1 << 1;
 }

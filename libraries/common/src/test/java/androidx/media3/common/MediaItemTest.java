@@ -27,7 +27,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -209,7 +208,7 @@ public class MediaItemTest {
             .setUri(URI_STRING)
             .setDrmUuid(C.WIDEVINE_UUID)
             .setDrmLicenseUri(licenseUri)
-            .setDrmSessionForClearTypes(Arrays.asList(C.TRACK_TYPE_AUDIO))
+            .setDrmSessionForClearTypes(ImmutableList.of(C.TRACK_TYPE_AUDIO))
             .setDrmSessionForClearPeriods(true)
             .build();
 
@@ -450,6 +449,7 @@ public class MediaItemTest {
                     .setRelativeToLiveWindow(true)
                     .setRelativeToDefaultPosition(true)
                     .setStartsAtKeyFrame(true)
+                    .setAllowUnseekableMedia(true)
                     .build())
             .build();
 
@@ -458,6 +458,7 @@ public class MediaItemTest {
     assertThat(mediaItem.clippingConfiguration.relativeToLiveWindow).isTrue();
     assertThat(mediaItem.clippingConfiguration.relativeToDefaultPosition).isTrue();
     assertThat(mediaItem.clippingConfiguration.startsAtKeyFrame).isTrue();
+    assertThat(mediaItem.clippingConfiguration.allowUnseekableMedia).isTrue();
     assertThat(mediaItem.clippingConfiguration).isEqualTo(mediaItem.clippingProperties);
   }
 
@@ -475,6 +476,7 @@ public class MediaItemTest {
     assertThat(clippingConfiguration.relativeToLiveWindow).isFalse();
     assertThat(clippingConfiguration.relativeToDefaultPosition).isFalse();
     assertThat(clippingConfiguration.startsAtKeyFrame).isFalse();
+    assertThat(clippingConfiguration.allowUnseekableMedia).isFalse();
     assertThat(clippingConfiguration).isEqualTo(MediaItem.ClippingConfiguration.UNSET);
   }
 
@@ -503,6 +505,7 @@ public class MediaItemTest {
             .setStartPositionMs(1000L)
             .setEndPositionUs(2000_031L)
             .setStartsAtKeyFrame(true)
+            .setAllowUnseekableMedia(true)
             .build();
 
     MediaItem.ClippingConfiguration clippingConfigurationFromBundle =
@@ -557,6 +560,7 @@ public class MediaItemTest {
   }
 
   @Test
+  @SuppressWarnings("Range") // Deliberately testing invalid values
   public void clippingConfigurationBuilder_throwsOnInvalidValues() {
     MediaItem.ClippingConfiguration.Builder clippingConfigurationBuilder =
         new MediaItem.ClippingConfiguration.Builder();
@@ -582,7 +586,7 @@ public class MediaItemTest {
   }
 
   @Test
-  @SuppressWarnings("deprecation") // Testing deprecated setter.
+  @SuppressWarnings({"deprecation", "Range"}) // Testing deprecated setter with invalid value.
   public void builderSetStartPositionMs_negativeValue_throws() {
     MediaItem.Builder builder = new MediaItem.Builder();
 
@@ -815,7 +819,10 @@ public class MediaItemTest {
     MediaItem.LocalConfiguration localConfigurationFromBundle =
         MediaItem.LocalConfiguration.fromBundle(localConfiguration.toBundle());
     MediaItem.LocalConfiguration localConfigurationFromMediaItemBundle =
-        MediaItem.fromBundle(mediaItem.toBundleIncludeLocalConfiguration()).localConfiguration;
+        MediaItem.fromBundle(
+                mediaItem.toBundleIncludeLocalConfiguration(MediaLibraryInfo.INTERFACE_VERSION),
+                MediaLibraryInfo.INTERFACE_VERSION)
+            .localConfiguration;
 
     assertThat(localConfigurationFromBundle).isEqualTo(localConfiguration);
     assertThat(localConfigurationFromMediaItemBundle).isEqualTo(localConfiguration);
@@ -1044,7 +1051,11 @@ public class MediaItemTest {
             .build();
 
     assertThat(mediaItem.localConfiguration).isNull();
-    assertThat(MediaItem.fromBundle(mediaItem.toBundle())).isEqualTo(mediaItem);
+    assertThat(
+            MediaItem.fromBundle(
+                mediaItem.toBundle(MediaLibraryInfo.INTERFACE_VERSION),
+                MediaLibraryInfo.INTERFACE_VERSION))
+        .isEqualTo(mediaItem);
   }
 
   @Test
@@ -1053,7 +1064,12 @@ public class MediaItemTest {
     MediaItem mediaItem = new MediaItem.Builder().setUri(URI_STRING).build();
 
     assertThat(mediaItem.localConfiguration).isNotNull();
-    assertThat(MediaItem.fromBundle(mediaItem.toBundle()).localConfiguration).isNull();
+    assertThat(
+            MediaItem.fromBundle(
+                    mediaItem.toBundle(MediaLibraryInfo.INTERFACE_VERSION),
+                    MediaLibraryInfo.INTERFACE_VERSION)
+                .localConfiguration)
+        .isNull();
   }
 
   @Test
@@ -1061,7 +1077,9 @@ public class MediaItemTest {
       roundTripViaBundleIncludeLocalConfiguration_mediaItemContainsLocalConfiguration_restoresLocalConfiguration() {
     MediaItem mediaItem = new MediaItem.Builder().setUri(URI_STRING).build();
     MediaItem restoredMediaItem =
-        MediaItem.fromBundle(mediaItem.toBundleIncludeLocalConfiguration());
+        MediaItem.fromBundle(
+            mediaItem.toBundleIncludeLocalConfiguration(MediaLibraryInfo.INTERFACE_VERSION),
+            MediaLibraryInfo.INTERFACE_VERSION);
 
     assertThat(mediaItem.localConfiguration).isNotNull();
     assertThat(restoredMediaItem.localConfiguration).isEqualTo(mediaItem.localConfiguration);
@@ -1078,7 +1096,10 @@ public class MediaItemTest {
             .setRequestMetadata(new RequestMetadata.Builder().setExtras(extras).build())
             .build();
 
-    MediaItem restoredItem = MediaItem.fromBundle(mediaItem.toBundle());
+    MediaItem restoredItem =
+        MediaItem.fromBundle(
+            mediaItem.toBundle(MediaLibraryInfo.INTERFACE_VERSION),
+            MediaLibraryInfo.INTERFACE_VERSION);
 
     assertThat(restoredItem).isEqualTo(mediaItem);
     assertThat(restoredItem.requestMetadata.extras).isNotNull();
@@ -1103,12 +1124,15 @@ public class MediaItemTest {
   public void createDefaultMediaItemInstance_toBundleSkipsDefaultValues_fromBundleRestoresThem() {
     MediaItem mediaItem = new MediaItem.Builder().build();
 
-    Bundle mediaItemBundle = mediaItem.toBundle();
+    Bundle mediaItemBundle = mediaItem.toBundle(MediaLibraryInfo.INTERFACE_VERSION);
 
     // Check that default values are skipped when bundling.
     assertThat(mediaItemBundle.keySet()).isEmpty();
 
-    MediaItem mediaItemFromBundle = MediaItem.fromBundle(mediaItem.toBundle());
+    MediaItem mediaItemFromBundle =
+        MediaItem.fromBundle(
+            mediaItem.toBundle(MediaLibraryInfo.INTERFACE_VERSION),
+            MediaLibraryInfo.INTERFACE_VERSION);
 
     assertThat(mediaItemFromBundle).isEqualTo(mediaItem);
   }
@@ -1136,7 +1160,10 @@ public class MediaItemTest {
                     .build())
             .build();
 
-    MediaItem mediaItemFromBundle = MediaItem.fromBundle(mediaItem.toBundle());
+    MediaItem mediaItemFromBundle =
+        MediaItem.fromBundle(
+            mediaItem.toBundle(MediaLibraryInfo.INTERFACE_VERSION),
+            MediaLibraryInfo.INTERFACE_VERSION);
 
     assertThat(mediaItemFromBundle).isEqualTo(mediaItem);
     assertThat(mediaItemFromBundle.requestMetadata.extras)

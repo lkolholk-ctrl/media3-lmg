@@ -15,7 +15,7 @@
  */
 package androidx.media3.exoplayer.source;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.Math.min;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
@@ -24,6 +24,7 @@ import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.Timeline;
+import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.TransferListener;
 import androidx.media3.exoplayer.upstream.Allocator;
@@ -96,6 +97,7 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
   private long[][] periodTimeOffsetsUs;
 
   @Nullable private IllegalMergeException mergeError;
+  private boolean enableClippingInMediaPeriod;
 
   /**
    * Creates a merging media source.
@@ -173,6 +175,22 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
     clippedMediaPeriods = MultimapBuilder.hashKeys().arrayListValues().build();
   }
 
+  /**
+   * Sets whether an experimental setting to delegate end position clipping to a wrapped {@link
+   * MediaPeriod} is enabled.
+   *
+   * <p>The default value is {@code false}.
+   *
+   * <p>This method must be called immediately after creating the merging source.
+   *
+   * @param enableClippingInMediaPeriod Whether the end clipping should be delegated to the wrapped
+   *     {@link MediaPeriod} instances.
+   */
+  @ExperimentalApi // TODO: b/474538573 - Remove once clipping in media period is default.
+  public void setEnableClippingInMediaPeriod(boolean enableClippingInMediaPeriod) {
+    this.enableClippingInMediaPeriod = enableClippingInMediaPeriod;
+  }
+
   @Override
   public MediaItem getMediaItem() {
     return mediaSources.length > 0 ? mediaSources[0].getMediaItem() : PLACEHOLDER_MEDIA_ITEM;
@@ -222,9 +240,10 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
       mediaPeriod =
           new ClippingMediaPeriod(
               mediaPeriod,
-              /* enableInitialDiscontinuity= */ true,
+              /* enableInitialDiscontinuity= */ false,
               /* startUs= */ 0,
-              /* endUs= */ checkNotNull(clippedDurationsUs.get(id.periodUid)));
+              /* endUs= */ checkNotNull(clippedDurationsUs.get(id.periodUid)),
+              enableClippingInMediaPeriod);
       clippedMediaPeriods.put(id.periodUid, (ClippingMediaPeriod) mediaPeriod);
     }
     return mediaPeriod;
@@ -245,8 +264,9 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
     MergingMediaPeriod mergingPeriod = (MergingMediaPeriod) mediaPeriod;
     for (int i = 0; i < mediaSources.length; i++) {
       List<MediaPeriodAndId> mediaPeriodsForSource = mediaPeriods.get(i);
+      MediaPeriod childPeriod = mergingPeriod.getChildPeriod(i);
       for (int j = 0; j < mediaPeriodsForSource.size(); j++) {
-        if (mediaPeriodsForSource.get(j).mediaPeriod.equals(mediaPeriod)) {
+        if (mediaPeriodsForSource.get(j).mediaPeriod.equals(childPeriod)) {
           mediaPeriodsForSource.remove(j);
           break;
         }

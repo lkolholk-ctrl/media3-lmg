@@ -15,17 +15,17 @@
  */
 package androidx.media3.exoplayer.audio;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.Math.min;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.audio.AudioProcessorChain;
 import androidx.media3.common.audio.BaseAudioProcessor;
-import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
-import androidx.media3.extractor.WavUtil;
+import androidx.media3.common.util.WavUtil;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
@@ -67,7 +67,7 @@ public final class TeeAudioProcessor extends BaseAudioProcessor {
    *     processor.
    */
   public TeeAudioProcessor(AudioBufferSink audioBufferSink) {
-    this.audioBufferSink = Assertions.checkNotNull(audioBufferSink);
+    this.audioBufferSink = checkNotNull(audioBufferSink);
   }
 
   @Override
@@ -87,7 +87,7 @@ public final class TeeAudioProcessor extends BaseAudioProcessor {
   }
 
   @Override
-  protected void onFlush() {
+  protected void onFlush(StreamMetadata streamMetadata) {
     flushSinkIfActive();
   }
 
@@ -203,7 +203,7 @@ public final class TeeAudioProcessor extends BaseAudioProcessor {
     }
 
     private void writeBuffer(ByteBuffer buffer) throws IOException {
-      RandomAccessFile randomAccessFile = Assertions.checkNotNull(this.randomAccessFile);
+      RandomAccessFile randomAccessFile = checkNotNull(this.randomAccessFile);
       while (buffer.hasRemaining()) {
         int bytesToWrite = min(buffer.remaining(), scratchBuffer.length);
         buffer.get(scratchBuffer, 0, bytesToWrite);

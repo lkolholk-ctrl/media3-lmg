@@ -2,7 +2,7 @@
 
 *[English version](README.LMG.md)*
 
-Форк [`androidx/media`](https://github.com/androidx/media) (тег **1.5.1**).
+Форк [`androidx/media`](https://github.com/androidx/media) (тег **1.11.0**).
 Добавляет кроссфейд между треками — наложение уходящего и входящего трека с
 плавным переходом громкости, чего сток media3 не умеет: он переключает треки
 встык (gapless) и не играет два аудиопотока одновременно.
@@ -16,6 +16,8 @@
 
 ---
 
+Версия: **1.11.0-lmg31**. Собраны 11 AAR и пройдены 136 JVM-тестов. Проверка звука на устройстве остаётся отдельным этапом. См. [описание переноса](MIGRATION-1.11.0.md).
+
 ## Подключение
 
 Артефакты публикуются под собственной группой `com.liquidmusicglass.media3`,
@@ -24,7 +26,7 @@
 **1. Скачать maven-репозиторий из релиза** (в CI — отдельным шагом):
 
 ```bash
-VER=1.5.1-lmg30
+VER=1.11.0-lmg31
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -55,10 +57,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg30")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg30")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg30")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg30")
+    implementation("com.liquidmusicglass.media3:media3-common:1.11.0-lmg31")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.11.0-lmg31")
+    implementation("com.liquidmusicglass.media3:media3-session:1.11.0-lmg31")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.11.0-lmg31")
     // при необходимости: media3-extractor, media3-exoplayer-hls,
     // media3-common-ktx, media3-datasource, media3-decoder,
     // media3-container, media3-database
@@ -93,7 +95,7 @@ player.setCrossfadeConfiguration(
 
 | Константа | Кривая | Когда уместна |
 |---|---|---|
-| `CURVE_DEFAULT` | равная мощность | ровный свод: суммарная громкость не проваливается, перекрытие слышно всю длительность |
+| `CURVE_DEFAULT` | логарифм нарастания / экспонента затухания | слышимое изменение громкости обоих треков; возможен провал в середине |
 | `CURVE_CONSTANT_POWER` | равная мощность | ровное перекрытие: суммарная мощность постоянна, но на слух играют оба сразу |
 | `CURVE_EXPONENTIAL` | экспонента | уходящий держится дольше, входящий вступает резче |
 | `CURVE_LINEAR` | линейная | ритм не «плывёт» |
@@ -176,28 +178,7 @@ CrossfadeConfig.setDebugLogging(true)   // уровни громкости на 
 
 ---
 
-## Сборка форка
 
-CI (`.github/workflows/build-aars.yml`) собирает 11 модулей, складывает их в
-maven-репозиторий и публикует его zip-архивом в GitHub Release `v<version>`:
+## Инфраструктура сборки
 
-```
-media3-common, media3-common-ktx, media3-container, media3-database,
-media3-datasource, media3-decoder, media3-extractor, media3-exoplayer,
-media3-exoplayer-hls, media3-session, media3-ui
-```
-
-Версия задаётся **в двух местах, и они обязаны совпадать**:
-
-- `constants.gradle` → `releaseVersion` — версия артефактов;
-- `.github/workflows/build-aars.yml` → `RELEASE_VERSION` — имя релиза и архива.
-
-Если поднять только одну, релиз соберётся под именем старой версии, а артефакты
-внутри будут новой — подключение сломается с ошибкой «зависимость не найдена».
-Так уже случалось, см. `lmg19` в истории версий.
-
-Локальная сборка:
-
-```bash
-./gradlew publishAllPublicationsToLocalRepository
-```
+Перенесена система Google на Kotlin DSL: Gradle 9.1.0, AGP 9.0.1, Kotlin 2.2.0, compileSdk 36, minSdk 23. Единственный источник версии — `gradle/libs.versions.toml`; CI читает его при именовании артефактов. Maven-группа — `com.liquidmusicglass.media3`. SNAPSHOT сохраняется как CI artifact, без GitHub Release. AAR и 136 JVM-тестов проверены с JDK 21. [Статус проверок](MIGRATION-1.11.0.md).

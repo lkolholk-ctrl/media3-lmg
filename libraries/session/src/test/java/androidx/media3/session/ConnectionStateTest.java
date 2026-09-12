@@ -46,10 +46,13 @@ public class ConnectionStateTest {
     ConnectionState connectionState =
         new ConnectionState(
             MediaLibraryInfo.VERSION_INT,
-            MediaSessionStub.VERSION_INT,
+            MediaLibraryInfo.INTERFACE_VERSION,
             new MediaSessionStub(session.getImpl()),
             /* sessionActivity= */ PendingIntent.getActivity(
-                context, /* requestCode= */ 0, new Intent(), /* flags= */ 0),
+                context,
+                /* requestCode= */ 0,
+                new Intent(),
+                /* flags= */ PendingIntent.FLAG_IMMUTABLE),
             /* customLayout= */ ImmutableList.of(
                 new CommandButton.Builder(CommandButton.ICON_ARTIST)
                     .setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT)
@@ -72,11 +75,12 @@ public class ConnectionStateTest {
             tokenExtras,
             sessionExtras,
             PlayerInfo.DEFAULT.copyWithIsPlaying(true),
-            session.getPlatformToken());
+            session.getPlatformToken(),
+            /* packageNameOverride= */ "com.example.session");
 
     ConnectionState restoredConnectionState =
         ConnectionState.fromBundle(
-            connectionState.toBundleForRemoteProcess(MediaControllerStub.VERSION_INT));
+            connectionState.toBundleForRemoteProcess(MediaLibraryInfo.INTERFACE_VERSION));
     session.release();
     player.release();
 
@@ -99,6 +103,7 @@ public class ConnectionStateTest {
     assertThat(restoredConnectionState.sessionExtras.getString("key")).isEqualTo("session");
     assertThat(restoredConnectionState.playerInfo.isPlaying).isTrue();
     assertThat(restoredConnectionState.platformToken).isEqualTo(connectionState.platformToken);
+    assertThat(restoredConnectionState.packageNameOverride).isEqualTo("com.example.session");
   }
 
   @Test
@@ -110,13 +115,13 @@ public class ConnectionStateTest {
     ConnectionState connectionState =
         new ConnectionState(
             MediaLibraryInfo.VERSION_INT,
-            MediaSessionStub.VERSION_INT,
+            MediaLibraryInfo.INTERFACE_VERSION,
             new MediaSessionStub(session.getImpl()),
             /* sessionActivity= */ null,
             /* customLayout= */ ImmutableList.of(),
             /* mediaButtonPreferences= */ ImmutableList.of(
                 new CommandButton.Builder(CommandButton.ICON_HEART_FILLED)
-                    .setPlayerCommand(Player.COMMAND_PREPARE)
+                    .setSessionCommand(new SessionCommand("action", Bundle.EMPTY))
                     .build()),
             /* commandButtonsForMediaItems= */ ImmutableList.of(),
             SessionCommands.EMPTY,
@@ -125,11 +130,12 @@ public class ConnectionStateTest {
             /* tokenExtras= */ Bundle.EMPTY,
             /* sessionExtras= */ Bundle.EMPTY,
             PlayerInfo.DEFAULT,
-            session.getPlatformToken());
+            session.getPlatformToken(),
+            /* packageNameOverride= */ "androidx.media3.session");
 
     ConnectionState restoredConnectionState =
         ConnectionState.fromBundle(
-            connectionState.toBundleForRemoteProcess(/* controllerInterfaceVersion= */ 6));
+            connectionState.toBundleForRemoteProcess(/* interfaceVersion= */ 6));
     session.release();
     player.release();
 

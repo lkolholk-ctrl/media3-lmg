@@ -2,8 +2,11 @@
 
 *[Русская версия](CHANGELOG.LMG.ru.md)*
 
-Version format: `1.5.1-lmgN`, where `1.5.1` is the upstream base version.
-Current: **1.5.1-lmg30**.
+Version format: `<upstream>-lmgN`. Current release: **1.11.0-lmg31**.
+
+## 1.11.0-lmg31
+
+Imported Google 1.11.0 and adapted LMG overlap to RendererHolder, per-renderer queues and playback-thread audio focus. Preserved fade formulas and public configuration API. Update throttling uses ExoPlayer's monotonic clock. Updated Kotlin DSL publishing with a single version catalog. All 11 AARs built and 136 JVM tests passed. No emulator or device audio validation was run. See [migration notes](MIGRATION-1.11.0.md).
 
 ## 1.5.1-lmg30
 Bug fixes, no new features.

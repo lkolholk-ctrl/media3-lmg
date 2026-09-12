@@ -16,9 +16,12 @@
 package androidx.media3.extractor.mp4;
 
 import static androidx.media3.common.MimeTypes.getMimeTypeFromMp4ObjectType;
-import static androidx.media3.common.util.Assertions.checkNotNull;
 import static androidx.media3.common.util.Util.castNonNull;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.max;
+import static java.nio.ByteOrder.BIG_ENDIAN;
+import static java.nio.ByteOrder.LITTLE_ENDIAN;
 
 import android.util.Pair;
 import androidx.annotation.Nullable;
@@ -26,6 +29,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.DrmInitData;
 import androidx.media3.common.Format;
+import androidx.media3.common.Label;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
@@ -36,24 +40,32 @@ import androidx.media3.common.util.ParsableBitArray;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
+import androidx.media3.container.DolbyVisionConfig;
+import androidx.media3.container.Mp4AlternateGroupData;
 import androidx.media3.container.Mp4Box;
 import androidx.media3.container.Mp4Box.LeafBox;
 import androidx.media3.container.Mp4LocationData;
 import androidx.media3.container.Mp4TimestampData;
 import androidx.media3.container.NalUnitUtil;
+import androidx.media3.container.OpusUtil;
 import androidx.media3.extractor.AacUtil;
 import androidx.media3.extractor.Ac3Util;
 import androidx.media3.extractor.Ac4Util;
+import androidx.media3.extractor.Av1Config;
 import androidx.media3.extractor.AvcConfig;
-import androidx.media3.extractor.DolbyVisionConfig;
 import androidx.media3.extractor.ExtractorUtil;
 import androidx.media3.extractor.GaplessInfoHolder;
 import androidx.media3.extractor.HevcConfig;
-import androidx.media3.extractor.OpusUtil;
 import androidx.media3.extractor.VorbisUtil;
+import androidx.media3.extractor.VvcConfig;
+import androidx.media3.extractor.metadata.Chapter;
+import androidx.media3.extractor.text.vobsub.VobsubParser;
 import com.google.common.base.Function;
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
+import com.google.common.primitives.ImmutableLongArray;
 import com.google.common.primitives.Ints;
+import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -93,16 +105,29 @@ public final class BoxParser {
   private static final int TYPE_subt = 0x73756274;
 
   @SuppressWarnings("ConstantCaseForConstants")
+  private static final int TYPE_subp = 0x73756270;
+
+  @SuppressWarnings("ConstantCaseForConstants")
   private static final int TYPE_text = 0x74657874;
 
   @SuppressWarnings("ConstantCaseForConstants")
   private static final int TYPE_vide = 0x76696465;
+
+  private static final int SAMPLE_RATE_AMR_NB = 8_000;
+  private static final int SAMPLE_RATE_AMR_WB = 16_000;
 
   /**
    * The threshold number of samples to trim from the start/end of an audio track when applying an
    * edit below which gapless info can be used (rather than removing samples from the sample table).
    */
   private static final int MAX_GAPLESS_TRIM_SIZE_SAMPLES = 4;
+
+  /**
+   * A small tolerance for comparing track durations, in timescale units. This is to account for
+   * small rounding errors that can be introduced when scaling edit list durations from the movie
+   * timescale to the track timescale.
+   */
+  private static final int EDIT_LIST_DURATION_TOLERANCE_TIMESCALE_UNITS = 2;
 
   /** The magic signature for an Opus Identification header, as defined in RFC-7845. */
   private static final byte[] opusMagic = Util.getUtf8Bytes("OpusHead");
@@ -128,6 +153,8 @@ public final class BoxParser {
    * @param ignoreEditLists Whether to ignore any edit lists in the trak boxes.
    * @param isQuickTime True for QuickTime media. False otherwise.
    * @param modifyTrackFunction A function to apply to the {@link Track Tracks} in the result.
+   * @param omitTrackSampleTable Whether to optimize for metadata retrieval by skipping allocation
+   *     and population of per-sample arrays in the {@link TrackSampleTable}.
    * @return A list of {@link TrackSampleTable} instances.
    * @throws ParserException Thrown if the trak boxes can't be parsed.
    */
@@ -138,7 +165,8 @@ public final class BoxParser {
       @Nullable DrmInitData drmInitData,
       boolean ignoreEditLists,
       boolean isQuickTime,
-      Function<@NullableType Track, @NullableType Track> modifyTrackFunction)
+      Function<@NullableType Track, @NullableType Track> modifyTrackFunction,
+      boolean omitTrackSampleTable)
       throws ParserException {
     List<TrackSampleTable> trackSampleTables = new ArrayList<>();
     for (int i = 0; i < moov.containerChildren.size(); i++) {
@@ -165,7 +193,8 @@ public final class BoxParser {
                       checkNotNull(atom.getContainerBoxOfType(Mp4Box.TYPE_mdia))
                           .getContainerBoxOfType(Mp4Box.TYPE_minf))
                   .getContainerBoxOfType(Mp4Box.TYPE_stbl));
-      TrackSampleTable trackSampleTable = parseStbl(track, stblAtom, gaplessInfoHolder);
+      TrackSampleTable trackSampleTable =
+          parseStbl(track, stblAtom, gaplessInfoHolder, omitTrackSampleTable);
       trackSampleTables.add(trackSampleTable);
     }
     return trackSampleTables;
@@ -175,9 +204,10 @@ public final class BoxParser {
    * Parses a udta box.
    *
    * @param udtaBox The udta (user data) box to decode.
+   * @param ignoreArtwork Whether to ignore artwork metadata.
    * @return Parsed metadata.
    */
-  public static Metadata parseUdta(LeafBox udtaBox) {
+  public static Metadata parseUdta(LeafBox udtaBox, boolean ignoreArtwork) {
     ParsableByteArray udtaData = udtaBox.data;
     udtaData.setPosition(Mp4Box.HEADER_SIZE);
     Metadata metadata = new Metadata();
@@ -188,7 +218,8 @@ public final class BoxParser {
       if (atomType == Mp4Box.TYPE_meta) {
         udtaData.setPosition(atomPosition);
         metadata =
-            metadata.copyWithAppendedEntriesFrom(parseUdtaMeta(udtaData, atomPosition + atomSize));
+            metadata.copyWithAppendedEntriesFrom(
+                parseUdtaMeta(udtaData, atomPosition + atomSize, ignoreArtwork));
       } else if (atomType == Mp4Box.TYPE_smta) {
         udtaData.setPosition(atomPosition);
         metadata =
@@ -196,6 +227,8 @@ public final class BoxParser {
                 SmtaAtomUtil.parseSmta(udtaData, atomPosition + atomSize));
       } else if (atomType == Mp4Box.TYPE_xyz) {
         metadata = metadata.copyWithAppendedEntriesFrom(parseXyz(udtaData));
+      } else if (atomType == Mp4Box.TYPE_chpl) {
+        metadata = metadata.copyWithAppendedEntriesFrom(parseChpl(udtaData));
       }
       udtaData.setPosition(atomPosition + atomSize);
     }
@@ -354,44 +387,74 @@ public final class BoxParser {
     MdhdData mdhdData = parseMdhd(checkNotNull(mdia.getLeafBoxOfType(Mp4Box.TYPE_mdhd)).data);
     LeafBox stsd = stbl.getLeafBoxOfType(Mp4Box.TYPE_stsd);
     if (stsd == null) {
-      throw ParserException.createForMalformedContainer(
-          "Malformed sample table (stbl) missing sample description (stsd)", /* cause= */ null);
+      Log.w(
+          TAG,
+          "Ignoring track where sample table (stbl) box is missing a sample description (stsd).");
+      return null;
     }
-    StsdData stsdData =
-        parseStsd(
-            stsd.data,
-            tkhdData.id,
-            tkhdData.rotationDegrees,
-            mdhdData.language,
-            drmInitData,
-            isQuickTime);
-    @Nullable long[] editListDurations = null;
-    @Nullable long[] editListMediaTimes = null;
+    StsdData stsdData = parseStsd(stsd.data, tkhdData, mdhdData.language, drmInitData, isQuickTime);
+
+    int chapterTrackId = C.INDEX_UNSET;
+    @Nullable Mp4Box.ContainerBox tref = trak.getContainerBoxOfType(Mp4Box.TYPE_tref);
+    if (tref != null) {
+      @Nullable Mp4Box.LeafBox chap = tref.getLeafBoxOfType(Mp4Box.TYPE_chap);
+      if (chap != null) {
+        ParsableByteArray chapData = chap.data;
+        chapData.setPosition(Mp4Box.HEADER_SIZE);
+        if (chapData.bytesLeft() >= 4) {
+          chapterTrackId = chapData.readInt();
+        }
+      }
+    }
+
+    @Nullable ImmutableLongArray editListDurations = null;
+    @Nullable ImmutableLongArray editListMediaTimes = null;
     if (!ignoreEditLists) {
       @Nullable Mp4Box.ContainerBox edtsAtom = trak.getContainerBoxOfType(Mp4Box.TYPE_edts);
       if (edtsAtom != null) {
-        @Nullable Pair<long[], long[]> edtsData = parseEdts(edtsAtom);
+        @Nullable Pair<ImmutableLongArray, ImmutableLongArray> edtsData = parseEdts(edtsAtom);
         if (edtsData != null) {
           editListDurations = edtsData.first;
           editListMediaTimes = edtsData.second;
         }
       }
     }
-    return stsdData.format == null
-        ? null
-        : new Track(
-            tkhdData.id,
-            trackType,
-            mdhdData.timescale,
-            movieTimescale,
-            durationUs,
-            mdhdData.mediaDurationUs,
-            stsdData.format,
-            stsdData.requiredSampleTransformation,
-            stsdData.trackEncryptionBoxes,
-            stsdData.nalUnitLengthFieldLength,
-            editListDurations,
-            editListMediaTimes);
+    if (stsdData.format == null) {
+      return null;
+    }
+    Format format;
+    if (tkhdData.alternateGroup != 0) {
+      Mp4AlternateGroupData alternateGroupEntry =
+          new Mp4AlternateGroupData(tkhdData.alternateGroup);
+      format =
+          stsdData
+              .format
+              .buildUpon()
+              .setMetadata(
+                  stsdData.format.metadata != null
+                      ? stsdData.format.metadata.copyWithAppendedEntries(alternateGroupEntry)
+                      : new Metadata(alternateGroupEntry))
+              .build();
+    } else {
+      format = stsdData.format;
+    }
+    boolean shouldBeExposed = !Objects.equals(format.sampleMimeType, MimeTypes.TEXT_UNKNOWN);
+    return new Track.Builder()
+        .setId(tkhdData.id)
+        .setType(trackType)
+        .setTimescale(mdhdData.timescale)
+        .setMovieTimescale(movieTimescale)
+        .setDurationUs(durationUs)
+        .setMediaDurationUs(mdhdData.mediaDurationUs)
+        .setFormat(format)
+        .setSampleTransformation(stsdData.requiredSampleTransformation)
+        .setSampleDescriptionEncryptionBoxes(stsdData.trackEncryptionBoxes)
+        .setNalUnitLengthFieldLength(stsdData.nalUnitLengthFieldLength)
+        .setEditListDurations(editListDurations)
+        .setEditListMediaTimes(editListMediaTimes)
+        .setShouldBeExposed(shouldBeExposed)
+        .setChapterTrackId(chapterTrackId)
+        .build();
   }
 
   /**
@@ -400,11 +463,16 @@ public final class BoxParser {
    * @param track Track to which this sample table corresponds.
    * @param stblBox stbl (sample table) box to decode.
    * @param gaplessInfoHolder Holder to populate with gapless playback information.
+   * @param omitTrackSampleTable Whether to optimize for metadata retrieval by skipping allocation
+   *     and population of per-sample arrays in the {@link TrackSampleTable}.
    * @return Sample table described by the stbl box.
    * @throws ParserException Thrown if the stbl box can't be parsed.
    */
   public static TrackSampleTable parseStbl(
-      Track track, Mp4Box.ContainerBox stblBox, GaplessInfoHolder gaplessInfoHolder)
+      Track track,
+      Mp4Box.ContainerBox stblBox,
+      GaplessInfoHolder gaplessInfoHolder,
+      boolean omitTrackSampleTable)
       throws ParserException {
     SampleSizeBox sampleSizeBox;
     @Nullable LeafBox stszAtom = stblBox.getLeafBoxOfType(Mp4Box.TYPE_stsz);
@@ -428,13 +496,16 @@ public final class BoxParser {
           /* maximumSize= */ 0,
           /* timestampsUs= */ new long[0],
           /* flags= */ new int[0],
-          /* durationUs= */ 0);
+          /* syncSampleIndices= */ new int[0],
+          /* hasOnlySyncSamples= */ false,
+          /* durationUs= */ 0,
+          /* sampleCount= */ 0);
     }
 
     if (track.type == C.TRACK_TYPE_VIDEO && track.mediaDurationUs > 0) {
       float frameRate = sampleCount / (track.mediaDurationUs / 1000000f);
       Format format = track.format.buildUpon().setFrameRate(frameRate).build();
-      track = track.copyWithFormat(format);
+      track = track.buildUpon().setFormat(format).build();
     }
 
     // Entries are byte offsets of chunks.
@@ -504,8 +575,11 @@ public final class BoxParser {
     int maximumSize = 0;
     long[] timestamps;
     int[] flags;
+    List<Integer> syncSampleIndicesList = new ArrayList<>();
+    boolean hasOnlySyncSamples = stss == null;
     long timestampTimeUnits = 0;
     long duration;
+    long totalSize = 0;
 
     if (rechunkFixedSizeSamples) {
       long[] chunkOffsetsBytes = new long[chunkIterator.length];
@@ -517,17 +591,19 @@ public final class BoxParser {
       FixedSampleSizeRechunker.Results rechunkedResults =
           FixedSampleSizeRechunker.rechunk(
               fixedSampleSize, chunkOffsetsBytes, chunkSampleCounts, timestampDeltaInTimeUnits);
-      offsets = rechunkedResults.offsets;
-      sizes = rechunkedResults.sizes;
+      offsets = omitTrackSampleTable ? new long[0] : rechunkedResults.offsets;
+      sizes = omitTrackSampleTable ? new int[0] : rechunkedResults.sizes;
+      timestamps = omitTrackSampleTable ? new long[0] : rechunkedResults.timestamps;
+      flags = omitTrackSampleTable ? new int[0] : rechunkedResults.flags;
       maximumSize = rechunkedResults.maximumSize;
-      timestamps = rechunkedResults.timestamps;
-      flags = rechunkedResults.flags;
       duration = rechunkedResults.duration;
+      totalSize = rechunkedResults.totalSize;
+      sampleCount = rechunkedResults.offsets.length;
     } else {
-      offsets = new long[sampleCount];
-      sizes = new int[sampleCount];
-      timestamps = new long[sampleCount];
-      flags = new int[sampleCount];
+      offsets = omitTrackSampleTable ? new long[0] : new long[sampleCount];
+      sizes = omitTrackSampleTable ? new int[0] : new int[sampleCount];
+      timestamps = omitTrackSampleTable ? new long[0] : new long[sampleCount];
+      flags = omitTrackSampleTable ? new int[0] : new int[sampleCount];
       long offset = 0;
       int remainingSamplesInChunk = 0;
 
@@ -541,10 +617,12 @@ public final class BoxParser {
         if (!chunkDataComplete) {
           Log.w(TAG, "Unexpected end of chunk data");
           sampleCount = i;
-          offsets = Arrays.copyOf(offsets, sampleCount);
-          sizes = Arrays.copyOf(sizes, sampleCount);
-          timestamps = Arrays.copyOf(timestamps, sampleCount);
-          flags = Arrays.copyOf(flags, sampleCount);
+          if (!omitTrackSampleTable) {
+            offsets = Arrays.copyOf(offsets, sampleCount);
+            sizes = Arrays.copyOf(sizes, sampleCount);
+            timestamps = Arrays.copyOf(timestamps, sampleCount);
+            flags = Arrays.copyOf(flags, sampleCount);
+          }
           break;
         }
 
@@ -563,17 +641,25 @@ public final class BoxParser {
           remainingSamplesAtTimestampOffset--;
         }
 
-        offsets[i] = offset;
-        sizes[i] = sampleSizeBox.readNextSampleSize();
-        if (sizes[i] > maximumSize) {
-          maximumSize = sizes[i];
+        int currentSampleSize = sampleSizeBox.readNextSampleSize();
+        totalSize += currentSampleSize;
+        if (currentSampleSize > maximumSize) {
+          maximumSize = currentSampleSize;
         }
-        timestamps[i] = timestampTimeUnits + timestampOffset;
 
-        // All samples are synchronization samples if the stss is not present.
-        flags[i] = stss == null ? C.BUFFER_FLAG_KEY_FRAME : 0;
-        if (i == nextSynchronizationSampleIndex) {
-          flags[i] = C.BUFFER_FLAG_KEY_FRAME;
+        if (!omitTrackSampleTable) {
+          offsets[i] = offset;
+          sizes[i] = currentSampleSize;
+          timestamps[i] = timestampTimeUnits + timestampOffset;
+          // All samples are synchronization samples if the stss is not present.
+          flags[i] = stss == null ? C.BUFFER_FLAG_KEY_FRAME : 0;
+          if (i == nextSynchronizationSampleIndex) {
+            flags[i] = C.BUFFER_FLAG_KEY_FRAME;
+            syncSampleIndicesList.add(i);
+          }
+        }
+
+        if (stss != null && i == nextSynchronizationSampleIndex) {
           remainingSynchronizationSamples--;
           if (remainingSynchronizationSamples > 0) {
             nextSynchronizationSampleIndex = checkNotNull(stss).readUnsignedIntToInt() - 1;
@@ -595,7 +681,7 @@ public final class BoxParser {
           remainingTimestampDeltaChanges--;
         }
 
-        offset += sizes[i];
+        offset += currentSampleSize;
         remainingSamplesInChunk--;
       }
       duration = timestampTimeUnits + timestampOffset;
@@ -636,12 +722,68 @@ public final class BoxParser {
                 + (!isCttsValid ? ", ctts invalid" : ""));
       }
     }
+
+    if (track.mediaDurationUs > 0) {
+      long averageBitrate =
+          Util.scaleLargeValue(
+              totalSize * C.BITS_PER_BYTE,
+              C.MICROS_PER_SECOND,
+              track.mediaDurationUs,
+              RoundingMode.HALF_DOWN);
+      if (averageBitrate > 0 && averageBitrate < Integer.MAX_VALUE) {
+        Format format = track.format.buildUpon().setAverageBitrate((int) averageBitrate).build();
+        track = track.buildUpon().setFormat(format).build();
+      }
+    }
+
     long durationUs = Util.scaleLargeTimestamp(duration, C.MICROS_PER_SECOND, track.timescale);
+    int[] syncSampleIndices = Ints.toArray(syncSampleIndicesList);
 
     if (track.editListDurations == null) {
-      Util.scaleLargeTimestampsInPlace(timestamps, C.MICROS_PER_SECOND, track.timescale);
+      if (!omitTrackSampleTable) {
+        Util.scaleLargeTimestampsInPlace(timestamps, C.MICROS_PER_SECOND, track.timescale);
+      }
       return new TrackSampleTable(
-          track, offsets, sizes, maximumSize, timestamps, flags, durationUs);
+          track,
+          offsets,
+          sizes,
+          maximumSize,
+          timestamps,
+          flags,
+          syncSampleIndices,
+          hasOnlySyncSamples,
+          durationUs,
+          sampleCount);
+    }
+
+    if (omitTrackSampleTable) {
+      long editedDurationUs;
+      ImmutableLongArray editListMediaTimes = checkNotNull(track.editListMediaTimes);
+      if (track.editListDurations.length() == 1 && track.editListDurations.get(0) == 0) {
+        long editStartTime = editListMediaTimes.get(0);
+        editedDurationUs =
+            Util.scaleLargeTimestamp(
+                duration - editStartTime, C.MICROS_PER_SECOND, track.timescale);
+      } else {
+        long pts = 0;
+        for (int i = 0; i < track.editListDurations.length(); i++) {
+          if (editListMediaTimes.get(i) != -1) {
+            pts += track.editListDurations.get(i);
+          }
+        }
+        editedDurationUs = Util.scaleLargeTimestamp(pts, C.MICROS_PER_SECOND, track.movieTimescale);
+      }
+      return new TrackSampleTable(
+          track,
+          offsets,
+          sizes,
+          maximumSize,
+          timestamps,
+          flags,
+          syncSampleIndices,
+          hasOnlySyncSamples,
+          editedDurationUs,
+          sampleCount);
     }
 
     // See the BMFF spec (ISO/IEC 14496-12) subsection 8.6.6. Edit lists that require prerolling
@@ -651,16 +793,18 @@ public final class BoxParser {
     // handles simple discarding/delaying of samples. The extractor may place further restrictions
     // on what edited streams are playable.
 
-    if (track.editListDurations.length == 1
+    if (track.editListDurations.length() == 1
         && track.type == C.TRACK_TYPE_AUDIO
         && timestamps.length >= 2) {
-      long editStartTime = checkNotNull(track.editListMediaTimes)[0];
+      long editStartTime = checkNotNull(track.editListMediaTimes).get(0);
       long editEndTime =
           editStartTime
               + Util.scaleLargeTimestamp(
-                  track.editListDurations[0], track.timescale, track.movieTimescale);
+                  track.editListDurations.get(0), track.timescale, track.movieTimescale);
       if (canApplyEditWithGaplessInfo(timestamps, duration, editStartTime, editEndTime)) {
-        long paddingTimeUnits = duration - editEndTime;
+        // Clamp padding to 0 to account for rounding errors where editEndTime is slightly
+        // greater than duration.
+        long paddingTimeUnits = max(0, duration - editEndTime);
         long encoderDelay =
             Util.scaleLargeTimestamp(
                 editStartTime - timestamps[0], track.format.sampleRate, track.timescale);
@@ -674,18 +818,27 @@ public final class BoxParser {
           Util.scaleLargeTimestampsInPlace(timestamps, C.MICROS_PER_SECOND, track.timescale);
           long editedDurationUs =
               Util.scaleLargeTimestamp(
-                  track.editListDurations[0], C.MICROS_PER_SECOND, track.movieTimescale);
+                  track.editListDurations.get(0), C.MICROS_PER_SECOND, track.movieTimescale);
           return new TrackSampleTable(
-              track, offsets, sizes, maximumSize, timestamps, flags, editedDurationUs);
+              track,
+              offsets,
+              sizes,
+              maximumSize,
+              timestamps,
+              flags,
+              syncSampleIndices,
+              hasOnlySyncSamples,
+              editedDurationUs,
+              sampleCount);
         }
       }
     }
 
-    if (track.editListDurations.length == 1 && track.editListDurations[0] == 0) {
+    if (track.editListDurations.length() == 1 && track.editListDurations.get(0) == 0) {
       // The current version of the spec leaves handling of an edit with zero segment_duration in
       // unfragmented files open to interpretation. We handle this as a special case and include all
       // samples in the edit.
-      long editStartTime = checkNotNull(track.editListMediaTimes)[0];
+      long editStartTime = checkNotNull(track.editListMediaTimes).get(0);
       for (int i = 0; i < timestamps.length; i++) {
         timestamps[i] =
             Util.scaleLargeTimestamp(
@@ -694,7 +847,16 @@ public final class BoxParser {
       durationUs =
           Util.scaleLargeTimestamp(duration - editStartTime, C.MICROS_PER_SECOND, track.timescale);
       return new TrackSampleTable(
-          track, offsets, sizes, maximumSize, timestamps, flags, durationUs);
+          track,
+          offsets,
+          sizes,
+          maximumSize,
+          timestamps,
+          flags,
+          syncSampleIndices,
+          hasOnlySyncSamples,
+          durationUs,
+          sampleCount);
     }
 
     // When applying edit lists, we need to include any partial clipped samples at the end to ensure
@@ -707,50 +869,73 @@ public final class BoxParser {
     int editedSampleCount = 0;
     int nextSampleIndex = 0;
     boolean copyMetadata = false;
-    int[] startIndices = new int[track.editListDurations.length];
-    int[] endIndices = new int[track.editListDurations.length];
-    long[] editListMediaTimes = checkNotNull(track.editListMediaTimes);
-    for (int i = 0; i < track.editListDurations.length; i++) {
-      long editMediaTime = editListMediaTimes[i];
+    int[] startIndices = new int[track.editListDurations.length()];
+    int[] endIndices = new int[track.editListDurations.length()];
+    ImmutableLongArray editListMediaTimes = checkNotNull(track.editListMediaTimes);
+    for (int i = 0; i < track.editListDurations.length(); i++) {
+      long editMediaTime = editListMediaTimes.get(i);
       if (editMediaTime != -1) {
         long editDuration =
             Util.scaleLargeTimestamp(
-                track.editListDurations[i], track.timescale, track.movieTimescale);
+                track.editListDurations.get(i), track.timescale, track.movieTimescale);
+        long editEndTime = editMediaTime + editDuration;
+
         // The timestamps array is in the order read from the media, which might not be strictly
-        // sorted. However, all sync frames are guaranteed to be in order, and any out-of-order
-        // frames appear after their respective sync frames. This ensures that although the result
-        // of the binary search might not be entirely accurate (due to the out-of-order timestamps),
-        // the following logic ensures correctness for both start and end indices.
-        //
-        // The startIndices calculation finds the largest timestamp that is less than or equal to
-        // editMediaTime. It then walks backward to ensure the index points to a sync frame, since
+        // sorted. However, all sync frames are guaranteed to be in order. The logic below
+        // searches for the true start and end of the edit, accounting for out-of-order frames.
+
+        // The startIndices calculation finds the sample at or just before the edit start time.
+        // It then walks backward to ensure the index points to a sync frame, since
         // decoding must start from a keyframe.
         startIndices[i] =
             Util.binarySearchFloor(
                 timestamps, editMediaTime, /* inclusive= */ true, /* stayInBounds= */ true);
-        while (startIndices[i] >= 0 && (flags[startIndices[i]] & C.BUFFER_FLAG_KEY_FRAME) == 0) {
-          startIndices[i]--;
-        }
-        // The endIndices calculation finds the smallest timestamp that is greater than
-        // editMediaTime + editDuration, except when omitZeroDurationClippedSample is true, in which
-        // case it finds the smallest timestamp that is greater than or equal to editMediaTime +
-        // editDuration.
-        endIndices[i] =
+
+        // The endIndices calculation finds the true end of the edit by searching past the
+        // naive end point for any out-of-order frames that belong in the clip.
+        int firstSampleAfterEdit =
             Util.binarySearchCeil(
                 timestamps,
-                editMediaTime + editDuration,
+                editEndTime,
                 /* inclusive= */ omitZeroDurationClippedSample,
                 /* stayInBounds= */ false);
-        if (track.type == C.TRACK_TYPE_VIDEO) {
-          // To account for out-of-order video frames that may have timestamps smaller than or equal
-          // to editMediaTime + editDuration, but still fall within the valid range, the loop walks
-          // forward through the timestamps array to ensure all frames with timestamps within the
-          // edit duration are included.
-          while (endIndices[i] < timestamps.length - 1
-              && timestamps[endIndices[i] + 1] <= (editMediaTime + editDuration)) {
-            endIndices[i]++;
+
+        // To account for out-of-order frames, we use a search that continues until we have seen
+        // more out-of-boundary frames than the reorder limit (maxNumReorderSamples), which
+        // guarantees no more valid frames will be found.
+        int samplesSeenAfterEnd = 0;
+        int maxValidIndexInWindow = firstSampleAfterEdit - 1;
+        for (int j = firstSampleAfterEdit; j < timestamps.length; j++) {
+          if (timestamps[j] < editEndTime) {
+            // This is an out-of-order frame that belongs in the edit. Update our max index.
+            maxValidIndexInWindow = j;
+          } else {
+            // This frame is outside the edit. Increment our counter of seen "post-roll" frames.
+            samplesSeenAfterEnd++;
+            if (samplesSeenAfterEnd > track.format.maxNumReorderSamples) {
+              // We've exhausted our search budget. We can be sure no more valid frames will appear.
+              break;
+            }
           }
         }
+        endIndices[i] = maxValidIndexInWindow + 1;
+
+        // Ensure we start decoding from a sync frame by searching backwards.
+        int initialStartIndex = startIndices[i];
+        while (startIndices[i] > 0 && (flags[startIndices[i]] & C.BUFFER_FLAG_KEY_FRAME) == 0) {
+          startIndices[i]--;
+        }
+
+        // If we searched all the way back and didn't find a sync frame, search forward from the
+        // original start.
+        if (startIndices[i] == 0 && (flags[0] & C.BUFFER_FLAG_KEY_FRAME) == 0) {
+          startIndices[i] = initialStartIndex;
+          while (startIndices[i] < endIndices[i]
+              && (flags[startIndices[i]] & C.BUFFER_FLAG_KEY_FRAME) == 0) {
+            startIndices[i]++;
+          }
+        }
+
         editedSampleCount += endIndices[i] - startIndices[i];
         copyMetadata |= nextSampleIndex != startIndices[i];
         nextSampleIndex = endIndices[i];
@@ -763,12 +948,14 @@ public final class BoxParser {
     int[] editedSizes = copyMetadata ? new int[editedSampleCount] : sizes;
     int editedMaximumSize = copyMetadata ? 0 : maximumSize;
     int[] editedFlags = copyMetadata ? new int[editedSampleCount] : flags;
+    List<Integer> editedSyncSampleIndicesList =
+        copyMetadata ? new ArrayList<>() : syncSampleIndicesList;
     long[] editedTimestamps = new long[editedSampleCount];
     long pts = 0;
     int sampleIndex = 0;
     boolean hasPrerollSamples = false;
-    for (int i = 0; i < track.editListDurations.length; i++) {
-      long editMediaTime = track.editListMediaTimes[i];
+    for (int i = 0; i < track.editListDurations.length(); i++) {
+      long editMediaTime = track.editListMediaTimes.get(i);
       int startIndex = startIndices[i];
       int endIndex = endIndices[i];
       if (copyMetadata) {
@@ -789,15 +976,20 @@ public final class BoxParser {
         if (copyMetadata && editedSizes[sampleIndex] > editedMaximumSize) {
           editedMaximumSize = sizes[j];
         }
+        if (copyMetadata
+            && !hasOnlySyncSamples
+            && (editedFlags[sampleIndex] & C.BUFFER_FLAG_KEY_FRAME) != 0) {
+          editedSyncSampleIndicesList.add(sampleIndex);
+        }
         sampleIndex++;
       }
-      pts += track.editListDurations[i];
+      pts += track.editListDurations.get(i);
     }
     long editedDurationUs =
         Util.scaleLargeTimestamp(pts, C.MICROS_PER_SECOND, track.movieTimescale);
     if (hasPrerollSamples) {
       Format format = track.format.buildUpon().setHasPrerollSamples(true).build();
-      track = track.copyWithFormat(format);
+      track = track.buildUpon().setFormat(format).build();
     }
     return new TrackSampleTable(
         track,
@@ -806,11 +998,14 @@ public final class BoxParser {
         editedMaximumSize,
         editedTimestamps,
         editedFlags,
-        editedDurationUs);
+        Ints.toArray(editedSyncSampleIndicesList),
+        hasOnlySyncSamples,
+        editedDurationUs,
+        editedOffsets.length);
   }
 
   @Nullable
-  private static Metadata parseUdtaMeta(ParsableByteArray meta, int limit) {
+  private static Metadata parseUdtaMeta(ParsableByteArray meta, int limit, boolean ignoreArtwork) {
     meta.skipBytes(Mp4Box.HEADER_SIZE);
     maybeSkipRemainingMetaBoxHeaderBytes(meta);
     while (meta.getPosition() < limit) {
@@ -819,7 +1014,7 @@ public final class BoxParser {
       int atomType = meta.readInt();
       if (atomType == Mp4Box.TYPE_ilst) {
         meta.setPosition(atomPosition);
-        return parseIlst(meta, atomPosition + atomSize);
+        return parseIlst(meta, atomPosition + atomSize, ignoreArtwork);
       }
       meta.setPosition(atomPosition + atomSize);
     }
@@ -827,11 +1022,11 @@ public final class BoxParser {
   }
 
   @Nullable
-  private static Metadata parseIlst(ParsableByteArray ilst, int limit) {
+  private static Metadata parseIlst(ParsableByteArray ilst, int limit, boolean ignoreArtwork) {
     ilst.skipBytes(Mp4Box.HEADER_SIZE);
     ArrayList<Metadata.Entry> entries = new ArrayList<>();
     while (ilst.getPosition() < limit) {
-      @Nullable Metadata.Entry entry = MetadataUtil.parseIlstElement(ilst);
+      @Nullable Metadata.Entry entry = MetadataUtil.parseIlstElement(ilst, ignoreArtwork);
       if (entry != null) {
         entries.add(entry);
       }
@@ -855,6 +1050,33 @@ public final class BoxParser {
           Float.parseFloat(location.substring(latitudeEndIndex, location.length() - 1));
       return new Metadata(new Mp4LocationData(latitude, longitude));
     } catch (IndexOutOfBoundsException | NumberFormatException exception) {
+      // Invalid input.
+      return null;
+    }
+  }
+
+  /** Parses the Nero chapters from the chpl atom. */
+  @Nullable
+  /* package */ static Metadata parseChpl(ParsableByteArray chplData) {
+    try {
+      chplData.skipBytes(5); // 1 byte version + 3 bytes flags + 1 byte reserved.
+      int chapterCount = chplData.readInt();
+      List<Metadata.Entry> chapters = new ArrayList<>();
+      for (int i = 0; i < chapterCount; i++) {
+        long startTimeMs = chplData.readLong() / 10000; // Start time in 100-nanoseconds resolution
+        if (startTimeMs < 0) {
+          startTimeMs = C.TIME_UNSET;
+        }
+        int titleLength = chplData.readUnsignedByte();
+        String title = chplData.readString(titleLength);
+        chapters.add(
+            new Chapter.Builder()
+                .setStartTimeMs(startTimeMs)
+                .setTitle(new Label(null, title))
+                .build());
+      }
+      return chapters.isEmpty() ? null : new Metadata(chapters);
+    } catch (IndexOutOfBoundsException e) {
       // Invalid input.
       return null;
     }
@@ -897,27 +1119,40 @@ public final class BoxParser {
       }
     }
 
-    tkhd.skipBytes(16);
+    tkhd.skipBytes(10);
+    int alternateGroup = tkhd.readUnsignedShort();
+    tkhd.skipBytes(4);
     int a00 = tkhd.readInt();
     int a01 = tkhd.readInt();
     tkhd.skipBytes(4);
     int a10 = tkhd.readInt();
     int a11 = tkhd.readInt();
 
+    // Matrices which imply reflection are resolved to a correct rotation and a horizontal mirror.
     int rotationDegrees;
     int fixedOne = 65536;
-    if (a00 == 0 && a01 == fixedOne && a10 == -fixedOne && a11 == 0) {
+    if (a00 == 0 && a01 == fixedOne && (a10 == -fixedOne || a10 == fixedOne) && a11 == 0) {
       rotationDegrees = 90;
-    } else if (a00 == 0 && a01 == -fixedOne && a10 == fixedOne && a11 == 0) {
+    } else if (a00 == 0 && a01 == -fixedOne && (a10 == fixedOne || a10 == -fixedOne) && a11 == 0) {
       rotationDegrees = 270;
-    } else if (a00 == -fixedOne && a01 == 0 && a10 == 0 && a11 == -fixedOne) {
+    } else if ((a00 == -fixedOne || a00 == fixedOne) && a01 == 0 && a10 == 0 && a11 == -fixedOne) {
       rotationDegrees = 180;
     } else {
       // Only 0, 90, 180 and 270 are supported. Treat anything else as 0.
       rotationDegrees = 0;
     }
+    // skip remaining 4 matrix entries
+    tkhd.skipBytes(16);
+    // ignore fractional part of width and height
+    int width = tkhd.readShort();
+    tkhd.skipBytes(2);
+    int height = tkhd.readShort();
 
-    return new TkhdData(trackId, duration, rotationDegrees);
+    long determinant = (long) a00 * a11 - (long) a01 * a10;
+    boolean mirrorHorizontal = determinant < 0;
+
+    return new TkhdData(
+        trackId, duration, alternateGroup, rotationDegrees, mirrorHorizontal, width, height);
   }
 
   /**
@@ -937,7 +1172,11 @@ public final class BoxParser {
       return C.TRACK_TYPE_AUDIO;
     } else if (hdlr == TYPE_vide) {
       return C.TRACK_TYPE_VIDEO;
-    } else if (hdlr == TYPE_text || hdlr == TYPE_sbtl || hdlr == TYPE_subt || hdlr == TYPE_clcp) {
+    } else if (hdlr == TYPE_text
+        || hdlr == TYPE_sbtl
+        || hdlr == TYPE_subt
+        || hdlr == TYPE_clcp
+        || hdlr == TYPE_subp) {
       return C.TRACK_TYPE_TEXT;
     } else if (hdlr == TYPE_meta) {
       return C.TRACK_TYPE_METADATA;
@@ -981,31 +1220,41 @@ public final class BoxParser {
         mediaDurationUs = Util.scaleLargeTimestamp(mediaDuration, C.MICROS_PER_SECOND, timescale);
       }
     }
-    int languageCode = mdhd.readUnsignedShort();
-    String language =
-        ""
-            + (char) (((languageCode >> 10) & 0x1F) + 0x60)
-            + (char) (((languageCode >> 5) & 0x1F) + 0x60)
-            + (char) ((languageCode & 0x1F) + 0x60);
+
+    String language = getLanguageFromCode(/* languageCode= */ mdhd.readUnsignedShort());
     return new MdhdData(timescale, mediaDurationUs, language);
+  }
+
+  @Nullable
+  private static String getLanguageFromCode(int languageCode) {
+    char[] chars = {
+      (char) (((languageCode >> 10) & 0x1F) + 0x60),
+      (char) (((languageCode >> 5) & 0x1F) + 0x60),
+      (char) ((languageCode & 0x1F) + 0x60)
+    };
+
+    for (char c : chars) {
+      if (c < 'a' || c > 'z') {
+        return null;
+      }
+    }
+    return new String(chars);
   }
 
   /**
    * Parses a stsd atom (defined in ISO/IEC 14496-12).
    *
    * @param stsd The stsd atom to decode.
-   * @param trackId The track's identifier in its container.
-   * @param rotationDegrees The rotation of the track in degrees.
-   * @param language The language of the track.
+   * @param tkhdData The track header data from the tkhd box.
+   * @param language The language of the track, or {@code null} if unset.
    * @param drmInitData {@link DrmInitData} to be included in the format, or {@code null}.
    * @param isQuickTime True for QuickTime media. False otherwise.
    * @return An object containing the parsed data.
    */
   private static StsdData parseStsd(
       ParsableByteArray stsd,
-      int trackId,
-      int rotationDegrees,
-      String language,
+      TkhdData tkhdData,
+      @Nullable String language,
       @Nullable DrmInitData drmInitData,
       boolean isQuickTime)
       throws ParserException {
@@ -1024,6 +1273,8 @@ public final class BoxParser {
           || childAtomType == Mp4Box.TYPE_mp4v
           || childAtomType == Mp4Box.TYPE_hvc1
           || childAtomType == Mp4Box.TYPE_hev1
+          || childAtomType == Mp4Box.TYPE_vvc1
+          || childAtomType == Mp4Box.TYPE_vvi1
           || childAtomType == Mp4Box.TYPE_s263
           || childAtomType == Mp4Box.TYPE_H263
           || childAtomType == Mp4Box.TYPE_h263
@@ -1033,14 +1284,16 @@ public final class BoxParser {
           || childAtomType == Mp4Box.TYPE_dvav
           || childAtomType == Mp4Box.TYPE_dva1
           || childAtomType == Mp4Box.TYPE_dvhe
-          || childAtomType == Mp4Box.TYPE_dvh1) {
+          || childAtomType == Mp4Box.TYPE_dvh1
+          || childAtomType == Mp4Box.TYPE_apv1
+          || childAtomType == Mp4Box.TYPE_dav1) {
         parseVideoSampleEntry(
             stsd,
             childAtomType,
             childStartPosition,
             childAtomSize,
-            trackId,
-            rotationDegrees,
+            tkhdData,
+            language,
             drmInitData,
             out,
             i);
@@ -1069,13 +1322,15 @@ public final class BoxParser {
           || childAtomType == Mp4Box.TYPE_ulaw
           || childAtomType == Mp4Box.TYPE_Opus
           || childAtomType == Mp4Box.TYPE_fLaC
-          || childAtomType == Mp4Box.TYPE_iamf) {
+          || childAtomType == Mp4Box.TYPE_iamf
+          || childAtomType == Mp4Box.TYPE_ipcm
+          || childAtomType == Mp4Box.TYPE_fpcm) {
         parseAudioSampleEntry(
             stsd,
             childAtomType,
             childStartPosition,
             childAtomSize,
-            trackId,
+            tkhdData.id,
             language,
             isQuickTime,
             drmInitData,
@@ -1085,15 +1340,17 @@ public final class BoxParser {
           || childAtomType == Mp4Box.TYPE_tx3g
           || childAtomType == Mp4Box.TYPE_wvtt
           || childAtomType == Mp4Box.TYPE_stpp
-          || childAtomType == Mp4Box.TYPE_c608) {
+          || childAtomType == Mp4Box.TYPE_c608
+          || childAtomType == Mp4Box.TYPE_mp4s
+          || childAtomType == TYPE_text) {
         parseTextSampleEntry(
-            stsd, childAtomType, childStartPosition, childAtomSize, trackId, language, out);
-      } else if (childAtomType == Mp4Box.TYPE_mett) {
-        parseMetaDataSampleEntry(stsd, childAtomType, childStartPosition, trackId, out);
+            stsd, childAtomType, childStartPosition, childAtomSize, tkhdData, language, out);
+      } else if (childAtomType == Mp4Box.TYPE_mett || childAtomType == Mp4Box.TYPE_it35) {
+        parseMetaDataSampleEntry(stsd, childAtomType, childStartPosition, tkhdData.id, out);
       } else if (childAtomType == Mp4Box.TYPE_camm) {
         out.format =
             new Format.Builder()
-                .setId(trackId)
+                .setId(tkhdData.id)
                 .setSampleMimeType(MimeTypes.APPLICATION_CAMERA_MOTION)
                 .build();
       }
@@ -1107,8 +1364,8 @@ public final class BoxParser {
       int atomType,
       int position,
       int atomSize,
-      int trackId,
-      String language,
+      TkhdData tkhdData,
+      @Nullable String language,
       StsdData out) {
     parent.setPosition(position + Mp4Box.HEADER_SIZE + StsdData.STSD_HEADER_SIZE);
 
@@ -1116,7 +1373,7 @@ public final class BoxParser {
     @Nullable ImmutableList<byte[]> initializationData = null;
     long subsampleOffsetUs = Format.OFFSET_SAMPLE_RELATIVE;
 
-    String mimeType;
+    @Nullable String mimeType = null;
     if (atomType == Mp4Box.TYPE_TTML) {
       mimeType = MimeTypes.APPLICATION_TTML;
     } else if (atomType == Mp4Box.TYPE_tx3g) {
@@ -1134,19 +1391,73 @@ public final class BoxParser {
       // Defined by the QuickTime File Format specification.
       mimeType = MimeTypes.APPLICATION_MP4CEA608;
       out.requiredSampleTransformation = Track.TRANSFORMATION_CEA608_CDAT;
+    } else if (atomType == Mp4Box.TYPE_mp4s) {
+      int pos = parent.getPosition();
+      parent.skipBytes(4); // child atom size
+      int childAtomType = parent.readInt();
+      if (childAtomType == Mp4Box.TYPE_esds) {
+        EsdsData esds = parseEsdsFromParent(parent, pos);
+        if (esds.initializationData == null || esds.initializationData.length != 64) {
+          return;
+        }
+        mimeType = MimeTypes.APPLICATION_VOBSUB;
+        String idx = formatVobsubIdx(esds.initializationData, tkhdData.width, tkhdData.height);
+        initializationData = ImmutableList.of(Util.getUtf8Bytes(idx));
+      }
+    } else if (atomType == TYPE_text) {
+      // The TYPE_text track is a generic fallback text format. We assign a placeholder MIME type so
+      // the track is not discarded. This preserves the track's sample table for downstream
+      // extractors to use (e.g., for QuickTime chapters).
+      mimeType = MimeTypes.TEXT_UNKNOWN;
     } else {
       // Never happens.
       throw new IllegalStateException();
     }
 
-    out.format =
-        new Format.Builder()
-            .setId(trackId)
-            .setSampleMimeType(mimeType)
-            .setLanguage(language)
-            .setSubsampleOffsetUs(subsampleOffsetUs)
-            .setInitializationData(initializationData)
-            .build();
+    if (mimeType != null) {
+      out.format =
+          new Format.Builder()
+              .setId(tkhdData.id)
+              .setSampleMimeType(mimeType)
+              .setLanguage(language)
+              .setSubsampleOffsetUs(subsampleOffsetUs)
+              .setInitializationData(initializationData)
+              .build();
+    }
+  }
+
+  /**
+   * Format {@link EsdsData#initializationData} as a VobSub IDX string for consumption by {@link
+   * VobsubParser}.
+   */
+  private static String formatVobsubIdx(byte[] src, int width, int height) {
+    checkState(src.length == 64);
+    List<String> palette = new ArrayList<>(16);
+    for (int i = 0; i < src.length - 3; i += 4) {
+      int yuv = Ints.fromBytes(src[i], src[i + 1], src[i + 2], src[i + 3]);
+      palette.add(String.format("%06x", vobsubYuvToRgb(yuv)));
+    }
+    return "size: " + width + "x" + height + "\npalette: " + Joiner.on(", ").join(palette) + "\n";
+  }
+
+  /**
+   * Convert a VobSub YUV palette color (as stored in {@link EsdsData#initializationData}) to RGB
+   * (as consumed by {@link VobsubParser}).
+   *
+   * <p>This uses conversion coefficients derived from BT.601.
+   */
+  private static int vobsubYuvToRgb(int yuv) {
+    int y = (yuv >> 16) & 0xFF;
+    int v = (yuv >> 8) & 0xFF;
+    int u = yuv & 0xFF;
+
+    int r = y + 14075 * (v - 128) / 10000;
+    int g = y - 3455 * (u - 128) / 10000 - 7169 * (v - 128) / 10000;
+    int b = y + 17790 * (u - 128) / 10000;
+
+    return (Util.constrainValue(r, 0, 255) << 16)
+        | (Util.constrainValue(g, 0, 255) << 8)
+        | Util.constrainValue(b, 0, 255);
   }
 
   // hdrStaticInfo is allocated using allocate() in allocateHdrStaticInfo().
@@ -1156,8 +1467,8 @@ public final class BoxParser {
       int atomType,
       int position,
       int size,
-      int trackId,
-      int rotationDegrees,
+      TkhdData tkhdData,
+      @Nullable String language,
       @Nullable DrmInitData drmInitData,
       StsdData out,
       int entryIndex)
@@ -1206,8 +1517,12 @@ public final class BoxParser {
     @Nullable byte[] projectionData = null;
     @C.StereoMode int stereoMode = Format.NO_VALUE;
     @Nullable EsdsData esdsData = null;
+    @Nullable BtrtData btrtData = null;
     int maxNumReorderSamples = Format.NO_VALUE;
+    int maxSubLayers = Format.NO_VALUE;
     @Nullable NalUnitUtil.H265VpsData vpsData = null;
+    int decodedWidth = Format.NO_VALUE;
+    int decodedHeight = Format.NO_VALUE;
 
     // HDR related metadata.
     @C.ColorSpace int colorSpace = Format.NO_VALUE;
@@ -1215,6 +1530,7 @@ public final class BoxParser {
     @C.ColorTransfer int colorTransfer = Format.NO_VALUE;
     // The format of HDR static info is defined in CTA-861-G:2017, Table 45.
     @Nullable ByteBuffer hdrStaticInfo = null;
+    @Nullable DolbyVisionConfig dolbyVisionConfig = null;
 
     while (childPosition - position < size) {
       parent.setPosition(childPosition);
@@ -1254,11 +1570,14 @@ public final class BoxParser {
           pixelWidthHeightRatio = hevcConfig.pixelWidthHeightRatio;
         }
         maxNumReorderSamples = hevcConfig.maxNumReorderPics;
+        maxSubLayers = hevcConfig.maxSubLayers;
         codecs = hevcConfig.codecs;
         if (hevcConfig.stereoMode != Format.NO_VALUE) {
           // HEVCDecoderConfigurationRecord may include 3D reference displays information SEI.
           stereoMode = hevcConfig.stereoMode;
         }
+        decodedWidth = hevcConfig.decodedWidth;
+        decodedHeight = hevcConfig.decodedHeight;
         colorSpace = hevcConfig.colorSpace;
         colorRange = hevcConfig.colorRange;
         colorTransfer = hevcConfig.colorTransfer;
@@ -1312,6 +1631,20 @@ public final class BoxParser {
               false, "initializationData must be already set from hvcC atom");
         }
         codecs = lhevcConfig.codecs;
+      } else if (childAtomType == Mp4Box.TYPE_vvcC) {
+        ExtractorUtil.checkContainerInput(mimeType == null, /* message= */ null);
+        mimeType = MimeTypes.VIDEO_H266;
+        parent.setPosition(childStartPosition + Mp4Box.HEADER_SIZE);
+        VvcConfig vvcConfig = VvcConfig.parse(parent);
+        initializationData = vvcConfig.initializationData;
+        out.nalUnitLengthFieldLength = vvcConfig.nalUnitLengthFieldLength;
+        codecs = vvcConfig.codecs;
+        bitdepthLuma = vvcConfig.bitdepthLuma;
+        bitdepthChroma = vvcConfig.bitdepthLuma;
+        // The VVC specification (ITU-T H.266, Annex A) allows a maximum of 16 pictures for
+        // reordering in the decoded picture buffer. Using 16 as a safe default avoids the need to
+        // parse the SPS bitstream for the exact value.
+        maxNumReorderSamples = 16;
       } else if (childAtomType == Mp4Box.TYPE_vexu) {
         VexuData vexuData = parseVideoExtendedUsageBox(parent, childStartPosition, childAtomSize);
         if (vexuData != null && vexuData.eyesData != null) {
@@ -1333,12 +1666,10 @@ public final class BoxParser {
                     : C.STEREO_MODE_INTERLEAVED_LEFT_PRIMARY;
           }
         }
-      } else if (childAtomType == Mp4Box.TYPE_dvcC || childAtomType == Mp4Box.TYPE_dvvC) {
-        @Nullable DolbyVisionConfig dolbyVisionConfig = DolbyVisionConfig.parse(parent);
-        if (dolbyVisionConfig != null) {
-          codecs = dolbyVisionConfig.codecs;
-          mimeType = MimeTypes.VIDEO_DOLBY_VISION;
-        }
+      } else if (childAtomType == Mp4Box.TYPE_dvcC
+          || childAtomType == Mp4Box.TYPE_dvvC
+          || childAtomType == Mp4Box.TYPE_dvwC) {
+        dolbyVisionConfig = DolbyVisionConfig.parse(parent);
       } else if (childAtomType == Mp4Box.TYPE_vpcC) {
         ExtractorUtil.checkContainerInput(mimeType == null, /* message= */ null);
         mimeType = (atomType == Mp4Box.TYPE_vp08) ? MimeTypes.VIDEO_VP8 : MimeTypes.VIDEO_VP9;
@@ -1369,16 +1700,17 @@ public final class BoxParser {
         int childAtomBodySize = childAtomSize - Mp4Box.HEADER_SIZE;
         byte[] initializationDataChunk = new byte[childAtomBodySize];
         parent.readBytes(initializationDataChunk, /* offset= */ 0, childAtomBodySize);
+
         initializationData = ImmutableList.of(initializationDataChunk);
-
-        parent.setPosition(childStartPosition + Mp4Box.HEADER_SIZE);
-        ColorInfo colorInfo = parseAv1c(parent);
-
-        bitdepthLuma = colorInfo.lumaBitdepth;
-        bitdepthChroma = colorInfo.chromaBitdepth;
-        colorSpace = colorInfo.colorSpace;
-        colorRange = colorInfo.colorRange;
-        colorTransfer = colorInfo.colorTransfer;
+        Av1Config av1Config = Av1Config.parse(initializationDataChunk);
+        if (av1Config != null) {
+          bitdepthLuma = av1Config.bitdepth;
+          bitdepthChroma = av1Config.bitdepth;
+          colorSpace = av1Config.colorSpace;
+          colorRange = av1Config.colorRange;
+          colorTransfer = av1Config.colorTransfer;
+          codecs = av1Config.codecs;
+        }
       } else if (childAtomType == Mp4Box.TYPE_clli) {
         if (hdrStaticInfo == null) {
           hdrStaticInfo = allocateHdrStaticInfo();
@@ -1427,6 +1759,8 @@ public final class BoxParser {
         if (initializationDataBytes != null) {
           initializationData = ImmutableList.of(initializationDataBytes);
         }
+      } else if (childAtomType == Mp4Box.TYPE_btrt) {
+        btrtData = parseBtrtFromParent(parent, childStartPosition);
       } else if (childAtomType == Mp4Box.TYPE_pasp) {
         pixelWidthHeightRatio = parsePaspFromParent(parent, childStartPosition);
         pixelWidthHeightRatioFromPasp = true;
@@ -1454,6 +1788,23 @@ public final class BoxParser {
               break;
           }
         }
+      } else if (childAtomType == Mp4Box.TYPE_apvC) {
+        mimeType = MimeTypes.VIDEO_APV;
+
+        int childAtomBodySize = childAtomSize - Mp4Box.FULL_HEADER_SIZE;
+        byte[] initializationDataChunk = new byte[childAtomBodySize];
+        parent.setPosition(childStartPosition + Mp4Box.FULL_HEADER_SIZE); // Skip version and flags.
+        parent.readBytes(initializationDataChunk, /* offset= */ 0, childAtomBodySize);
+        codecs = CodecSpecificDataUtil.buildApvCodecString(initializationDataChunk);
+        initializationData = ImmutableList.of(initializationDataChunk);
+
+        ColorInfo colorInfo = parseApvc(new ParsableByteArray(initializationDataChunk));
+
+        bitdepthLuma = colorInfo.lumaBitdepth;
+        bitdepthChroma = colorInfo.chromaBitdepth;
+        colorSpace = colorInfo.colorSpace;
+        colorRange = colorInfo.colorRange;
+        colorTransfer = colorInfo.colorTransfer;
       } else if (childAtomType == Mp4Box.TYPE_colr) {
         // Only modify these values if 'colorSpace' and 'colorTransfer' have not been previously
         // established by the bitstream. The absence of color descriptors ('colorSpace' and
@@ -1488,6 +1839,11 @@ public final class BoxParser {
       childPosition += childAtomSize;
     }
 
+    if (dolbyVisionConfig != null) {
+      mimeType = MimeTypes.VIDEO_DOLBY_VISION;
+      codecs = dolbyVisionConfig.codecs;
+    }
+
     // If the media type was not recognized, ignore the track.
     if (mimeType == null) {
       return;
@@ -1495,18 +1851,23 @@ public final class BoxParser {
 
     Format.Builder formatBuilder =
         new Format.Builder()
-            .setId(trackId)
+            .setId(tkhdData.id)
             .setSampleMimeType(mimeType)
             .setCodecs(codecs)
             .setWidth(width)
             .setHeight(height)
+            .setDecodedWidth(decodedWidth)
+            .setDecodedHeight(decodedHeight)
             .setPixelWidthHeightRatio(pixelWidthHeightRatio)
-            .setRotationDegrees(rotationDegrees)
+            .setRotationDegrees(tkhdData.rotationDegrees)
+            .setMirrorHorizontal(tkhdData.mirrorHorizontal)
             .setProjectionData(projectionData)
             .setStereoMode(stereoMode)
             .setInitializationData(initializationData)
             .setMaxNumReorderSamples(maxNumReorderSamples)
+            .setMaxSubLayers(maxSubLayers)
             .setDrmInitData(drmInitData)
+            .setLanguage(language)
             // Note that if either mdcv or clli are missing, we leave the corresponding HDR static
             // metadata bytes with value zero. See [Internal ref: b/194535665].
             .setColorInfo(
@@ -1519,7 +1880,12 @@ public final class BoxParser {
                     .setChromaBitdepth(bitdepthChroma)
                     .build());
 
-    if (esdsData != null) {
+    // Prefer btrtData over esdsData for video track.
+    if (btrtData != null) {
+      formatBuilder
+          .setAverageBitrate(Ints.saturatedCast(btrtData.avgBitrate))
+          .setPeakBitrate(Ints.saturatedCast(btrtData.maxBitrate));
+    } else if (esdsData != null) {
       formatBuilder
           .setAverageBitrate(Ints.saturatedCast(esdsData.bitrate))
           .setPeakBitrate(Ints.saturatedCast(esdsData.peakBitrate));
@@ -1529,133 +1895,51 @@ public final class BoxParser {
   }
 
   /**
-   * Parses the av1C configuration record and OBU sequence header and returns a {@link ColorInfo}
-   * from their data.
+   * Parses the apvC configuration record and returns a {@link ColorInfo} from its data.
    *
-   * <p>See av1C configuration record syntax in this <a
-   * href="https://aomediacodec.github.io/av1-isobmff/#av1codecconfigurationbox-syntax">spec</a>.
+   * <p>See apvC configuration record syntax from the <a
+   * href="https://github.com/openapv/openapv/blob/main/readme/apv_isobmff.md#syntax-1">spec</a>.
    *
-   * <p>See av1C OBU syntax in this <a
-   * href="https://aomediacodec.github.io/av1-spec/av1-spec.pdf">spec</a>.
+   * <p>The sections referenced in the method are from this spec.
    *
-   * <p>The sections referenced in the method are from these specs.
-   *
-   * @param data The av1C atom data.
-   * @return {@link ColorInfo} parsed from the av1C data.
+   * @param data The apvC atom data.
+   * @return {@link ColorInfo} parsed from the apvC data.
    */
-  private static ColorInfo parseAv1c(ParsableByteArray data) {
+  private static ColorInfo parseApvc(ParsableByteArray data) {
     ColorInfo.Builder colorInfo = new ColorInfo.Builder();
     ParsableBitArray bitArray = new ParsableBitArray(data.getData());
     bitArray.setPosition(data.getPosition() * 8); // Convert byte to bit position.
-
-    // Parse av1C config record for bitdepth info.
-    // See https://aomediacodec.github.io/av1-isobmff/#av1codecconfigurationbox-syntax.
-    bitArray.skipBytes(1); // marker, version
-    int seqProfile = bitArray.readBits(3); // seq_profile
-    bitArray.skipBits(6); // seq_level_idx_0, seq_tier_0
-    boolean highBitdepth = bitArray.readBit(); // high_bitdepth
-    boolean twelveBit = bitArray.readBit(); // twelve_bit
-    if (seqProfile == 2 && highBitdepth) {
-      colorInfo.setLumaBitdepth(twelveBit ? 12 : 10);
-      colorInfo.setChromaBitdepth(twelveBit ? 12 : 10);
-    } else if (seqProfile <= 2) {
-      colorInfo.setLumaBitdepth(highBitdepth ? 10 : 8);
-      colorInfo.setChromaBitdepth(highBitdepth ? 10 : 8);
-    }
-    // Skip monochrome, chroma_subsampling_x, chroma_subsampling_y, chroma_sample_position,
-    // reserved and initial_presentation_delay.
-    bitArray.skipBits(13);
-
-    // 5.3.1. General OBU syntax
-    bitArray.skipBit(); // obu_forbidden_bit
-    int obuType = bitArray.readBits(4); // obu_type
-    if (obuType != 1) { // obu_type != OBU_SEQUENCE_HEADER
-      Log.i(TAG, "Unsupported obu_type: " + obuType);
-      return colorInfo.build();
-    }
-    if (bitArray.readBit()) { // obu_extension_flag
-      Log.i(TAG, "Unsupported obu_extension_flag");
-      return colorInfo.build();
-    }
-    boolean obuHasSizeField = bitArray.readBit(); // obu_has_size_field
-    bitArray.skipBit(); // obu_reserved_1bit
-    // obu_size is unsigned leb128 and if obu_size <= 127 then it can be simplified as readBits(8).
-    if (obuHasSizeField && bitArray.readBits(8) > 127) { // obu_size
-      Log.i(TAG, "Excessive obu_size");
-      return colorInfo.build();
-    }
-    // 5.5.1. General OBU sequence header syntax
-    int obuSeqHeaderSeqProfile = bitArray.readBits(3); // seq_profile
-    bitArray.skipBit(); // still_picture
-    if (bitArray.readBit()) { // reduced_still_picture_header
-      Log.i(TAG, "Unsupported reduced_still_picture_header");
-      return colorInfo.build();
-    }
-    if (bitArray.readBit()) { // timing_info_present_flag
-      Log.i(TAG, "Unsupported timing_info_present_flag");
-      return colorInfo.build();
-    }
-    if (bitArray.readBit()) { // initial_display_delay_present_flag
-      Log.i(TAG, "Unsupported initial_display_delay_present_flag");
-      return colorInfo.build();
-    }
-    int operatingPointsCountMinus1 = bitArray.readBits(5); // operating_points_cnt_minus_1
-    for (int i = 0; i <= operatingPointsCountMinus1; i++) {
-      bitArray.skipBits(12); // operating_point_idc[i]
-      int seqLevelIdx = bitArray.readBits(5); // seq_level_idx[i]
-      if (seqLevelIdx > 7) {
-        bitArray.skipBit(); // seq_tier[i]
+    // See APVDecoderConfigurationRecord syntax.
+    bitArray.skipBytes(1); // configurationVersion
+    int numConfigurationEntries = bitArray.readBits(8); // number_of_configuration_entry
+    for (int i = 0; i < numConfigurationEntries; i++) {
+      bitArray.skipBytes(1); // pbu_type
+      int numberOfFrameInfo = bitArray.readBits(8);
+      for (int j = 0; j < numberOfFrameInfo; j++) {
+        bitArray.skipBits(6); // reserved_zero_6bits
+        boolean isColorDescriptionPresent =
+            bitArray.readBit(); // color_description_present_flag_info
+        bitArray.skipBit(); // capture_time_distance_ignored
+        // Skip profile_idc (1 byte), level_idc (1 byte), band_idc (1 byte), frame_width (4 bytes),
+        // frame_height (4 bytes).
+        bitArray.skipBytes(11);
+        bitArray.skipBits(4); // chroma_format_idc (4 bits)
+        int bitDepth = bitArray.readBits(4) + 8; // bit_depth_minus8 + 8
+        colorInfo.setLumaBitdepth(bitDepth);
+        colorInfo.setChromaBitdepth(bitDepth);
+        bitArray.skipBytes(1); // capture_time_distance
+        if (isColorDescriptionPresent) {
+          int colorPrimaries = bitArray.readBits(8); // color_primaries
+          int transferCharacteristics = bitArray.readBits(8); // transfer_characteristics
+          bitArray.skipBytes(1); // matrix_coefficients
+          boolean fullRangeFlag = bitArray.readBit(); // full_range_flag
+          colorInfo
+              .setColorSpace(ColorInfo.isoColorPrimariesToColorSpace(colorPrimaries))
+              .setColorRange(fullRangeFlag ? C.COLOR_RANGE_FULL : C.COLOR_RANGE_LIMITED)
+              .setColorTransfer(
+                  ColorInfo.isoTransferCharacteristicsToColorTransfer(transferCharacteristics));
+        }
       }
-    }
-    int frameWidthBitsMinus1 = bitArray.readBits(4); // frame_width_bits_minus_1
-    int frameHeightBitsMinus1 = bitArray.readBits(4); // frame_height_bits_minus_1
-    bitArray.skipBits(frameWidthBitsMinus1 + 1); // max_frame_width_minus_1
-    bitArray.skipBits(frameHeightBitsMinus1 + 1); // max_frame_height_minus_1
-    if (bitArray.readBit()) { // frame_id_numbers_present_flag
-      bitArray.skipBits(7); // delta_frame_id_length_minus_2, additional_frame_id_length_minus_1
-    }
-    bitArray.skipBits(7); // use_128x128_superblock...enable_dual_filter: 7 flags
-    boolean enableOrderHint = bitArray.readBit(); // enable_order_hint
-    if (enableOrderHint) {
-      bitArray.skipBits(2); // enable_jnt_comp, enable_ref_frame_mvs
-    }
-    int seqForceScreenContentTools =
-        bitArray.readBit() // seq_choose_screen_content_tools
-            ? 2 // SELECT_SCREEN_CONTENT_TOOLS
-            : bitArray.readBits(1); // seq_force_screen_content_tools
-    if (seqForceScreenContentTools > 0) {
-      if (!bitArray.readBit()) { // seq_choose_integer_mv
-        bitArray.skipBits(1); // seq_force_integer_mv
-      }
-    }
-    if (enableOrderHint) {
-      bitArray.skipBits(3); // order_hint_bits_minus_1
-    }
-    bitArray.skipBits(3); // enable_superres, enable_cdef, enable_restoration
-    // 5.5.2. OBU Color config syntax
-    boolean colorConfigHighBitdepth = bitArray.readBit(); // high_bitdepth
-    if (obuSeqHeaderSeqProfile == 2 && colorConfigHighBitdepth) {
-      bitArray.skipBit(); // twelve_bit
-    }
-
-    boolean monochrome = (obuSeqHeaderSeqProfile != 1) && bitArray.readBit(); // mono_chrome
-
-    if (bitArray.readBit()) { // color_description_present_flag
-      int colorPrimaries = bitArray.readBits(8); // color_primaries
-      int transferCharacteristics = bitArray.readBits(8); // transfer_characteristics
-      int matrixCoefficients = bitArray.readBits(8); // matrix_coefficients
-      int colorRange =
-          (!monochrome
-                  && colorPrimaries == 1 // CP_BT_709
-                  && transferCharacteristics == 13 // TC_SRGB
-                  && matrixCoefficients == 0) // MC_IDENTITY
-              ? 1
-              : bitArray.readBits(1); // color_range;
-      colorInfo
-          .setColorSpace(ColorInfo.isoColorPrimariesToColorSpace(colorPrimaries))
-          .setColorRange((colorRange == 1) ? C.COLOR_RANGE_FULL : C.COLOR_RANGE_LIMITED)
-          .setColorTransfer(
-              ColorInfo.isoTransferCharacteristicsToColorTransfer(transferCharacteristics));
     }
     return colorInfo.build();
   }
@@ -1676,6 +1960,16 @@ public final class BoxParser {
       if (mimeType != null) {
         out.format = new Format.Builder().setId(trackId).setSampleMimeType(mimeType).build();
       }
+    } else if (atomType == Mp4Box.TYPE_it35) {
+      int identifierLength = parent.readUnsignedByte();
+      byte[] identifier = new byte[identifierLength];
+      parent.readBytes(identifier, 0, identifierLength);
+      out.format =
+          new Format.Builder()
+              .setId(trackId)
+              .setSampleMimeType(MimeTypes.APPLICATION_ITUT_T35)
+              .setInitializationData(ImmutableList.of(identifier))
+              .build();
     }
   }
 
@@ -1687,7 +1981,8 @@ public final class BoxParser {
    *     present.
    */
   @Nullable
-  private static Pair<long[], long[]> parseEdts(Mp4Box.ContainerBox edtsAtom) {
+  private static Pair<ImmutableLongArray, ImmutableLongArray> parseEdts(
+      Mp4Box.ContainerBox edtsAtom) {
     @Nullable LeafBox elstAtom = edtsAtom.getLeafBoxOfType(Mp4Box.TYPE_elst);
     if (elstAtom == null) {
       return null;
@@ -1697,12 +1992,12 @@ public final class BoxParser {
     int fullAtom = elstData.readInt();
     int version = parseFullBoxVersion(fullAtom);
     int entryCount = elstData.readUnsignedIntToInt();
-    long[] editListDurations = new long[entryCount];
-    long[] editListMediaTimes = new long[entryCount];
+    ImmutableLongArray.Builder editListDurations = ImmutableLongArray.builder(entryCount);
+    ImmutableLongArray.Builder editListMediaTimes = ImmutableLongArray.builder(entryCount);
     for (int i = 0; i < entryCount; i++) {
-      editListDurations[i] =
-          version == 1 ? elstData.readUnsignedLongToLong() : elstData.readUnsignedInt();
-      editListMediaTimes[i] = version == 1 ? elstData.readLong() : elstData.readInt();
+      editListDurations.add(
+          version == 1 ? elstData.readUnsignedLongToLong() : elstData.readUnsignedInt());
+      editListMediaTimes.add(version == 1 ? elstData.readLong() : elstData.readInt());
       int mediaRateInteger = elstData.readShort();
       if (mediaRateInteger != 1) {
         // The extractor does not handle dwell edits (mediaRateInteger == 0).
@@ -1710,7 +2005,7 @@ public final class BoxParser {
       }
       elstData.skipBytes(2);
     }
-    return Pair.create(editListDurations, editListMediaTimes);
+    return Pair.create(editListDurations.build(), editListMediaTimes.build());
   }
 
   private static float parsePaspFromParent(ParsableByteArray parent, int position) {
@@ -1726,7 +2021,7 @@ public final class BoxParser {
       int position,
       int size,
       int trackId,
-      String language,
+      @Nullable String language,
       boolean isQuickTime,
       @Nullable DrmInitData drmInitData,
       StsdData out,
@@ -1748,6 +2043,7 @@ public final class BoxParser {
     @C.PcmEncoding int pcmEncoding = Format.NO_VALUE;
     @Nullable String codecs = null;
     @Nullable EsdsData esdsData = null;
+    @Nullable BtrtData btrtData = null;
 
     if (quickTimeSoundDescriptionVersion == 0 || quickTimeSoundDescriptionVersion == 1) {
       channelCount = parent.readUnsignedShort();
@@ -1772,18 +2068,12 @@ public final class BoxParser {
       int formatSpecificFlags = parent.readUnsignedIntToInt();
       boolean isFloat = (formatSpecificFlags & 1) != 0;
       boolean isBigEndian = (formatSpecificFlags & (1 << 1)) != 0;
-      if (!isFloat) {
-        if (bitsPerSample == 8) {
-          pcmEncoding = C.ENCODING_PCM_8BIT;
-        } else if (bitsPerSample == 16) {
-          pcmEncoding = isBigEndian ? C.ENCODING_PCM_16BIT_BIG_ENDIAN : C.ENCODING_PCM_16BIT;
-        } else if (bitsPerSample == 24) {
-          pcmEncoding = isBigEndian ? C.ENCODING_PCM_24BIT_BIG_ENDIAN : C.ENCODING_PCM_24BIT;
-        } else if (bitsPerSample == 32) {
-          pcmEncoding = isBigEndian ? C.ENCODING_PCM_32BIT_BIG_ENDIAN : C.ENCODING_PCM_32BIT;
-        }
-      } else if (bitsPerSample == 32) {
-        pcmEncoding = C.ENCODING_PCM_FLOAT;
+      pcmEncoding =
+          isFloat
+              ? Util.getFloatPcmEncoding(bitsPerSample, isBigEndian ? BIG_ENDIAN : LITTLE_ENDIAN)
+              : Util.getPcmEncoding(bitsPerSample, isBigEndian ? BIG_ENDIAN : LITTLE_ENDIAN);
+      if (pcmEncoding == C.ENCODING_INVALID) {
+        pcmEncoding = Format.NO_VALUE;
       }
       parent.skipBytes(8); // constBytesPerAudioPacket, constLPCMFramesPerAudioPacket
     } else {
@@ -1791,12 +2081,20 @@ public final class BoxParser {
       return;
     }
 
-    // As per the IAMF spec (https://aomediacodec.github.io/iamf/#iasampleentry-section),
-    // channelCount and sampleRate SHALL be set to 0 and ignored. We ignore it by using
-    // Format.NO_VALUE instead of 0.
     if (atomType == Mp4Box.TYPE_iamf) {
+      // As per the IAMF spec (https://aomediacodec.github.io/iamf/#iasampleentry-section),
+      // channelCount and sampleRate SHALL be set to 0 and ignored. We ignore it by using
+      // Format.NO_VALUE instead of 0.
       channelCount = Format.NO_VALUE;
       sampleRate = Format.NO_VALUE;
+    } else if (atomType == Mp4Box.TYPE_samr) {
+      // AMR NB audio is always mono, 8kHz
+      channelCount = 1;
+      sampleRate = SAMPLE_RATE_AMR_NB;
+    } else if (atomType == Mp4Box.TYPE_sawb) {
+      // AMR WB audio is always mono, 16kHz
+      channelCount = 1;
+      sampleRate = SAMPLE_RATE_AMR_WB;
     }
 
     int childPosition = parent.getPosition();
@@ -1834,7 +2132,7 @@ public final class BoxParser {
     } else if (atomType == Mp4Box.TYPE_dtse) {
       mimeType = MimeTypes.AUDIO_DTS_EXPRESS;
     } else if (atomType == Mp4Box.TYPE_dtsx) {
-      mimeType = MimeTypes.AUDIO_DTS_X;
+      mimeType = MimeTypes.AUDIO_DTS_UHD_P2;
     } else if (atomType == Mp4Box.TYPE_samr) {
       mimeType = MimeTypes.AUDIO_AMR_NB;
     } else if (atomType == Mp4Box.TYPE_sawb) {
@@ -1946,6 +2244,8 @@ public final class BoxParser {
             }
           }
         }
+      } else if (childAtomType == Mp4Box.TYPE_btrt) {
+        btrtData = parseBtrtFromParent(parent, childPosition);
       } else if (childAtomType == Mp4Box.TYPE_dac3) {
         parent.setPosition(Mp4Box.HEADER_SIZE + childPosition);
         out.format =
@@ -2004,10 +2304,15 @@ public final class BoxParser {
         parent.readBytes(initializationDataBytes, /* offset= */ 0, childAtomBodySize);
         // Update sampleRate and channelCount from the AudioSpecificConfig initialization data,
         // which is more reliable. See https://github.com/google/ExoPlayer/pull/6629.
-        Pair<Integer, Integer> audioSpecificConfig =
+        int[] parsedAlacConfig =
             CodecSpecificDataUtil.parseAlacAudioSpecificConfig(initializationDataBytes);
-        sampleRate = audioSpecificConfig.first;
-        channelCount = audioSpecificConfig.second;
+        sampleRate = parsedAlacConfig[0];
+        channelCount = parsedAlacConfig[1];
+        int bitDepth = parsedAlacConfig[2];
+        pcmEncoding = Util.getPcmEncoding(bitDepth);
+        if (pcmEncoding == C.ENCODING_INVALID) {
+          pcmEncoding = Format.NO_VALUE;
+        }
         initializationData = ImmutableList.of(initializationDataBytes);
       } else if (childAtomType == Mp4Box.TYPE_iacb) {
         parent.setPosition(
@@ -2015,7 +2320,25 @@ public final class BoxParser {
         int configObusSize = parent.readUnsignedLeb128ToInt();
         byte[] initializationDataBytes = new byte[configObusSize];
         parent.readBytes(initializationDataBytes, /* offset= */ 0, configObusSize);
+        codecs = CodecSpecificDataUtil.buildIamfCodecString(initializationDataBytes);
         initializationData = ImmutableList.of(initializationDataBytes);
+      } else if (childAtomType == Mp4Box.TYPE_pcmC) {
+        // See ISO 23003-5 for the definition of the pcmC box.
+        parent.setPosition(childPosition + Mp4Box.FULL_HEADER_SIZE);
+        int formatFlags = parent.readUnsignedByte();
+        ByteOrder byteOrder = (formatFlags & 0x1) != 0 ? LITTLE_ENDIAN : BIG_ENDIAN;
+        int sampleSize = parent.readUnsignedByte();
+        if (atomType == Mp4Box.TYPE_ipcm) {
+          pcmEncoding = Util.getPcmEncoding(sampleSize, byteOrder);
+        } else if (atomType == Mp4Box.TYPE_fpcm) {
+          pcmEncoding = Util.getFloatPcmEncoding(sampleSize, byteOrder);
+        }
+        if (pcmEncoding == C.ENCODING_INVALID) {
+          pcmEncoding = Format.NO_VALUE;
+        }
+        if (pcmEncoding != Format.NO_VALUE) {
+          mimeType = MimeTypes.AUDIO_RAW;
+        }
       }
       childPosition += childAtomSize;
     }
@@ -2033,10 +2356,15 @@ public final class BoxParser {
               .setDrmInitData(drmInitData)
               .setLanguage(language);
 
+      // Prefer esdsData over btrtData for audio track.
       if (esdsData != null) {
         formatBuilder
             .setAverageBitrate(Ints.saturatedCast(esdsData.bitrate))
             .setPeakBitrate(Ints.saturatedCast(esdsData.peakBitrate));
+      } else if (btrtData != null) {
+        formatBuilder
+            .setAverageBitrate(Ints.saturatedCast(btrtData.avgBitrate))
+            .setPeakBitrate(Ints.saturatedCast(btrtData.maxBitrate));
       }
 
       out.format = formatBuilder.build();
@@ -2128,6 +2456,20 @@ public final class BoxParser {
   }
 
   /**
+   * Returns bitrate data contained in a btrt box, as specified by Section 8.5.2.2 in ISO/IEC
+   * 14496-12:2012(E).
+   */
+  private static BtrtData parseBtrtFromParent(ParsableByteArray parent, int position) {
+    parent.setPosition(position + Mp4Box.HEADER_SIZE);
+
+    parent.skipBytes(4); // bufferSizeDB
+    long maxBitrate = parent.readUnsignedInt();
+    long avgBitrate = parent.readUnsignedInt();
+
+    return new BtrtData(avgBitrate, maxBitrate);
+  }
+
+  /**
    * Returns stereo video playback related meta data from the vexu box. See
    * https://developer.apple.com/av-foundation/Stereo-Video-ISOBMFF-Extensions.pdf for ref.
    */
@@ -2167,8 +2509,7 @@ public final class BoxParser {
             new StriData(
                 ((striInfo & 0x01) == 0x01),
                 ((striInfo & 0x02) == 0x02),
-                ((striInfo & 0x08) == 0x08),
-                ((striInfo & 0x04) == 0x04)));
+                ((striInfo & 0x08) == 0x08)));
       }
       childPosition += childAtomSize;
     }
@@ -2327,7 +2668,7 @@ public final class BoxParser {
     return timestamps[0] <= editStartTime
         && editStartTime < timestamps[latestDelayIndex]
         && timestamps[earliestPaddingIndex] < editEndTime
-        && editEndTime <= duration;
+        && editEndTime <= duration + EDIT_LIST_DURATION_TOLERANCE_TIMESCALE_UNITS;
   }
 
   private BoxParser() {
@@ -2388,12 +2729,27 @@ public final class BoxParser {
 
     private final int id;
     private final long duration;
+    private final int alternateGroup;
     private final int rotationDegrees;
+    private final boolean mirrorHorizontal;
+    private final int width;
+    private final int height;
 
-    public TkhdData(int id, long duration, int rotationDegrees) {
+    public TkhdData(
+        int id,
+        long duration,
+        int alternateGroup,
+        int rotationDegrees,
+        boolean mirrorHorizontal,
+        int width,
+        int height) {
       this.id = id;
       this.duration = duration;
+      this.alternateGroup = alternateGroup;
       this.rotationDegrees = rotationDegrees;
+      this.mirrorHorizontal = mirrorHorizontal;
+      this.width = width;
+      this.height = height;
     }
   }
 
@@ -2433,22 +2789,27 @@ public final class BoxParser {
     }
   }
 
+  /** Data parsed from btrt box. */
+  private static final class BtrtData {
+    private final long avgBitrate;
+    private final long maxBitrate;
+
+    public BtrtData(long avgBitrate, long maxBitrate) {
+      this.avgBitrate = avgBitrate;
+      this.maxBitrate = maxBitrate;
+    }
+  }
+
   /** Data parsed from stri box. */
   private static final class StriData {
     private final boolean hasLeftEyeView;
     private final boolean hasRightEyeView;
     private final boolean eyeViewsReversed;
-    private final boolean hasAdditionalViews;
 
-    public StriData(
-        boolean hasLeftEyeView,
-        boolean hasRightEyeView,
-        boolean eyeViewsReversed,
-        boolean hasAdditionalViews) {
+    public StriData(boolean hasLeftEyeView, boolean hasRightEyeView, boolean eyeViewsReversed) {
       this.hasLeftEyeView = hasLeftEyeView;
       this.hasRightEyeView = hasRightEyeView;
       this.eyeViewsReversed = eyeViewsReversed;
-      this.hasAdditionalViews = hasAdditionalViews;
     }
   }
 
@@ -2465,9 +2826,9 @@ public final class BoxParser {
   private static final class MdhdData {
     private final long timescale;
     private final long mediaDurationUs;
-    private final String language;
+    @Nullable private final String language;
 
-    public MdhdData(long timescale, long mediaDurationUs, String language) {
+    public MdhdData(long timescale, long mediaDurationUs, @Nullable String language) {
       this.timescale = timescale;
       this.mediaDurationUs = mediaDurationUs;
       this.language = language;
@@ -2515,7 +2876,7 @@ public final class BoxParser {
       int fixedSampleSize = data.readUnsignedIntToInt();
       if (MimeTypes.AUDIO_RAW.equals(trackFormat.sampleMimeType)) {
         int pcmFrameSize = Util.getPcmFrameSize(trackFormat.pcmEncoding, trackFormat.channelCount);
-        if (fixedSampleSize == 0 || fixedSampleSize % pcmFrameSize != 0) {
+        if (fixedSampleSize % pcmFrameSize != 0) {
           // The sample size from the stsz box is inconsistent with the PCM encoding and channel
           // count derived from the stsd box. Choose stsd box as source of truth
           // [Internal ref: b/171627904].

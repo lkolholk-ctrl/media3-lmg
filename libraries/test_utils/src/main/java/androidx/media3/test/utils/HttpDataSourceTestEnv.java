@@ -16,12 +16,14 @@
 
 package androidx.media3.test.utils;
 
+import static androidx.media3.datasource.DataSpec.HTTP_METHOD_POST;
 import static androidx.media3.test.utils.WebServerDispatcher.getRequestPath;
 
 import android.net.Uri;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.HttpDataSource;
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
@@ -41,21 +43,29 @@ import org.junit.rules.ExternalResource;
 @UnstableApi
 public class HttpDataSourceTestEnv extends ExternalResource {
 
-  private static final ImmutableListMultimap<String, String> EXTRA_HEADERS =
+  public static final ImmutableListMultimap<String, String> EXTRA_HEADERS =
       ImmutableListMultimap.<String, String>builder()
           .putAll("X-Test-Header", "test value1", "test value2")
           .build();
 
   private static int seed = 0;
-  private static final WebServerDispatcher.Resource RANGE_SUPPORTED =
+  public static final WebServerDispatcher.Resource RANGE_SUPPORTED =
       new WebServerDispatcher.Resource.Builder()
           .setPath("/supports/range-requests")
           .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
           .supportsRangeRequests(true)
           .setExtraResponseHeaders(EXTRA_HEADERS)
           .build();
+  public static final WebServerDispatcher.Resource RANGE_SUPPORTED_NO_CONTENT_LENGTH =
+      new WebServerDispatcher.Resource.Builder()
+          .setPath("/supports/range-requests-no-content-length")
+          .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
+          .supportsRangeRequests(true)
+          .includesContentLengthInRangeResponses(false)
+          .setExtraResponseHeaders(EXTRA_HEADERS)
+          .build();
 
-  private static final WebServerDispatcher.Resource RANGE_SUPPORTED_LENGTH_UNKNOWN =
+  public static final WebServerDispatcher.Resource RANGE_SUPPORTED_LENGTH_UNKNOWN =
       new WebServerDispatcher.Resource.Builder()
           .setPath("/supports/range-requests-length-unknown")
           .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
@@ -64,7 +74,7 @@ public class HttpDataSourceTestEnv extends ExternalResource {
           .setExtraResponseHeaders(EXTRA_HEADERS)
           .build();
 
-  private static final WebServerDispatcher.Resource RANGE_NOT_SUPPORTED =
+  public static final WebServerDispatcher.Resource RANGE_NOT_SUPPORTED =
       new WebServerDispatcher.Resource.Builder()
           .setPath("/doesnt/support/range-requests")
           .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
@@ -72,7 +82,7 @@ public class HttpDataSourceTestEnv extends ExternalResource {
           .setExtraResponseHeaders(EXTRA_HEADERS)
           .build();
 
-  private static final WebServerDispatcher.Resource RANGE_NOT_SUPPORTED_LENGTH_UNKNOWN =
+  public static final WebServerDispatcher.Resource RANGE_NOT_SUPPORTED_LENGTH_UNKNOWN =
       new WebServerDispatcher.Resource.Builder()
           .setPath("/doesnt/support/range-requests-length-unknown")
           .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
@@ -81,7 +91,7 @@ public class HttpDataSourceTestEnv extends ExternalResource {
           .setExtraResponseHeaders(EXTRA_HEADERS)
           .build();
 
-  private static final WebServerDispatcher.Resource GZIP_ENABLED =
+  public static final WebServerDispatcher.Resource GZIP_ENABLED =
       new WebServerDispatcher.Resource.Builder()
           .setPath("/gzip/enabled")
           .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
@@ -89,7 +99,7 @@ public class HttpDataSourceTestEnv extends ExternalResource {
           .setExtraResponseHeaders(EXTRA_HEADERS)
           .build();
 
-  private static final WebServerDispatcher.Resource GZIP_FORCED =
+  public static final WebServerDispatcher.Resource GZIP_FORCED =
       new WebServerDispatcher.Resource.Builder()
           .setPath("/gzip/forced")
           .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
@@ -97,7 +107,25 @@ public class HttpDataSourceTestEnv extends ExternalResource {
           .setExtraResponseHeaders(EXTRA_HEADERS)
           .build();
 
-  private static final WebServerDispatcher.Resource REDIRECTS_TO_RANGE_SUPPORTED =
+  public static final WebServerDispatcher.Resource POST_EMPTY_REQUEST_BODY =
+      new WebServerDispatcher.Resource.Builder()
+          .setPath("/post/empty-request")
+          .setHttpMethod(HTTP_METHOD_POST)
+          .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
+          .setExtraResponseHeaders(EXTRA_HEADERS)
+          .build();
+
+  public static final WebServerDispatcher.Resource POST_WITH_REQUEST_BODY =
+      new WebServerDispatcher.Resource.Builder()
+          .setPath("/post/with-body")
+          .setHttpMethod(HTTP_METHOD_POST)
+          .setRequestHeaders(
+              ImmutableListMultimap.of(HttpHeaders.CONTENT_TYPE, "application/octet-stream"))
+          .setRequestBody(TestUtil.buildTestData(/* length= */ 10, seed++))
+          .setData(TestUtil.buildTestData(/* length= */ 20, seed++))
+          .setExtraResponseHeaders(EXTRA_HEADERS)
+          .build();
+  public static final WebServerDispatcher.Resource REDIRECTS_TO_RANGE_SUPPORTED =
       RANGE_SUPPORTED.buildUpon().setPath("/redirects/to/range/supported").build();
 
   private final MockWebServer originServer = new MockWebServer();
@@ -106,12 +134,17 @@ public class HttpDataSourceTestEnv extends ExternalResource {
   public ImmutableList<DataSourceContractTest.TestResource> getServedResources() {
     return ImmutableList.of(
         createTestResource("range supported", RANGE_SUPPORTED),
+        createTestResource("range supported, no Content-Length", RANGE_SUPPORTED_NO_CONTENT_LENGTH),
         createTestResource("range supported, length unknown", RANGE_SUPPORTED_LENGTH_UNKNOWN),
         createTestResource("range not supported", RANGE_NOT_SUPPORTED),
         createTestResource(
             "range not supported, length unknown", RANGE_NOT_SUPPORTED_LENGTH_UNKNOWN),
-        createTestResource("gzip enabled", GZIP_ENABLED),
-        createTestResource("gzip forced", GZIP_FORCED),
+        // TODO: crbug.com/41313195 - Set these back to false when CronetDataSource and
+        //  HttpEngineDataSource are able to set Accept-Encoding: identity.
+        createTestResource("gzip enabled", GZIP_ENABLED, /* mayResolveToUnknownLength= */ true),
+        createTestResource("gzip forced", GZIP_FORCED, /* mayResolveToUnknownLength= */ true),
+        createTestResource("post empty request", POST_EMPTY_REQUEST_BODY),
+        createTestResource("post with body", POST_WITH_REQUEST_BODY),
         new DataSourceContractTest.TestResource.Builder()
             .setName("302 redirect")
             .setUri(
@@ -134,7 +167,12 @@ public class HttpDataSourceTestEnv extends ExternalResource {
             .build(),
         new DataSourceContractTest.TestResource.Builder()
             .setName("no-connection")
-            .setUri(Uri.parse("http://not-a-real-server.test/path"))
+            // We use an IP address in order to bypass slow DNS timeouts in some test environments
+            // (b/413664259#comment2). This is an IPv4 address that shouldn't resolve to an HTTP
+            // server because
+            //   a) It is in a block reserved for documentation by RFC 5737.
+            //   b) It is using the SSH port (HTTP would conventionally be on 80).
+            .setUri(Uri.parse("http://192.0.2.1:22/path"))
             .setUnexpectedResponseHeaderKeys(ImmutableSet.of(HttpHeaders.CONTENT_LENGTH))
             .build());
   }
@@ -154,11 +192,14 @@ public class HttpDataSourceTestEnv extends ExternalResource {
         WebServerDispatcher.forResources(
             ImmutableList.of(
                 RANGE_SUPPORTED,
+                RANGE_SUPPORTED_NO_CONTENT_LENGTH,
                 RANGE_SUPPORTED_LENGTH_UNKNOWN,
                 RANGE_NOT_SUPPORTED,
                 RANGE_NOT_SUPPORTED_LENGTH_UNKNOWN,
                 GZIP_ENABLED,
-                GZIP_FORCED)));
+                GZIP_FORCED,
+                POST_EMPTY_REQUEST_BODY,
+                POST_WITH_REQUEST_BODY)));
 
     redirectionServer.start();
     redirectionServer.setDispatcher(
@@ -189,12 +230,23 @@ public class HttpDataSourceTestEnv extends ExternalResource {
 
   private DataSourceContractTest.TestResource createTestResource(
       String name, WebServerDispatcher.Resource resource) {
+    return createTestResource(name, resource, /* mayResolveToUnknownLength= */ false);
+  }
+
+  private DataSourceContractTest.TestResource createTestResource(
+      String name, WebServerDispatcher.Resource resource, boolean mayResolveToUnknownLength) {
     DataSourceContractTest.TestResource.Builder testResource =
         new DataSourceContractTest.TestResource.Builder()
             .setName(name)
             .setUri(Uri.parse(originServer.url(resource.getPath()).toString()))
+            .setHttpMethod(resource.getHttpMethod())
+            .setRequestHeaders(
+                Maps.transformValues(resource.getRequestHeaders().asMap(), Joiner.on(", ")::join))
+            .setRequestBody(resource.getRequestBody())
             .setResponseHeaders(Maps.transformValues(EXTRA_HEADERS.asMap(), v -> (List<String>) v))
-            .setExpectedBytes(resource.getData());
+            .setExpectedBytes(resource.getData())
+            .setMayResolveToUnknownLength(
+                resource.resolvesToUnknownLength() || mayResolveToUnknownLength);
     if (resource.resolvesToUnknownLength()) {
       testResource.setUnexpectedResponseHeaderKeys(ImmutableSet.of(HttpHeaders.CONTENT_LENGTH));
     }

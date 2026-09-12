@@ -42,4 +42,20 @@ public final class AviExtractorTest {
         "media/avi/sample.avi",
         simulationConfig);
   }
+
+  @Test
+  public void aviSampleWithLargeLength() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        () -> new AviExtractor(/* extractorFlags= */ 0, SubtitleParser.Factory.UNSUPPORTED),
+        "media/avi/sample-with-large-length.avi",
+        simulationConfig);
+  }
+
+  @Test
+  public void aviSampleWithUnflaggedAudioKeyframes() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        () -> new AviExtractor(/* extractorFlags= */ 0, SubtitleParser.Factory.UNSUPPORTED),
+        "media/avi/sample-unflagged-audio-keyframes.avi",
+        simulationConfig);
+  }
 }

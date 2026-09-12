@@ -15,65 +15,124 @@
  */
 package androidx.media3.exoplayer.dash.e2etest;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.run;
+import static androidx.media3.test.utils.WebServerDispatcher.NOT_FOUND_BODY;
+import static androidx.media3.test.utils.WebServerDispatcher.getRequestPath;
+import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.advance;
+import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.play;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 import android.content.Context;
+import android.content.res.AssetManager;
 import android.graphics.SurfaceTexture;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Surface;
 import androidx.annotation.Nullable;
+import androidx.media3.common.C;
+import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.ParserException;
 import androidx.media3.common.Player;
+import androidx.media3.common.util.Clock;
+import androidx.media3.common.util.ConditionVariable;
+import androidx.media3.datasource.AssetDataSource;
 import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DataSourceUtil;
+import androidx.media3.datasource.DataSpec;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.ResolvingDataSource;
+import androidx.media3.datasource.TransferListener;
 import androidx.media3.exoplayer.DecoderCounters;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.ExoPlaybackException;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.Renderer;
 import androidx.media3.exoplayer.RenderersFactory;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.dash.DashMediaSource;
 import androidx.media3.exoplayer.dash.DefaultDashChunkSource;
+import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter;
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
 import androidx.media3.exoplayer.metadata.MetadataDecoderFactory;
 import androidx.media3.exoplayer.metadata.MetadataRenderer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.exoplayer.source.LoadEventInfo;
 import androidx.media3.exoplayer.source.MediaLoadData;
 import androidx.media3.exoplayer.source.chunk.BundledChunkExtractor;
+import androidx.media3.exoplayer.text.TextRenderer;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
-import androidx.media3.test.utils.CapturingRenderersFactory;
+import androidx.media3.exoplayer.upstream.CmcdConfiguration;
+import androidx.media3.exoplayer.video.MediaCodecVideoRenderer;
+import androidx.media3.exoplayer.video.VideoRendererEventListener;
 import androidx.media3.test.utils.DumpFileAsserts;
 import androidx.media3.test.utils.FakeClock;
 import androidx.media3.test.utils.ThrowingSubtitleParserFactory;
+import androidx.media3.test.utils.WebServerDispatcher;
+import androidx.media3.test.utils.robolectric.CapturingRenderersFactory;
 import androidx.media3.test.utils.robolectric.PlaybackOutput;
 import androidx.media3.test.utils.robolectric.ShadowMediaCodecConfig;
 import androidx.media3.test.utils.robolectric.TestPlayerRunHelper;
 import androidx.test.core.app.ApplicationProvider;
-import androidx.test.ext.junit.runners.AndroidJUnit4;
+import com.google.common.base.Function;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Lists;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import okhttp3.mockwebserver.Dispatcher;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.robolectric.ParameterizedRobolectricTestRunner;
+import org.robolectric.annotation.Config;
 
 /** End-to-end tests using DASH samples. */
-@RunWith(AndroidJUnit4.class)
+@RunWith(ParameterizedRobolectricTestRunner.class) // TODO: b/510217604 - Remove parameterization.
 public final class DashPlaybackTest {
+
+  @ParameterizedRobolectricTestRunner.Parameters(name = "perStream={0}")
+  public static ImmutableList<Boolean> params() {
+    return ImmutableList.of(Boolean.FALSE, Boolean.TRUE);
+  }
+
+  @ParameterizedRobolectricTestRunner.Parameter(0)
+  public Boolean perStreamMediaProgressionEnabled;
 
   @Rule
   public ShadowMediaCodecConfig mediaCodecConfig =
-      ShadowMediaCodecConfig.forAllSupportedMimeTypes();
+      ShadowMediaCodecConfig.withAllDefaultSupportedCodecs();
+
+  @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
   public void webvttStandaloneFile() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -85,8 +144,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/standalone-webvtt/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).untilFullyBuffered();
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -97,8 +158,9 @@ public final class DashPlaybackTest {
   @Test
   public void webvttStandaloneFile_loadError_playbackContinuesErrorReported() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ResolvingDataSource.Factory webvttNotFoundDataSourceFactory =
         new ResolvingDataSource.Factory(
             new DefaultDataSource.Factory(applicationContext),
@@ -108,8 +170,9 @@ public final class DashPlaybackTest {
                     : dataSpec);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
             .setMediaSourceFactory(new DefaultMediaSourceFactory(webvttNotFoundDataSourceFactory))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -123,8 +186,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/standalone-webvtt/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).ignoringNonFatalErrors().untilFullyBuffered();
     player.play();
-    run(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
+    advance(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -137,11 +202,12 @@ public final class DashPlaybackTest {
   @Test
   public void webvttStandaloneFile_parseError_playbackContinuesErrorReported() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
             .setMediaSourceFactory(
                 new DefaultMediaSourceFactory(applicationContext)
                     .setSubtitleParserFactory(
@@ -160,8 +226,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/standalone-webvtt/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).ignoringNonFatalErrors().untilFullyBuffered();
     player.play();
-    run(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
+    advance(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -179,11 +247,12 @@ public final class DashPlaybackTest {
   @Test
   public void ttmlStandaloneXmlFile() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -195,8 +264,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/standalone-ttml/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).untilFullyBuffered();
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -208,11 +279,12 @@ public final class DashPlaybackTest {
   @Test
   public void webvttInMp4() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -224,8 +296,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/webvtt-in-mp4/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).untilFullyBuffered();
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -233,14 +307,123 @@ public final class DashPlaybackTest {
         applicationContext, playbackOutput, "playbackdumps/dash/webvtt-in-mp4.dump");
   }
 
+  /**
+   * Regression test for <a href="https://github.com/androidx/media/issues/2517">issue #2517</a>.
+   *
+   * <p>The test DASH manifest contains 5 1s segments of video and text data. The first, second and
+   * fifth text segments have subtitle data while the third and fourth are empty.
+   *
+   * <p>The test returns a 404 response for the second text segment until this failure is handled by
+   * {@link TextRenderer}, at which point it starts resolving but blocks loading the fifth segment.
+   * This ensures {@link TextRenderer} sees an error, and {@link TextRenderer#isReady()} is called
+   * with no future subtitle data when entering the third segment. Without the fix, the test hangs
+   * at this transition.
+   */
+  @Test
+  @Ignore("Flaky: b/514594662")
+  public void webvttInMp4_transientLoadError_playbackContinues() throws Exception {
+    MockWebServer mockWebServer = new MockWebServer();
+    WebServerDispatcher webServerDispatcher =
+        WebServerDispatcher.forResources(
+            mockWebServerResourcesFromAssetsDirectory(
+                "media/dash/webvtt-in-mp4-multiple-segments"));
+    AtomicInteger secondSubtitleFailureCount = new AtomicInteger();
+    AtomicBoolean secondSubtitleResolves = new AtomicBoolean();
+    ConditionVariable fifthSubtitleLoad = new ConditionVariable();
+    Dispatcher blockingDispatcher =
+        new Dispatcher() {
+          @Override
+          public MockResponse dispatch(RecordedRequest recordedRequest)
+              throws InterruptedException {
+            if (getRequestPath(recordedRequest).endsWith("text5.m4s")) {
+              fifthSubtitleLoad.block();
+            }
+            if (getRequestPath(recordedRequest).endsWith("text2.m4s")
+                && !secondSubtitleResolves.get()) {
+              secondSubtitleFailureCount.incrementAndGet();
+              return new MockResponse().setBody(NOT_FOUND_BODY).setResponseCode(404);
+            }
+            return webServerDispatcher.dispatch(recordedRequest);
+          }
+        };
+    mockWebServer.setDispatcher(blockingDispatcher);
+
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    CapturingRenderersFactory capturingRenderersFactory =
+        new CapturingRenderersFactory(applicationContext, clock);
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    AtomicBoolean secondSubtitleChunkLoaded = new AtomicBoolean();
+    player.addAnalyticsListener(
+        new AnalyticsListener() {
+          @Override
+          public void onLoadCompleted(
+              EventTime eventTime, LoadEventInfo loadEventInfo, MediaLoadData mediaLoadData) {
+            if (loadEventInfo.dataSpec.uri.getPath().endsWith("text2.m4s")) {
+              secondSubtitleChunkLoaded.set(true);
+            }
+          }
+        });
+    // Ensure the subtitle track is selected.
+    DefaultTrackSelector trackSelector =
+        checkNotNull((DefaultTrackSelector) player.getTrackSelector());
+    trackSelector.setParameters(
+        trackSelector
+            .buildUponParameters()
+            .setPreferredTextLanguage("en")
+            .setSelectUndeterminedTextLanguage(true));
+    // Deliberately don't capture the video data, since we don't care about it for this test.
+    PlaybackOutput playbackOutput = PlaybackOutput.registerWithoutRendererCapture(player);
+
+    player.setMediaItem(MediaItem.fromUri(mockWebServer.url("manifest.mpd").toString()));
+    player.prepare();
+
+    // Ensure the loading error is processed by the player, and the segment is subsequently
+    // successfully loaded, before playback starts (otherwise in the test playback progresses too
+    // quickly, and completes (without any subtitles) before the load error is encountered). The
+    // 4 load errors allow for the default 3 retries, plus a final failure which propagates to
+    // TextRenderer.
+    advance(player)
+        .ignoringNonFatalErrors()
+        .untilBackgroundThreadCondition(() -> secondSubtitleFailureCount.get() == 4);
+    secondSubtitleResolves.set(true);
+    advance(player)
+        .ignoringNonFatalErrors()
+        .untilBackgroundThreadCondition(secondSubtitleChunkLoaded::get);
+    player.play();
+
+    // Progress past the transition into the third segment (which is the first empty one), then
+    // allow the fifth (non-empty) subtitle segment to load. This ensures we enter the third segment
+    // with no future subtitle data in TextRenderer.
+    advance(player).ignoringNonFatalErrors().untilPositionAtLeast(/* positionMs= */ 3500);
+    fifthSubtitleLoad.open();
+    advance(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
+    player.release();
+    surface.release();
+    mockWebServer.close();
+
+    DumpFileAsserts.assertOutput(
+        applicationContext,
+        playbackOutput,
+        "playbackdumps/dash/webvtt-in-mp4-multiple-segments.textonly.dump");
+  }
+
   @Test
   public void ttmlInMp4() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -252,8 +435,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/ttml-in-mp4/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).untilFullyBuffered();
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -264,8 +449,9 @@ public final class DashPlaybackTest {
   @Test
   public void ttmlInMp4_loadError_playbackContinuesErrorReported() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ResolvingDataSource.Factory ttmlNotFoundDataSourceFactory =
         new ResolvingDataSource.Factory(
             new DefaultDataSource.Factory(applicationContext),
@@ -275,8 +461,9 @@ public final class DashPlaybackTest {
                     : dataSpec);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
             .setMediaSourceFactory(new DefaultMediaSourceFactory(ttmlNotFoundDataSourceFactory))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -290,8 +477,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/ttml-in-mp4/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).ignoringNonFatalErrors().untilFullyBuffered();
     player.play();
-    run(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
+    advance(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -304,16 +493,18 @@ public final class DashPlaybackTest {
   @Test
   public void ttmlInMp4_parseError_playbackContinuesErrorReported() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
             .setMediaSourceFactory(
                 new DefaultMediaSourceFactory(applicationContext)
                     .setSubtitleParserFactory(
                         new ThrowingSubtitleParserFactory(
                             () -> new IllegalStateException("test subtitle parsing error"))))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -327,8 +518,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/ttml-in-mp4/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).ignoringNonFatalErrors().untilFullyBuffered();
     player.play();
-    run(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
+    advance(player).ignoringNonFatalErrors().untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -350,14 +543,16 @@ public final class DashPlaybackTest {
   @Test
   public void cea608_parseDuringRendering() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
             .setMediaSourceFactory(
                 new DashMediaSource.Factory(new DefaultDataSource.Factory(applicationContext))
                     .experimentalParseSubtitlesDuringExtraction(false))
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -369,8 +564,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/cea608/manifest.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).untilFullyBuffered();
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -388,14 +585,16 @@ public final class DashPlaybackTest {
   @Test
   public void cea608_parseDuringExtraction() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
             .setMediaSourceFactory(
                 new DashMediaSource.Factory(new DefaultDataSource.Factory(applicationContext))
                     .experimentalParseSubtitlesDuringExtraction(true))
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -407,8 +606,10 @@ public final class DashPlaybackTest {
     trackSelector.setParameters(trackSelector.buildUponParameters().setPreferredTextLanguage("en"));
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/cea608/manifest.mpd"));
     player.prepare();
+    // Ensure media is fully buffered so that the first subtitle is ready at the start of playback.
+    advance(player).untilFullyBuffered();
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -420,11 +621,13 @@ public final class DashPlaybackTest {
   @Test
   public void emsgNearToPeriodBoundary() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -454,12 +657,11 @@ public final class DashPlaybackTest {
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, renderersFactory)
             .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
-    CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
-    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+    PlaybackOutput playbackOutput = PlaybackOutput.registerWithoutRendererCapture(player);
 
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/emsg/sample.mpd"));
     player.prepare();
@@ -492,12 +694,11 @@ public final class DashPlaybackTest {
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, renderersFactory)
             .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
-    CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
-    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+    PlaybackOutput playbackOutput = PlaybackOutput.registerWithoutRendererCapture(player);
 
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/emsg/sample.mpd"));
     player.prepare();
@@ -517,20 +718,23 @@ public final class DashPlaybackTest {
    * and not present some images. That will cause the test to fail.
    */
   @Test
+  // Set the screen size equal to the size of a single thumbnail, to check the whole grid is not
+  // scaled down to match the screen size.
+  @Config(qualifiers = "w256dp-h144dp")
   public void playThumbnailGrid() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
-    CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
     ExoPlayer player =
-        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+        new ExoPlayer.Builder(applicationContext)
             .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
-    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+    PlaybackOutput playbackOutput = PlaybackOutput.registerWithoutRendererCapture(player);
 
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/thumbnails/sample.mpd"));
     player.prepare();
+    advance(player).untilState(Player.STATE_READY);
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
 
     DumpFileAsserts.assertOutput(
@@ -538,23 +742,29 @@ public final class DashPlaybackTest {
   }
 
   @Test
+  // Set the screen size equal to the size of a single thumbnail, to check the whole grid is not
+  // scaled down to match the screen size.
+  @Config(qualifiers = "w256dp-h144dp")
   public void playThumbnailGrid_withSeekAfterEoS() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
-    CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
     ExoPlayer player =
-        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+        new ExoPlayer.Builder(applicationContext)
             .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
-    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+    PlaybackOutput playbackOutput = PlaybackOutput.registerWithoutRendererCapture(player);
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/thumbnails/sample.mpd"));
     player.seekTo(55_000L);
     player.prepare();
+    advance(player).untilState(Player.STATE_READY);
     player.play();
     TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
 
+    player.pause();
     player.seekTo(55_000L);
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_READY);
+    player.play();
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
 
     DumpFileAsserts.assertOutput(
@@ -564,10 +774,12 @@ public final class DashPlaybackTest {
   @Test
   public void playVideo_usingWithinGopSampleDependencies_withSeek() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
     BundledChunkExtractor.Factory chunkExtractorFactory =
-        new BundledChunkExtractor.Factory().experimentalParseWithinGopSampleDependencies(true);
+        new BundledChunkExtractor.Factory()
+            .experimentalSetCodecsToParseWithinGopSampleDependencies(C.VIDEO_CODEC_FLAG_H264);
     DataSource.Factory defaultDataSourceFactory = new DefaultDataSource.Factory(applicationContext);
     DashMediaSource.Factory dashMediaSourceFactory =
         new DashMediaSource.Factory(
@@ -577,7 +789,8 @@ public final class DashPlaybackTest {
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
             .setMediaSourceFactory(dashMediaSourceFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -599,7 +812,8 @@ public final class DashPlaybackTest {
   public void playVideo_usingWithinGopSampleDependencies_withSeekAfterEoS() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
     BundledChunkExtractor.Factory chunkExtractorFactory =
-        new BundledChunkExtractor.Factory().experimentalParseWithinGopSampleDependencies(true);
+        new BundledChunkExtractor.Factory()
+            .experimentalSetCodecsToParseWithinGopSampleDependencies(C.VIDEO_CODEC_FLAG_H264);
     DataSource.Factory defaultDataSourceFactory = new DefaultDataSource.Factory(applicationContext);
     DashMediaSource.Factory dashMediaSourceFactory =
         new DashMediaSource.Factory(
@@ -610,6 +824,7 @@ public final class DashPlaybackTest {
         new ExoPlayer.Builder(applicationContext)
             .setMediaSourceFactory(dashMediaSourceFactory)
             .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
 
     player.setMediaItem(MediaItem.fromUri("asset:///media/dash/standalone-webvtt/sample.mpd"));
@@ -627,13 +842,86 @@ public final class DashPlaybackTest {
   }
 
   @Test
-  public void multiPeriod_withOffsetInSegment() throws Exception {
+  public void playVideo_usingWithinGopSampleDependenciesOnH265_withSeek() throws Exception {
     Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
     CapturingRenderersFactory capturingRenderersFactory =
-        new CapturingRenderersFactory(applicationContext);
+        new CapturingRenderersFactory(applicationContext, clock);
+    BundledChunkExtractor.Factory chunkExtractorFactory =
+        new BundledChunkExtractor.Factory()
+            .experimentalSetCodecsToParseWithinGopSampleDependencies(C.VIDEO_CODEC_FLAG_H265);
+    DataSource.Factory defaultDataSourceFactory = new DefaultDataSource.Factory(applicationContext);
+    DashMediaSource.Factory dashMediaSourceFactory =
+        new DashMediaSource.Factory(
+            /* chunkSourceFactory= */ new DefaultDashChunkSource.Factory(
+                chunkExtractorFactory, defaultDataSourceFactory, /* maxSegmentsPerLoad= */ 1),
+            /* manifestDataSourceFactory= */ defaultDataSourceFactory);
     ExoPlayer player =
         new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
-            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .setMediaSourceFactory(dashMediaSourceFactory)
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    player.setTrackSelectionParameters(
+        player.getTrackSelectionParameters().buildUpon().setPreferredTextLanguage("en").build());
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+
+    player.setMediaItem(MediaItem.fromUri("asset:///media/dash/captions_h265/manifest.mpd"));
+    player.seekTo(500L);
+    player.prepare();
+    player.play();
+    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    player.release();
+    surface.release();
+
+    DumpFileAsserts.assertOutput(
+        applicationContext,
+        playbackOutput,
+        "playbackdumps/dash/optimized_seek_h265"
+            + (perStreamMediaProgressionEnabled ? "_perStreamProgression" : "")
+            + ".dump");
+  }
+
+  @Test
+  public void play_multiSegmentManifest() throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    CapturingRenderersFactory capturingRenderersFactory =
+        new CapturingRenderersFactory(applicationContext, clock);
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+
+    player.setMediaItem(MediaItem.fromUri("asset:///media/cmaf/multi-segment/manifest.mpd"));
+    player.prepare();
+    advance(player).untilFullyBuffered();
+    advance(player).untilState(Player.STATE_READY);
+    player.play();
+    advance(player).untilState(Player.STATE_ENDED);
+    player.release();
+    surface.release();
+
+    DumpFileAsserts.assertOutput(
+        applicationContext, playbackOutput, "playbackdumps/cmaf/multi-segment.dump");
+  }
+
+  @Test
+  public void multiPeriod_withOffsetInSegment() throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    CapturingRenderersFactory capturingRenderersFactory =
+        new CapturingRenderersFactory(applicationContext, clock);
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
             .build();
     Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
     player.setVideoSurface(surface);
@@ -642,8 +930,10 @@ public final class DashPlaybackTest {
     player.setMediaItem(
         MediaItem.fromUri("asset:///media/dash/multi-period-with-offset/sample.mpd"));
     player.prepare();
+    // Ensure media is fully buffered to avoid flakiness from loading second period too late.
+    advance(player).untilFullyBuffered();
     player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    advance(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -651,7 +941,280 @@ public final class DashPlaybackTest {
         applicationContext, playbackOutput, "playbackdumps/dash/multi-period-with-offset.dump");
   }
 
-  private static class AnalyticsListenerImpl implements AnalyticsListener {
+  @Test
+  public void multiTrack_withOffsetsAndDelayedInit_playsAllExpectedSamples() throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    CapturingRenderersFactory capturingRenderersFactory =
+        new CapturingRenderersFactory(context, clock);
+    DefaultDataSource.Factory defaultDataSourceFactory = new DefaultDataSource.Factory(context);
+    // Add a delay to the audio track to verify the handling of the initial discontinuities for the
+    // offsets is not affected by different loading speeds of the init segments.
+    // See https://github.com/androidx/media/issues/3057.
+    ExoPlayer player =
+        new ExoPlayer.Builder(context, capturingRenderersFactory)
+            .setClock(clock)
+            .setMediaSourceFactory(
+                new DefaultMediaSourceFactory(
+                    () ->
+                        new DelayingDataSource(
+                            defaultDataSourceFactory.createDataSource(),
+                            clock,
+                            /* shouldDelay= */ dataSpec ->
+                                dataSpec.uri.toString().contains("audio"))))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+
+    player.setMediaItem(
+        MediaItem.fromUri("asset:///media/dash/multi-track-with-offset/sample.mpd"));
+    player.prepare();
+    player.play();
+    advance(player).untilState(Player.STATE_ENDED);
+    player.release();
+    surface.release();
+
+    DumpFileAsserts.assertOutput(
+        context, playbackOutput, "playbackdumps/dash/multi-track-with-offset.dump");
+  }
+
+  @Test
+  public void cmcdEnabled_withInitSegment() throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    CapturingRenderersFactory capturingRenderersFactory =
+        new CapturingRenderersFactory(applicationContext, clock);
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+            .setClock(clock)
+            .setMediaSourceFactory(
+                new DefaultMediaSourceFactory(applicationContext)
+                    .setCmcdConfigurationFactory(CmcdConfiguration.Factory.DEFAULT))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+
+    player.setMediaItem(MediaItem.fromUri("asset:///media/dash/multi-track/sample.mpd"));
+    player.prepare();
+    player.play();
+    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    player.release();
+    surface.release();
+
+    DumpFileAsserts.assertOutput(
+        applicationContext,
+        playbackOutput,
+        "playbackdumps/dash/cmcd-enabled-with-init-segment.dump");
+  }
+
+  @Test
+  public void loadEventsReportedAsExpected() throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext)
+            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    AnalyticsListenerImpl analyticsListener = new AnalyticsListenerImpl();
+    player.addAnalyticsListener(analyticsListener);
+    AnalyticsListener mockAnalyticsListener = mock(AnalyticsListener.class);
+    player.addAnalyticsListener(mockAnalyticsListener);
+    Uri manifestUri = Uri.parse("asset:///media/dash/emsg/sample.mpd");
+
+    player.setMediaItem(MediaItem.fromUri(manifestUri));
+    player.prepare();
+    player.play();
+    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+    player.release();
+
+    ArgumentCaptor<LoadEventInfo> loadStartedEventInfoCaptor =
+        ArgumentCaptor.forClass(LoadEventInfo.class);
+    verify(mockAnalyticsListener, atLeastOnce())
+        .onLoadStarted(any(), loadStartedEventInfoCaptor.capture(), any(), anyInt());
+    List<Uri> loadStartedUris =
+        Lists.transform(loadStartedEventInfoCaptor.getAllValues(), i -> i.uri);
+    List<Uri> loadStartedDataSpecUris =
+        Lists.transform(loadStartedEventInfoCaptor.getAllValues(), i -> i.dataSpec.uri);
+    // Remove duplicates in case the load was split into multiple reads.
+    assertThat(ImmutableSet.copyOf(loadStartedUris))
+        .containsExactly(manifestUri, Uri.parse("asset:///media/dash/emsg/sample.audio.mp4"));
+    // The two sources of URI should match (because there's no redirection).
+    assertThat(loadStartedDataSpecUris).containsExactlyElementsIn(loadStartedUris).inOrder();
+    ArgumentCaptor<LoadEventInfo> loadCompletedEventInfoCaptor =
+        ArgumentCaptor.forClass(LoadEventInfo.class);
+    verify(mockAnalyticsListener, atLeastOnce())
+        .onLoadCompleted(any(), loadCompletedEventInfoCaptor.capture(), any());
+    List<Uri> loadCompletedUris =
+        Lists.transform(loadCompletedEventInfoCaptor.getAllValues(), i -> i.uri);
+    List<Uri> loadCompletedDataSpecUris =
+        Lists.transform(loadCompletedEventInfoCaptor.getAllValues(), i -> i.dataSpec.uri);
+    // Every started load should be completed.
+    assertThat(loadCompletedUris).containsExactlyElementsIn(loadStartedUris);
+    assertThat(loadCompletedDataSpecUris).containsExactlyElementsIn(loadStartedUris);
+  }
+
+  @Test
+  public void seekToEnd_afterLoadingFinished_doesNotLoadAgain() throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext)
+            .setClock(new FakeClock(/* isAutoAdvancing= */ true))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Player.Listener listener = mock(Player.Listener.class);
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    player.setMediaItem(MediaItem.fromUri("asset:///media/dash/standalone-webvtt/sample.mpd"));
+    player.prepare();
+    advance(player).untilFullyBuffered();
+
+    player.addListener(listener);
+    player.seekTo(player.getDuration());
+    play(player).untilState(Player.STATE_ENDED);
+    player.release();
+    surface.release();
+
+    verify(listener, never()).onIsLoadingChanged(true);
+  }
+
+  @Test
+  // TODO: b/507039229 - Suppressed due to dump file mismatch on multiple SDKs. Passes on 31-33.
+  @Config(sdk = {31, 32, 33})
+  public void
+      scrubbingPlayback_withSkipKeyFrameResetEnabledAndSameSyncPointDifferentGoP_dumpsCorrectOutput()
+          throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    AtomicLong blockingPresentationTimeUs = new AtomicLong(933000L);
+    AtomicBoolean hasReceivedOutputBufferPastBlockTime = new AtomicBoolean(false);
+    CapturingRenderersFactoryWithBlockingMediaCodecVideoRenderer capturingRenderersFactory =
+        new CapturingRenderersFactoryWithBlockingMediaCodecVideoRenderer(
+            applicationContext,
+            clock,
+            blockingPresentationTimeUs,
+            hasReceivedOutputBufferPastBlockTime);
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+            .setClock(clock)
+            .setMediaSourceFactory(
+                new DefaultMediaSourceFactory(applicationContext)
+                    .setCmcdConfigurationFactory(CmcdConfiguration.Factory.DEFAULT))
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+    player.addMediaItem(
+        MediaItem.fromUri("asset:///media/dash/multi-period-with-multiple-gop/sample.mpd"));
+    player.prepare();
+    // Play until renderer has reached the specified blocked presentation time.
+    play(player).untilBackgroundThreadCondition(hasReceivedOutputBufferPastBlockTime::get);
+    player.setScrubbingModeEnabled(true);
+    TestPlayerRunHelper.runUntilPendingCommandsAreFullyHandled(player);
+
+    player.seekTo(/* positionMs= */ 1700);
+    TestPlayerRunHelper.runUntilPendingCommandsAreFullyHandled(player);
+    // End blocking in renderer.
+    blockingPresentationTimeUs.set(Long.MAX_VALUE);
+    player.setScrubbingModeEnabled(false);
+    TestPlayerRunHelper.runUntilPendingCommandsAreFullyHandled(player);
+    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
+
+    player.release();
+    surface.release();
+
+    assertThat(player.getScrubbingModeParameters().allowSkippingKeyFrameReset).isTrue();
+    DumpFileAsserts.assertOutput(
+        applicationContext,
+        playbackOutput,
+        /* dumpFile= */ "playbackdumps/dash/scrubbing-skipKeyFrameReset-sameSyncNextGoP.dump");
+  }
+
+  @Test
+  public void play_multiSegmentWithEmsgVersion0_outputsExpectedSamples() throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    CapturingRenderersFactory capturingRenderersFactory =
+        new CapturingRenderersFactory(applicationContext, clock);
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+
+    player.setMediaItem(
+        MediaItem.fromUri("asset:///media/dash/multi-segment-with-emsg0/manifest.mpd"));
+    player.prepare();
+    player.play();
+    advance(player).untilState(Player.STATE_ENDED);
+    player.release();
+    surface.release();
+
+    DumpFileAsserts.assertOutput(
+        applicationContext, playbackOutput, "playbackdumps/dash/multi-segment-with-emsg0.dump");
+  }
+
+  @Test
+  public void play_multiSegmentWithEmsgVersion1_outputsExpectedSamples() throws Exception {
+    Context applicationContext = ApplicationProvider.getApplicationContext();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ true);
+    CapturingRenderersFactory capturingRenderersFactory =
+        new CapturingRenderersFactory(applicationContext, clock);
+    ExoPlayer player =
+        new ExoPlayer.Builder(applicationContext, capturingRenderersFactory)
+            .setClock(clock)
+            .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled)
+            .build();
+    Surface surface = new Surface(new SurfaceTexture(/* texName= */ 1));
+    player.setVideoSurface(surface);
+    PlaybackOutput playbackOutput = PlaybackOutput.register(player, capturingRenderersFactory);
+
+    player.setMediaItem(
+        MediaItem.fromUri("asset:///media/dash/multi-segment-with-emsg1/manifest.mpd"));
+    player.prepare();
+    player.play();
+    advance(player).untilState(Player.STATE_ENDED);
+    player.release();
+    surface.release();
+
+    DumpFileAsserts.assertOutput(
+        applicationContext, playbackOutput, "playbackdumps/dash/multi-segment-with-emsg1.dump");
+  }
+
+  private static ImmutableList<WebServerDispatcher.Resource>
+      mockWebServerResourcesFromAssetsDirectory(String assetDirectory) throws IOException {
+    Context context = ApplicationProvider.getApplicationContext();
+    AssetManager assetManager = context.getAssets();
+    String[] contents = assetManager.list(assetDirectory);
+    AssetDataSource assetDataSource =
+        new AssetDataSource(ApplicationProvider.getApplicationContext());
+    ImmutableList.Builder<WebServerDispatcher.Resource> resources =
+        ImmutableList.builderWithExpectedSize(contents.length);
+    for (String asset : contents) {
+      try {
+        Uri assetUri =
+            new Uri.Builder().scheme("asset").appendPath(assetDirectory).appendPath(asset).build();
+        assetDataSource.open(new DataSpec(assetUri));
+        resources.add(
+            new WebServerDispatcher.Resource.Builder()
+                .setPath(asset)
+                .setData(DataSourceUtil.readToEnd(assetDataSource))
+                .build());
+      } finally {
+        assetDataSource.close();
+      }
+    }
+    return resources.build();
+  }
+
+  private static final class AnalyticsListenerImpl implements AnalyticsListener {
 
     @Nullable private LoadEventInfo loadErrorEventInfo;
     @Nullable private IOException loadError;
@@ -665,6 +1228,133 @@ public final class DashPlaybackTest {
         boolean wasCanceled) {
       this.loadErrorEventInfo = loadEventInfo;
       this.loadError = error;
+    }
+  }
+
+  /**
+   * A @link CapturingRenderersFactory} that provides a custom {@link MediaCodecVideoRenderer} that
+   * can block output buffer processing at a specific buffer presentation time.
+   */
+  private static final class CapturingRenderersFactoryWithBlockingMediaCodecVideoRenderer
+      extends CapturingRenderersFactory {
+
+    private final AtomicLong blockingPresentationTimeUs;
+    private final AtomicBoolean hasReceivedOutputBufferPastBlockTime;
+
+    private CapturingRenderersFactoryWithBlockingMediaCodecVideoRenderer(
+        Context context,
+        Clock clock,
+        AtomicLong blockingPresentationTimeUs,
+        AtomicBoolean hasReceivedOutputBufferPastBlockTime) {
+      super(context, clock);
+      this.blockingPresentationTimeUs = blockingPresentationTimeUs;
+      this.hasReceivedOutputBufferPastBlockTime = hasReceivedOutputBufferPastBlockTime;
+    }
+
+    @Override
+    protected MediaCodecVideoRenderer createMediaCodecVideoRenderer(
+        Handler eventHandler, VideoRendererEventListener videoRendererEventListener) {
+      return new CapturingMediaCodecVideoRenderer(
+          getContext(),
+          getMediaCodecAdapterFactory(),
+          MediaCodecSelector.DEFAULT,
+          DefaultRenderersFactory.DEFAULT_ALLOWED_VIDEO_JOINING_TIME_MS,
+          /* enableDecoderFallback= */ false,
+          eventHandler,
+          videoRendererEventListener,
+          DefaultRenderersFactory.MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
+          /* parseAv1SampleDependencies= */ false) {
+        @Override
+        protected boolean processOutputBuffer(
+            long positionUs,
+            long elapsedRealtimeUs,
+            @Nullable MediaCodecAdapter codec,
+            @Nullable ByteBuffer buffer,
+            int bufferIndex,
+            int bufferFlags,
+            int sampleCount,
+            long bufferPresentationTimeUs,
+            boolean isDecodeOnlyBuffer,
+            boolean isLastBuffer,
+            Format format)
+            throws ExoPlaybackException {
+          if ((bufferPresentationTimeUs - getOutputStreamOffsetUs())
+              > blockingPresentationTimeUs.get()) {
+            hasReceivedOutputBufferPastBlockTime.set(true);
+            return false;
+          }
+          return super.processOutputBuffer(
+              positionUs,
+              elapsedRealtimeUs,
+              codec,
+              buffer,
+              bufferIndex,
+              bufferFlags,
+              sampleCount,
+              bufferPresentationTimeUs,
+              isDecodeOnlyBuffer,
+              isLastBuffer,
+              format);
+        }
+      };
+    }
+  }
+
+  private static final class DelayingDataSource implements DataSource {
+
+    private static final int DELAY_MS = 5000;
+
+    private final DataSource dataSource;
+    private final Clock clock;
+    private final Function<DataSpec, Boolean> shouldDelay;
+
+    private DelayingDataSource(
+        DataSource dataSource, Clock clock, Function<DataSpec, Boolean> shouldDelay) {
+      this.dataSource = dataSource;
+      this.clock = clock;
+      this.shouldDelay = shouldDelay;
+    }
+
+    @Override
+    public void addTransferListener(TransferListener transferListener) {
+      dataSource.addTransferListener(transferListener);
+    }
+
+    @Override
+    public long open(DataSpec dataSpec) throws IOException {
+      if (shouldDelay.apply(dataSpec)) {
+        ConditionVariable wakeupCondition = new ConditionVariable();
+        clock
+            .createHandler(Looper.getMainLooper(), /* callback= */ null)
+            .postDelayed(wakeupCondition::open, DELAY_MS);
+        try {
+          wakeupCondition.block();
+        } catch (InterruptedException e) {
+          throw new IllegalStateException();
+        }
+      }
+      return dataSource.open(dataSpec);
+    }
+
+    @Nullable
+    @Override
+    public Uri getUri() {
+      return dataSource.getUri();
+    }
+
+    @Override
+    public void close() throws IOException {
+      dataSource.close();
+    }
+
+    @Override
+    public int read(byte[] buffer, int offset, int length) throws IOException {
+      return dataSource.read(buffer, offset, length);
+    }
+
+    @Override
+    public Map<String, List<String>> getResponseHeaders() {
+      return dataSource.getResponseHeaders();
     }
   }
 }

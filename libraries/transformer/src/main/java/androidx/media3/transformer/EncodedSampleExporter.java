@@ -16,9 +16,10 @@
 
 package androidx.media3.transformer;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
 import static androidx.media3.decoder.DecoderInputBuffer.BUFFER_REPLACEMENT_MODE_DIRECT;
+import static com.google.common.base.Preconditions.checkNotNull;
 
+import androidx.annotation.IntRange;
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.Format;
@@ -59,9 +60,11 @@ import java.util.concurrent.atomic.AtomicLong;
   // Accessed only on the producer thread.
 
   private long mediaItemOffsetUs;
+  private boolean isLastMediaItem;
   private boolean hasReachedAllocationTarget;
   private long totalBufferSizeBytes;
   @Nullable private DecoderInputBuffer nextInputBuffer;
+  private boolean shouldSkipInputBuffers;
 
   public EncodedSampleExporter(
       Format format,
@@ -83,9 +86,12 @@ import java.util.concurrent.atomic.AtomicLong;
       EditedMediaItem editedMediaItem,
       long durationUs,
       @Nullable Format decodedFormat,
-      boolean isLast) {
+      boolean isLast,
+      @IntRange(from = 0) long positionOffsetUs) {
     mediaItemOffsetUs = nextMediaItemOffsetUs.get();
+    isLastMediaItem = isLast;
     nextMediaItemOffsetUs.addAndGet(durationUs);
+    shouldSkipInputBuffers = false;
   }
 
   @Override
@@ -115,7 +121,20 @@ import java.util.concurrent.atomic.AtomicLong;
       inputEnded = true;
     } else {
       inputBuffer.timeUs += mediaItemOffsetUs + initialTimestampOffsetUs;
-      pendingInputBuffers.add(inputBuffer);
+      if (!isLastMediaItem
+          && inputBuffer.timeUs >= nextMediaItemOffsetUs.get() + initialTimestampOffsetUs) {
+        // Skip buffers exceeding the duration if there is a next MediaItem to avoid timestamps of
+        // the current MediaItem exceeding timestamps of the next MediaItem. Do not skip buffers
+        // otherwise in case the duration is incorrect.
+        shouldSkipInputBuffers = true;
+      }
+      if (shouldSkipInputBuffers) {
+        inputBuffer.clear();
+        inputBuffer.timeUs = 0;
+        availableInputBuffers.add(inputBuffer);
+      } else {
+        pendingInputBuffers.add(inputBuffer);
+      }
     }
     if (!hasReachedAllocationTarget) {
       int bufferCount = availableInputBuffers.size() + pendingInputBuffers.size();

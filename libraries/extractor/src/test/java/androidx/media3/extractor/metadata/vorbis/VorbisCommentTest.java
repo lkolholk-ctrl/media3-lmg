@@ -17,7 +17,6 @@ package androidx.media3.extractor.metadata.vorbis;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import android.os.Parcel;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Metadata;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -29,21 +28,6 @@ import org.junit.runner.RunWith;
 /** Test for {@link VorbisComment}. */
 @RunWith(AndroidJUnit4.class)
 public final class VorbisCommentTest {
-
-  @Test
-  public void parcelable() {
-    VorbisComment vorbisCommentFrameToParcel = new VorbisComment("key", "value");
-
-    Parcel parcel = Parcel.obtain();
-    vorbisCommentFrameToParcel.writeToParcel(parcel, 0);
-    parcel.setDataPosition(0);
-
-    VorbisComment vorbisCommentFrameFromParcel = VorbisComment.CREATOR.createFromParcel(parcel);
-    assertThat(vorbisCommentFrameFromParcel).isEqualTo(vorbisCommentFrameToParcel);
-
-    parcel.recycle();
-  }
-
   @Test
   public void populateMediaMetadata_setsMediaMetadataValues() {
     String title = "the title";
@@ -52,6 +36,7 @@ public final class VorbisCommentTest {
     String albumArtist = "album Artist";
     int trackNumber = 3;
     int totalTracks = 12;
+    String discSubtitle = "disc subtitle";
     int discNumber = 1;
     int totalDiscs = 3;
     String genre = "Metal";
@@ -64,6 +49,7 @@ public final class VorbisCommentTest {
             new VorbisComment("albumartist", albumArtist),
             new VorbisComment("TRACKNUMBER", String.valueOf(trackNumber)),
             new VorbisComment("TOTALTRACKS", String.valueOf(totalTracks)),
+            new VorbisComment("DISCSUBTITLE", discSubtitle),
             new VorbisComment("DISCNUMBER", String.valueOf(discNumber)),
             new VorbisComment("TOTALDISCS", String.valueOf(totalDiscs)),
             new VorbisComment("GENRE", genre),
@@ -81,6 +67,7 @@ public final class VorbisCommentTest {
     assertThat(mediaMetadata.albumArtist.toString()).isEqualTo(albumArtist);
     assertThat(mediaMetadata.trackNumber).isEqualTo(trackNumber);
     assertThat(mediaMetadata.totalTrackCount).isEqualTo(totalTracks);
+    assertThat(mediaMetadata.discSubtitle.toString()).isEqualTo(discSubtitle);
     assertThat(mediaMetadata.discNumber).isEqualTo(discNumber);
     assertThat(mediaMetadata.totalDiscCount).isEqualTo(totalDiscs);
     assertThat(mediaMetadata.genre.toString()).isEqualTo(genre);

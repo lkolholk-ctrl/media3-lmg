@@ -16,15 +16,17 @@
 
 package androidx.media3.test.utils.robolectric;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
-import static androidx.media3.common.util.Assertions.checkState;
 import static androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import android.os.Looper;
 import androidx.annotation.Nullable;
+import androidx.media3.common.C;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.Timeline;
+import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.ConditionVariable;
 import androidx.media3.common.util.HandlerWrapper;
 import androidx.media3.common.util.NullableType;
@@ -36,7 +38,9 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.LoadEventInfo;
 import androidx.media3.exoplayer.source.MediaLoadData;
 import androidx.media3.test.utils.ThreadTestUtil;
+import androidx.media3.transformer.CompositionPlayer;
 import com.google.common.base.Supplier;
+import com.google.errorprone.annotations.InlineMe;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -78,9 +82,10 @@ public final class TestPlayerRunHelper {
    * not be re-used.
    */
   public static class PlayerRunResult {
-    private final Player player;
-    private final boolean throwNonFatalErrors;
 
+    protected final Player player;
+    protected final boolean throwNonFatalErrors;
+    protected final long timeoutMs;
     protected final boolean playBeforeWaiting;
 
     protected boolean hasBeenUsed;
@@ -95,14 +100,18 @@ public final class TestPlayerRunHelper {
      *     AnalyticsListener}.
      */
     // This constructor is deliberately private to prevent subclassing outside TestPlayerRunHelper.
-    private PlayerRunResult(Player player, boolean playBeforeWaiting, boolean throwNonFatalErrors) {
+    private PlayerRunResult(
+        Player player, boolean playBeforeWaiting, boolean throwNonFatalErrors, long timeoutMs) {
       verifyMainTestThread(player);
       if (player instanceof ExoPlayer) {
         verifyPlaybackThreadIsAlive((ExoPlayer) player);
+      } else if (player instanceof CompositionPlayer) {
+        verifyPlaybackThreadIsAlive((CompositionPlayer) player);
       }
       this.player = player;
       this.playBeforeWaiting = playBeforeWaiting;
       this.throwNonFatalErrors = throwNonFatalErrors;
+      this.timeoutMs = timeoutMs;
     }
 
     /**
@@ -113,8 +122,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@linkplain RobolectricUtil#DEFAULT_TIMEOUT_MS default
-     *     timeout} is exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public final void untilState(@Player.State int expectedState)
         throws PlaybackException, TimeoutException {
@@ -129,8 +139,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@linkplain RobolectricUtil#DEFAULT_TIMEOUT_MS default
-     *     timeout} is exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public final void untilPlayWhenReadyIs(boolean expectedPlayWhenReady)
         throws PlaybackException, TimeoutException {
@@ -145,12 +156,30 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@linkplain RobolectricUtil#DEFAULT_TIMEOUT_MS default
-     *     timeout} is exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public final void untilLoadingIs(boolean expectedIsLoading)
         throws PlaybackException, TimeoutException {
       runUntil(() -> player.isLoading() == expectedIsLoading);
+    }
+
+    /**
+     * Runs tasks of the main {@link Looper} until {@link Player#isPlayingAd()} ()} matches the
+     * expected value or an error occurs.
+     *
+     * @throws PlaybackException If a playback error occurs.
+     * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
+     *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
+     *     Throwable#addSuppressed(Throwable)}).
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
+     */
+    public final void untilPlayingAdIs(boolean expectedIsPlayingAd)
+        throws PlaybackException, TimeoutException {
+      runUntil(() -> player.isPlayingAd() == expectedIsPlayingAd);
     }
 
     /**
@@ -160,8 +189,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public final Timeline untilTimelineChanges() throws PlaybackException, TimeoutException {
       AtomicReference<@NullableType Timeline> receivedTimeline = new AtomicReference<>();
@@ -189,8 +219,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public final void untilTimelineChangesTo(Timeline expectedTimeline)
         throws PlaybackException, TimeoutException {
@@ -206,8 +237,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public final void untilPositionDiscontinuityWithReason(
         @Player.DiscontinuityReason int expectedReason) throws PlaybackException, TimeoutException {
@@ -236,13 +268,14 @@ public final class TestPlayerRunHelper {
      * <p>Non-fatal errors are always ignored.
      *
      * @return The raised {@link PlaybackException}.
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public PlaybackException untilPlayerError() throws TimeoutException {
       checkState(!hasBeenUsed);
       hasBeenUsed = true;
-      runMainLooperUntil(() -> player.getPlayerError() != null);
+      runMainLooperUntil(() -> player.getPlayerError() != null, timeoutMs, Clock.DEFAULT);
       return checkNotNull(player.getPlayerError());
     }
 
@@ -254,8 +287,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public void untilFirstFrameIsRendered() throws PlaybackException, TimeoutException {
       AtomicBoolean receivedFirstFrameRenderedCallback = new AtomicBoolean(false);
@@ -275,6 +309,56 @@ public final class TestPlayerRunHelper {
     }
 
     /**
+     * Runs tasks of the {@linkplain Looper#getMainLooper() main looper} until all pending tasks in
+     * {@code targetLooper} have been handled and have propagated any updates to the main looper.
+     *
+     * <p>Both fatal and non-fatal errors are always ignored.
+     *
+     * @param clock The player's {@link Clock}.
+     * @param targetLooper The looper whose pending tasks to handle.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
+     */
+    public void untilPendingCommandsAreFullyHandled(Clock clock, Looper targetLooper)
+        throws TimeoutException {
+      checkState(!hasBeenUsed);
+      hasBeenUsed = true;
+
+      if (playBeforeWaiting) {
+        player.play();
+      }
+
+      AtomicBoolean receivedMessageCallback = new AtomicBoolean();
+      HandlerWrapper targetHandler = clock.createHandler(targetLooper, /* callback= */ null);
+      HandlerWrapper mainHandler =
+          clock.createHandler(Looper.getMainLooper(), /* callback= */ null);
+
+      // Post on the target thread to get behind all already pending messages on that thread.
+      // Then post on the target thread again to get behind all immediate messages triggered by
+      // these messages and post back to the main thread to get behind all main thread updates
+      // triggered by those messages.
+      targetHandler.post(
+          () ->
+              targetHandler.post(() -> mainHandler.post(() -> receivedMessageCallback.set(true))));
+
+      runMainLooperUntil(receivedMessageCallback::get, timeoutMs, Clock.DEFAULT);
+    }
+
+    /**
+     * Returns a new instance where the {@code untilXXX(...)} methods use the given timeout.
+     *
+     * <p>If not set, the default timeout is {@link RobolectricUtil#DEFAULT_TIMEOUT_MS}.
+     *
+     * @param timeoutMs The timeout in milliseconds.
+     */
+    public PlayerRunResult withTimeoutMs(long timeoutMs) {
+      checkState(!hasBeenUsed);
+      hasBeenUsed = true;
+      return new PlayerRunResult(player, playBeforeWaiting, throwNonFatalErrors, timeoutMs);
+    }
+
+    /**
      * Returns a new instance where the {@code untilXXX(...)} methods ignore non-fatal errors.
      *
      * <p>A fatal error is defined as an error that is passed to {@link
@@ -285,7 +369,8 @@ public final class TestPlayerRunHelper {
     public PlayerRunResult ignoringNonFatalErrors() {
       checkState(!hasBeenUsed);
       hasBeenUsed = true;
-      return new PlayerRunResult(player, playBeforeWaiting, /* throwNonFatalErrors= */ false);
+      return new PlayerRunResult(
+          player, playBeforeWaiting, /* throwNonFatalErrors= */ false, timeoutMs);
     }
 
     /** Runs the main {@link Looper} until {@code predicate} returns true or an error occurs. */
@@ -303,7 +388,8 @@ public final class TestPlayerRunHelper {
         player.play();
       }
       try {
-        runMainLooperUntil(() -> predicate.get() || errorListener.hasFatalError());
+        runMainLooperUntil(
+            () -> predicate.get() || errorListener.hasFatalError(), timeoutMs, Clock.DEFAULT);
       } finally {
         player.removeListener(errorListener);
         if (player instanceof ExoPlayer) {
@@ -323,8 +409,8 @@ public final class TestPlayerRunHelper {
     private final ExoPlayer player;
 
     private ExoPlayerRunResult(
-        ExoPlayer player, boolean playBeforeWaiting, boolean throwNonFatalErrors) {
-      super(player, playBeforeWaiting, throwNonFatalErrors);
+        ExoPlayer player, boolean playBeforeWaiting, boolean throwNonFatalErrors, long timeoutMs) {
+      super(player, playBeforeWaiting, throwNonFatalErrors, timeoutMs);
       this.player = player;
     }
 
@@ -341,8 +427,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public void untilSleepingForOffloadBecomes(boolean expectedSleepingForOffload)
         throws PlaybackException, TimeoutException {
@@ -365,8 +452,79 @@ public final class TestPlayerRunHelper {
     }
 
     /**
-     * Runs tasks of the main {@link Looper} until playback reaches the specified position or an
-     * error occurs.
+     * Runs tasks of the main {@link Looper} until {@link Player#getCurrentMediaItemIndex()} equals
+     * the specified index or an error occurs.
+     *
+     * <p>Use {@link #untilStartOfMediaItem(int)} instead if the test needs to advance the player
+     * until the internal playback thread reaches the start of the media item exactly.
+     *
+     * @throws PlaybackException If a playback error occurs.
+     * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
+     *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
+     *     Throwable#addSuppressed(Throwable)}).
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
+     */
+    public void untilMediaItemIndex(int mediaItemIndex) throws PlaybackException, TimeoutException {
+      untilPositionAtLeast(mediaItemIndex, /* positionMs= */ 0);
+    }
+
+    /**
+     * Runs tasks of the main {@link Looper} until {@link Player#getContentPosition()} reaches at
+     * least the specified position in the current media item, or an error occurs.
+     *
+     * <p>Use {@link #untilPosition(int, long)} instead if the test needs to advance the player
+     * until the internal playback thread reaches a specific position exactly.
+     *
+     * @throws PlaybackException If a playback error occurs.
+     * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
+     *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
+     *     Throwable#addSuppressed(Throwable)}).
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
+     */
+    public void untilPositionAtLeast(long positionMs) throws PlaybackException, TimeoutException {
+      untilPositionAtLeast(player.getCurrentMediaItemIndex(), positionMs);
+    }
+
+    /**
+     * Runs tasks of the main {@link Looper} until {@link Player#getCurrentMediaItemIndex()} equals
+     * the specified index and {@link Player#getContentPosition()} reaches at least the specified
+     * position, or an error occurs.
+     *
+     * <p>Use {@link #untilPosition(int, long)} instead if the test needs to advance the player
+     * until the internal playback thread reaches a specific position exactly.
+     *
+     * @throws PlaybackException If a playback error occurs.
+     * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
+     *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
+     *     Throwable#addSuppressed(Throwable)}).
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
+     */
+    public void untilPositionAtLeast(int mediaItemIndex, long positionMs)
+        throws PlaybackException, TimeoutException {
+      player
+          .createMessage((messageType, message) -> {})
+          .setPosition(mediaItemIndex, positionMs)
+          .setLooper(Looper.getMainLooper())
+          .send();
+      player.play();
+      runUntil(
+          () ->
+              player.getCurrentMediaItemIndex() == mediaItemIndex
+                  && player.getContentPosition() >= positionMs);
+    }
+
+    /**
+     * Runs tasks of the main {@link Looper} until the internal playback thread reaches the
+     * specified position or an error occurs.
+     *
+     * <p>Use {@link #untilPositionAtLeast} instead if the test needs to advance the player until
+     * the publicly visible position reaches a specified value.
      *
      * <p>The playback thread is automatically blocked from making further progress after reaching
      * this position and will only be unblocked by other {@code run()/play().untilXXX(...)} method
@@ -377,8 +535,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public void untilPosition(int mediaItemIndex, long positionMs)
         throws PlaybackException, TimeoutException {
@@ -408,15 +567,19 @@ public final class TestPlayerRunHelper {
           .setPosition(mediaItemIndex, positionMs)
           .send();
       player.play();
-      runMainLooperUntil(() -> messageHandled.get() || player.getPlayerError() != null);
+      runMainLooperUntil(
+          () -> messageHandled.get() || player.getPlayerError() != null, timeoutMs, Clock.DEFAULT);
       if (player.getPlayerError() != null) {
         throw new IllegalStateException(player.getPlayerError());
       }
     }
 
     /**
-     * Runs tasks of the main {@link Looper} until playback reaches the specified media item or a
-     * playback error occurs.
+     * Runs tasks of the main {@link Looper} until the internal playback thread reaches the start of
+     * the specified media item or a playback error occurs.
+     *
+     * <p>Use {@link #untilMediaItemIndex(int)} instead if the test needs to advance the player
+     * until the publicly visible media item index reaches a specified value.
      *
      * <p>The playback thread is automatically blocked from making further progress after reaching
      * the media item and will only be unblocked by other {@code run()/play().untilXXX(...)} method
@@ -428,8 +591,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public void untilStartOfMediaItem(int mediaItemIndex)
         throws PlaybackException, TimeoutException {
@@ -442,21 +606,12 @@ public final class TestPlayerRunHelper {
      *
      * <p>Both fatal and non-fatal errors are always ignored.
      *
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public void untilPendingCommandsAreFullyHandled() throws TimeoutException {
-      checkState(!hasBeenUsed);
-      hasBeenUsed = true;
-      // Send message to player that will arrive after all other pending commands. Thus, the message
-      // execution on the app thread will also happen after all other pending command
-      // acknowledgements have arrived back on the app thread.
-      AtomicBoolean receivedMessageCallback = new AtomicBoolean(false);
-      player
-          .createMessage((type, data) -> receivedMessageCallback.set(true))
-          .setLooper(Util.getCurrentOrMainLooper())
-          .send();
-      runMainLooperUntil(receivedMessageCallback::get);
+      this.untilPendingCommandsAreFullyHandled(player.getClock(), player.getPlaybackLooper());
     }
 
     /**
@@ -478,8 +633,9 @@ public final class TestPlayerRunHelper {
      * @throws IllegalStateException If non-fatal playback errors occur, and aren't {@linkplain
      *     #ignoringNonFatalErrors() ignored} (the non-fatal exceptions will be attached with {@link
      *     Throwable#addSuppressed(Throwable)}).
-     * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
-     *     exceeded.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
      */
     public void untilBackgroundThreadCondition(Supplier<Boolean> backgroundThreadCondition)
         throws PlaybackException, TimeoutException {
@@ -504,11 +660,94 @@ public final class TestPlayerRunHelper {
       runUntil(conditionTrue::get);
     }
 
+    /**
+     * Runs tasks of the main {@link Looper} until the player has fully buffered its entire playlist
+     * and stopped reporting {@link Player#isLoading()}.
+     *
+     * <p>Note that this method won't succeed if the player is configured with a {@link
+     * androidx.media3.exoplayer.LoadControl} that prevents loading the playlist fully before
+     * playback resumes.
+     *
+     * <p>If a {@link Player.RepeatMode} setting results in an endless playlist, this method only
+     * waits until all items have been buffered at least once.
+     *
+     * @throws PlaybackException If a playback error occurs.
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
+     */
+    public void untilFullyBuffered() throws PlaybackException, TimeoutException {
+      untilBackgroundThreadCondition(
+          () -> {
+            long remainingDurationMs = getRemainingPlaybackDuration(player);
+            return remainingDurationMs != C.TIME_UNSET
+                && player.getTotalBufferedDuration() >= remainingDurationMs
+                && !player.isLoading();
+          });
+    }
+
+    @Override
+    public ExoPlayerRunResult withTimeoutMs(long timeoutMs) {
+      checkState(!hasBeenUsed);
+      hasBeenUsed = true;
+      return new ExoPlayerRunResult(player, playBeforeWaiting, throwNonFatalErrors, timeoutMs);
+    }
+
     @Override
     public ExoPlayerRunResult ignoringNonFatalErrors() {
       checkState(!hasBeenUsed);
       hasBeenUsed = true;
-      return new ExoPlayerRunResult(player, playBeforeWaiting, /* throwNonFatalErrors= */ false);
+      return new ExoPlayerRunResult(
+          player, playBeforeWaiting, /* throwNonFatalErrors= */ false, timeoutMs);
+    }
+  }
+
+  /**
+   * A {@link CompositionPlayer} specific subclass of {@link PlayerRunResult}, giving access to
+   * conditions that only make sense for {@link CompositionPlayer}.
+   */
+  public static final class CompositionPlayerRunResult extends PlayerRunResult {
+
+    private final CompositionPlayer player;
+
+    private CompositionPlayerRunResult(
+        CompositionPlayer player,
+        boolean playBeforeWaiting,
+        boolean throwNonFatalErrors,
+        long timeoutMs) {
+      super(player, playBeforeWaiting, throwNonFatalErrors, timeoutMs);
+      this.player = player;
+    }
+
+    /**
+     * Runs tasks of the main {@link Looper} until the player completely handled all previously
+     * issued commands on the internal playback thread.
+     *
+     * <p>Both fatal and non-fatal errors are always ignored.
+     *
+     * @throws TimeoutException If the timeout is exceeded. The timeout is {@link
+     *     RobolectricUtil#DEFAULT_TIMEOUT_MS} by default, or a specific value if this instance is
+     *     created via {@link #withTimeoutMs(long)}.
+     */
+    public void untilPendingCommandsAreFullyHandled() throws TimeoutException {
+      this.untilPendingCommandsAreFullyHandled(
+          player.getClock(), checkNotNull(player.getPlaybackLooper()));
+    }
+
+    @Override
+    public CompositionPlayerRunResult withTimeoutMs(long timeoutMs) {
+      checkState(!hasBeenUsed);
+      hasBeenUsed = true;
+      return new CompositionPlayerRunResult(
+          player, playBeforeWaiting, throwNonFatalErrors, timeoutMs);
+    }
+
+    @Override
+    public CompositionPlayerRunResult ignoringNonFatalErrors() {
+      checkState(!hasBeenUsed);
+      hasBeenUsed = true;
+      return new CompositionPlayerRunResult(
+          player, playBeforeWaiting, /* throwNonFatalErrors= */ false, timeoutMs);
     }
   }
 
@@ -518,9 +757,12 @@ public final class TestPlayerRunHelper {
    * <p>Callers can use the returned {@link PlayerRunResult} to run the main {@link Looper} until
    * certain conditions are met.
    */
-  public static PlayerRunResult run(Player player) {
+  public static PlayerRunResult advance(Player player) {
     return new PlayerRunResult(
-        player, /* playBeforeWaiting= */ false, /* throwNonFatalErrors= */ true);
+        player,
+        /* playBeforeWaiting= */ false,
+        /* throwNonFatalErrors= */ true,
+        RobolectricUtil.DEFAULT_TIMEOUT_MS);
   }
 
   /**
@@ -529,9 +771,48 @@ public final class TestPlayerRunHelper {
    * <p>Callers can use the returned {@link ExoPlayerRunResult} to run the main {@link Looper} until
    * certain conditions are met.
    */
-  public static ExoPlayerRunResult run(ExoPlayer player) {
+  public static ExoPlayerRunResult advance(ExoPlayer player) {
     return new ExoPlayerRunResult(
-        player, /* playBeforeWaiting= */ false, /* throwNonFatalErrors= */ true);
+        player,
+        /* playBeforeWaiting= */ false,
+        /* throwNonFatalErrors= */ true,
+        RobolectricUtil.DEFAULT_TIMEOUT_MS);
+  }
+
+  /**
+   * Entry point for a fluent "wait for condition X" assertion.
+   *
+   * <p>Callers can use the returned {@link CompositionPlayerRunResult} to run the main {@link
+   * Looper} until certain conditions are met.
+   */
+  public static CompositionPlayerRunResult advance(CompositionPlayer player) {
+    return new CompositionPlayerRunResult(
+        player,
+        /* playBeforeWaiting= */ false,
+        /* throwNonFatalErrors= */ true,
+        RobolectricUtil.DEFAULT_TIMEOUT_MS);
+  }
+
+  /**
+   * @deprecated Use {@link #advance(Player)} instead.
+   */
+  @InlineMe(
+      replacement = "TestPlayerRunHelper.advance(player)",
+      imports = "androidx.media3.test.utils.robolectric.TestPlayerRunHelper")
+  @Deprecated
+  public static PlayerRunResult run(Player player) {
+    return advance(player);
+  }
+
+  /**
+   * @deprecated Use {@link #advance(ExoPlayer)} instead.
+   */
+  @InlineMe(
+      replacement = "TestPlayerRunHelper.advance(player)",
+      imports = "androidx.media3.test.utils.robolectric.TestPlayerRunHelper")
+  @Deprecated
+  public static ExoPlayerRunResult run(ExoPlayer player) {
+    return advance(player);
   }
 
   /**
@@ -540,12 +821,15 @@ public final class TestPlayerRunHelper {
    * <p>Callers can use the returned {@link PlayerRunResult} to run the main {@link Looper} until
    * certain conditions are met.
    *
-   * <p>This is the same as {@link #run(Player)} but ensures {@link Player#play()} is called before
-   * waiting in subsequent {@code untilXXX(...)} methods.
+   * <p>This is the same as {@link #advance(Player)} but ensures {@link Player#play()} is called
+   * before waiting in subsequent {@code untilXXX(...)} methods.
    */
   public static PlayerRunResult play(Player player) {
     return new PlayerRunResult(
-        player, /* playBeforeWaiting= */ true, /* throwNonFatalErrors= */ true);
+        player,
+        /* playBeforeWaiting= */ true,
+        /* throwNonFatalErrors= */ true,
+        RobolectricUtil.DEFAULT_TIMEOUT_MS);
   }
 
   /**
@@ -554,12 +838,32 @@ public final class TestPlayerRunHelper {
    * <p>Callers can use the returned {@link ExoPlayerRunResult} to run the main {@link Looper} until
    * certain conditions are met.
    *
-   * <p>This is the same as {@link #run(ExoPlayer)} but ensures {@link ExoPlayer#play()} is called
-   * before waiting in subsequent {@code untilXXX(...)} methods.
+   * <p>This is the same as {@link #advance(ExoPlayer)} but ensures {@link ExoPlayer#play()} is
+   * called before waiting in subsequent {@code untilXXX(...)} methods.
    */
   public static ExoPlayerRunResult play(ExoPlayer player) {
     return new ExoPlayerRunResult(
-        player, /* playBeforeWaiting= */ true, /* throwNonFatalErrors= */ true);
+        player,
+        /* playBeforeWaiting= */ true,
+        /* throwNonFatalErrors= */ true,
+        RobolectricUtil.DEFAULT_TIMEOUT_MS);
+  }
+
+  /**
+   * Entry point for a fluent "start playback and wait for condition X" assertion.
+   *
+   * <p>Callers can use the returned {@link CompositionPlayerRunResult} to run the main {@link
+   * Looper} until certain conditions are met.
+   *
+   * <p>This is the same as {@link #advance(CompositionPlayer)} but ensures {@link
+   * CompositionPlayer#play()} is called before waiting in subsequent {@code untilXXX(...)} methods.
+   */
+  public static CompositionPlayerRunResult play(CompositionPlayer player) {
+    return new CompositionPlayerRunResult(
+        player,
+        /* playBeforeWaiting= */ true,
+        /* throwNonFatalErrors= */ true,
+        RobolectricUtil.DEFAULT_TIMEOUT_MS);
   }
 
   /**
@@ -569,7 +873,8 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(Player)} and {@link PlayerRunResult#untilState(int)}.
+   * <p>New usages should prefer {@link #advance(Player)} and {@link
+   * PlayerRunResult#untilState(int)}.
    *
    * @param player The {@link Player}.
    * @param expectedState The expected {@link Player.State}.
@@ -579,7 +884,7 @@ public final class TestPlayerRunHelper {
   public static void runUntilPlaybackState(Player player, @Player.State int expectedState)
       throws TimeoutException {
     try {
-      run(player).untilState(expectedState);
+      advance(player).untilState(expectedState);
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
@@ -592,7 +897,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(Player)} and {@link
+   * <p>New usages should prefer {@link #advance(Player)} and {@link
    * PlayerRunResult#untilPlayWhenReadyIs(boolean)}.
    *
    * @param player The {@link Player}.
@@ -603,7 +908,7 @@ public final class TestPlayerRunHelper {
   public static void runUntilPlayWhenReady(Player player, boolean expectedPlayWhenReady)
       throws TimeoutException {
     try {
-      run(player).untilPlayWhenReadyIs(expectedPlayWhenReady);
+      advance(player).untilPlayWhenReadyIs(expectedPlayWhenReady);
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
@@ -616,7 +921,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(Player)} and {@link
+   * <p>New usages should prefer {@link #advance(Player)} and {@link
    * PlayerRunResult#untilLoadingIs(boolean)}.
    *
    * @param player The {@link Player}.
@@ -627,7 +932,7 @@ public final class TestPlayerRunHelper {
   public static void runUntilIsLoading(Player player, boolean expectedIsLoading)
       throws TimeoutException {
     try {
-      run(player).untilLoadingIs(expectedIsLoading);
+      advance(player).untilLoadingIs(expectedIsLoading);
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
@@ -640,7 +945,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(Player)} and {@link
+   * <p>New usages should prefer {@link #advance(Player)} and {@link
    * PlayerRunResult#untilTimelineChangesTo(Timeline)}.
    *
    * @param player The {@link Player}.
@@ -651,7 +956,7 @@ public final class TestPlayerRunHelper {
   public static void runUntilTimelineChanged(Player player, Timeline expectedTimeline)
       throws TimeoutException {
     try {
-      run(player).untilTimelineChangesTo(expectedTimeline);
+      advance(player).untilTimelineChangesTo(expectedTimeline);
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
@@ -663,7 +968,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(Player)} and {@link
+   * <p>New usages should prefer {@link #advance(Player)} and {@link
    * PlayerRunResult#untilTimelineChanges()}.
    *
    * @param player The {@link Player}.
@@ -673,7 +978,7 @@ public final class TestPlayerRunHelper {
    */
   public static Timeline runUntilTimelineChanged(Player player) throws TimeoutException {
     try {
-      return run(player).untilTimelineChanges();
+      return advance(player).untilTimelineChanges();
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
@@ -687,7 +992,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(Player)} and {@link
+   * <p>New usages should prefer {@link #advance(Player)} and {@link
    * PlayerRunResult#untilPositionDiscontinuityWithReason(int)}.
    *
    * @param player The {@link Player}.
@@ -698,7 +1003,7 @@ public final class TestPlayerRunHelper {
   public static void runUntilPositionDiscontinuity(
       Player player, @Player.DiscontinuityReason int expectedReason) throws TimeoutException {
     try {
-      run(player).untilPositionDiscontinuityWithReason(expectedReason);
+      advance(player).untilPositionDiscontinuityWithReason(expectedReason);
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
@@ -709,7 +1014,7 @@ public final class TestPlayerRunHelper {
    *
    * <p>Non-fatal errors are ignored.
    *
-   * <p>New usages should prefer {@link #run(ExoPlayer)} and {@link
+   * <p>New usages should prefer {@link #advance(ExoPlayer)} and {@link
    * ExoPlayerRunResult#untilPlayerError()}.
    *
    * @param player The {@link Player}.
@@ -718,7 +1023,7 @@ public final class TestPlayerRunHelper {
    *     exceeded.
    */
   public static ExoPlaybackException runUntilError(ExoPlayer player) throws TimeoutException {
-    return run(player).untilPlayerError();
+    return advance(player).untilPlayerError();
   }
 
   /**
@@ -728,7 +1033,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(ExoPlayer)} and {@link
+   * <p>New usages should prefer {@link #advance(ExoPlayer)} and {@link
    * ExoPlayerRunResult#untilSleepingForOffloadBecomes(boolean)}.
    *
    * @param player The {@link Player}.
@@ -739,7 +1044,7 @@ public final class TestPlayerRunHelper {
   public static void runUntilSleepingForOffload(ExoPlayer player, boolean expectedSleepForOffload)
       throws TimeoutException {
     try {
-      run(player).untilSleepingForOffloadBecomes(expectedSleepForOffload);
+      advance(player).untilSleepingForOffloadBecomes(expectedSleepForOffload);
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
@@ -752,7 +1057,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(Player)} and {@link
+   * <p>New usages should prefer {@link #advance(Player)} and {@link
    * PlayerRunResult#untilFirstFrameIsRendered()}.
    *
    * @param player The {@link Player}.
@@ -761,15 +1066,19 @@ public final class TestPlayerRunHelper {
    */
   public static void runUntilRenderedFirstFrame(ExoPlayer player) throws TimeoutException {
     try {
-      run(player).untilFirstFrameIsRendered();
+      advance(player).untilFirstFrameIsRendered();
     } catch (PlaybackException e) {
       throw new IllegalStateException(e);
     }
   }
 
   /**
-   * Calls {@link Player#play()} then runs tasks of the main {@link Looper} until the {@code player}
-   * reaches the specified position or an error occurs.
+   * Calls {@link Player#play()} then runs tasks of the main {@link Looper} until the internal
+   * playback thread of the {@code player} reaches the specified position or an error occurs.
+   *
+   * <p>Use {@link #advance(ExoPlayer)} and {@link ExoPlayerRunResult#untilPositionAtLeast} instead
+   * if the test needs to advance the player until the publicly visible position reaches a specified
+   * value.
    *
    * <p>The playback thread is automatically blocked from making further progress after reaching
    * this position and will only be unblocked by other {@code runUntil/playUntil...} methods, custom
@@ -779,7 +1088,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(ExoPlayer)} and {@link
+   * <p>New usages should prefer {@link #advance(ExoPlayer)} and {@link
    * ExoPlayerRunResult#untilPosition(int, long)}.
    *
    * @param player The {@link Player}.
@@ -798,8 +1107,13 @@ public final class TestPlayerRunHelper {
   }
 
   /**
-   * Calls {@link Player#play()} then runs tasks of the main {@link Looper} until the {@code player}
-   * reaches the specified media item or a playback error occurs.
+   * Calls {@link Player#play()} then runs tasks of the main {@link Looper} until the internal
+   * playback thread of the {@code player} reaches the start of the specified media item or a
+   * playback error occurs.
+   *
+   * <p>Use {@link #advance(ExoPlayer)} and {@link ExoPlayerRunResult#untilMediaItemIndex(int)}
+   * instead if the test needs to advance the player until the publicly visible media item index
+   * reaches a specified value.
    *
    * <p>The playback thread is automatically blocked from making further progress after reaching the
    * media item and will only be unblocked by other {@code runUntil/playUntil...} methods, custom
@@ -809,7 +1123,7 @@ public final class TestPlayerRunHelper {
    * <p>If a fatal {@link PlaybackException} occurs it will be thrown wrapped in an {@link
    * IllegalStateException}.
    *
-   * <p>New usages should prefer {@link #run(ExoPlayer)} and {@link
+   * <p>New usages should prefer {@link #advance(ExoPlayer)} and {@link
    * ExoPlayerRunResult#untilStartOfMediaItem(int)}.
    *
    * @param player The {@link Player}.
@@ -832,13 +1146,13 @@ public final class TestPlayerRunHelper {
    *
    * <p>Both fatal and non-fatal errors are ignored.
    *
-   * @param player The {@link Player}.
+   * @param player The {@link ExoPlayer}.
    * @throws TimeoutException If the {@link RobolectricUtil#DEFAULT_TIMEOUT_MS default timeout} is
    *     exceeded.
    */
   public static void runUntilPendingCommandsAreFullyHandled(ExoPlayer player)
       throws TimeoutException {
-    run(player).untilPendingCommandsAreFullyHandled();
+    advance(player).untilPendingCommandsAreFullyHandled();
   }
 
   private static void verifyMainTestThread(Player player) {
@@ -852,6 +1166,48 @@ public final class TestPlayerRunHelper {
     checkState(
         player.getPlaybackLooper().getThread().isAlive(),
         "Playback thread is not alive, has the player been released?");
+  }
+
+  private static void verifyPlaybackThreadIsAlive(CompositionPlayer player) {
+    checkNotNull(player.getPlaybackLooper());
+    checkState(
+        player.getPlaybackLooper().getThread().isAlive(),
+        "Playback thread is not alive, has the player been released?");
+  }
+
+  private static long getRemainingPlaybackDuration(Player player) {
+    if (player.getCurrentTimeline().isEmpty()) {
+      return 0;
+    }
+    int currentMediaItemIndex = player.getCurrentMediaItemIndex();
+    long currentMediaItemDurationMs = getMediaItemDurationMs(player, currentMediaItemIndex);
+    if (currentMediaItemDurationMs == C.TIME_UNSET) {
+      return C.TIME_UNSET;
+    }
+    long totalDurationMs = currentMediaItemDurationMs - player.getCurrentPosition();
+    int mediaItemIndex = currentMediaItemIndex;
+    while ((mediaItemIndex = getNextMediaItemIndex(player, mediaItemIndex)) != C.INDEX_UNSET
+        && mediaItemIndex != currentMediaItemIndex) {
+      currentMediaItemDurationMs = getMediaItemDurationMs(player, mediaItemIndex);
+      if (currentMediaItemDurationMs == C.TIME_UNSET) {
+        return C.TIME_UNSET;
+      }
+      totalDurationMs += currentMediaItemDurationMs;
+    }
+    return totalDurationMs;
+  }
+
+  private static long getMediaItemDurationMs(Player player, int mediaItemIndex) {
+    return player
+        .getCurrentTimeline()
+        .getWindow(mediaItemIndex, new Timeline.Window())
+        .getDurationMs();
+  }
+
+  private static int getNextMediaItemIndex(Player player, int mediaItemIndex) {
+    return player
+        .getCurrentTimeline()
+        .getNextWindowIndex(mediaItemIndex, player.getRepeatMode(), player.getShuffleModeEnabled());
   }
 
   /**

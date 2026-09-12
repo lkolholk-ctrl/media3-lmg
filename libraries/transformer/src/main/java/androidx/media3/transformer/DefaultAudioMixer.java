@@ -16,9 +16,15 @@
 package androidx.media3.transformer;
 
 import static androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER;
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkState;
+import static androidx.media3.common.audio.ChannelMixingMatrix.createForConstantGain;
+import static androidx.media3.common.audio.ChannelMixingMatrix.createForConstantPower;
 import static androidx.media3.common.util.Util.contains;
+import static androidx.media3.effect.DebugTraceUtil.COMPONENT_AUDIO_MIXER;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_ACCEPTED_INPUT;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_OUTPUT_ENDED;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_RELEASE;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 
@@ -51,13 +57,36 @@ public final class DefaultAudioMixer implements AudioMixer {
   public static final class Factory implements AudioMixer.Factory {
     private final boolean outputSilenceWithNoSources;
     private final boolean clipFloatOutput;
+    private final boolean useConstantPowerMixingMatrices;
 
     /**
-     * Creates an instance. This is equivalent to {@link #Factory(boolean, boolean) new
-     * Factory(false, true)}.
+     * Creates an instance. This is equivalent to {@link #Factory(boolean, boolean, boolean) new
+     * Factory(false, true, false)}.
      */
     public Factory() {
-      this(/* outputSilenceWithNoSources= */ false, /* clipFloatOutput= */ true);
+      this(
+          /* outputSilenceWithNoSources= */ false,
+          /* clipFloatOutput= */ true,
+          /* useConstantPowerMixingMatrices= */ false);
+    }
+
+    /**
+     * Creates an instance. This is equivalent to {@link #Factory(boolean, boolean, boolean) new
+     * Factory(outputSilenceWithNoSources, clipFloatOutput, false)}.
+     *
+     * @param outputSilenceWithNoSources Whether to {@linkplain #getOutput() output} silence when
+     *     there are no {@linkplain #addSource sources}.
+     * @param clipFloatOutput Whether to clip the output signal to be in the [-1.0, 1.0] range if
+     *     the output encoding is {@link C#ENCODING_PCM_FLOAT}. This parameter is ignored for
+     *     non-float output signals. For float output signals, non-float input signals are converted
+     *     to float signals in the [-1.0, 1.0] range. All input signals (float or non-float) are
+     *     then added and the result is clipped if and only if {@code clipFloatOutput} is true.
+     */
+    public Factory(boolean outputSilenceWithNoSources, boolean clipFloatOutput) {
+      this(
+          /* outputSilenceWithNoSources= */ outputSilenceWithNoSources,
+          /* clipFloatOutput= */ clipFloatOutput,
+          /* useConstantPowerMixingMatrices= */ false);
     }
 
     /**
@@ -70,23 +99,33 @@ public final class DefaultAudioMixer implements AudioMixer {
      *     non-float output signals. For float output signals, non-float input signals are converted
      *     to float signals in the [-1.0, 1.0] range. All input signals (float or non-float) are
      *     then added and the result is clipped if and only if {@code clipFloatOutput} is true.
+     * @param useConstantPowerMixingMatrices Whether to upmix/downmix using {@linkplain
+     *     ChannelMixingMatrix#createForConstantPower(int, int) constant power mixing matrices}. If
+     *     {@code false}, uses {@linkplain ChannelMixingMatrix#createForConstantGain constant gain
+     *     mixing matrices}.
      */
-    public Factory(boolean outputSilenceWithNoSources, boolean clipFloatOutput) {
+    public Factory(
+        boolean outputSilenceWithNoSources,
+        boolean clipFloatOutput,
+        boolean useConstantPowerMixingMatrices) {
       this.outputSilenceWithNoSources = outputSilenceWithNoSources;
       this.clipFloatOutput = clipFloatOutput;
+      this.useConstantPowerMixingMatrices = useConstantPowerMixingMatrices;
     }
 
     @Override
     public DefaultAudioMixer create() {
-      return new DefaultAudioMixer(outputSilenceWithNoSources, clipFloatOutput);
+      return new DefaultAudioMixer(
+          outputSilenceWithNoSources, clipFloatOutput, useConstantPowerMixingMatrices);
     }
   }
 
-  // TODO(b/290002438, b/276734854): Improve buffer management & determine best default size.
+  // TODO: b/290002438, b/276734854 - Improve buffer management & determine best default size.
   private static final int DEFAULT_BUFFER_SIZE_MS = 500;
 
   private final boolean outputSilenceWithNoSources;
   private final boolean clipFloatOutput;
+  private final boolean useConstantPowerMixingMatrices;
   private final SparseArray<SourceInfo> sources;
   private int nextSourceId;
   private AudioFormat outputAudioFormat;
@@ -109,9 +148,15 @@ public final class DefaultAudioMixer implements AudioMixer {
    */
   private long maxPositionOfRemovedSources;
 
-  private DefaultAudioMixer(boolean outputSilenceWithNoSources, boolean clipFloatOutput) {
+  private boolean isEndLogged;
+
+  private DefaultAudioMixer(
+      boolean outputSilenceWithNoSources,
+      boolean clipFloatOutput,
+      boolean useConstantPowerMixingMatrices) {
     this.outputSilenceWithNoSources = outputSilenceWithNoSources;
     this.clipFloatOutput = clipFloatOutput;
+    this.useConstantPowerMixingMatrices = useConstantPowerMixingMatrices;
     sources = new SparseArray<>();
     outputAudioFormat = AudioFormat.NOT_SET;
     bufferSizeFrames = C.LENGTH_UNSET;
@@ -143,7 +188,7 @@ public final class DefaultAudioMixer implements AudioMixer {
     bufferSizeFrames = bufferSizeMs * outputAudioFormat.sampleRate / 1000;
     mixerStartTimeUs = startTimeUs;
     DebugTraceUtil.logEvent(
-        DebugTraceUtil.COMPONENT_AUDIO_MIXER,
+        COMPONENT_AUDIO_MIXER,
         DebugTraceUtil.EVENT_OUTPUT_FORMAT,
         mixerStartTimeUs,
         "%s",
@@ -188,11 +233,13 @@ public final class DefaultAudioMixer implements AudioMixer {
         sourceId,
         new SourceInfo(
             sourceFormat,
-            ChannelMixingMatrix.create(sourceFormat.channelCount, outputAudioFormat.channelCount),
+            useConstantPowerMixingMatrices
+                ? createForConstantPower(sourceFormat.channelCount, outputAudioFormat.channelCount)
+                : createForConstantGain(sourceFormat.channelCount, outputAudioFormat.channelCount),
             startFrameOffset));
 
     DebugTraceUtil.logEvent(
-        DebugTraceUtil.COMPONENT_AUDIO_MIXER,
+        COMPONENT_AUDIO_MIXER,
         DebugTraceUtil.EVENT_REGISTER_NEW_INPUT_STREAM,
         startTimeUs,
         "source(%s):%s",
@@ -223,6 +270,14 @@ public final class DefaultAudioMixer implements AudioMixer {
     maxPositionOfRemovedSources =
         max(maxPositionOfRemovedSources, getSourceById(sourceId).position);
     sources.delete(sourceId);
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_MIXER,
+        DebugTraceUtil.EVENT_INPUT_ENDED,
+        C.TIME_UNSET,
+        "source(%d): endPosition=%d",
+        sourceId,
+        endPosition);
+    maybeLogMixerEnded();
   }
 
   @Override
@@ -268,9 +323,11 @@ public final class DefaultAudioMixer implements AudioMixer {
       mixingBuffer.buffer.reset();
 
       if (source.position == newSourcePosition) {
-        return;
+        break;
       }
     }
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_MIXER, EVENT_ACCEPTED_INPUT, C.TIME_UNSET, "source(%s)", sourceId);
   }
 
   @Override
@@ -302,7 +359,7 @@ public final class DefaultAudioMixer implements AudioMixer {
     outputBuffer = outputBuffer.slice().order(ByteOrder.nativeOrder());
 
     if (newOutputPosition == mixingBuffer.limit) {
-      // TODO(b/264926272): Generalize for >2 mixing buffers.
+      // TODO: b/264926272 - Generalize for >2 mixing buffers.
       mixingBuffers[0] = mixingBuffers[1];
       mixingBuffers[1] = allocateMixingBuffer(mixingBuffers[1].limit);
     }
@@ -311,11 +368,12 @@ public final class DefaultAudioMixer implements AudioMixer {
     updateInputFrameLimit();
 
     DebugTraceUtil.logEvent(
-        DebugTraceUtil.COMPONENT_AUDIO_MIXER,
+        COMPONENT_AUDIO_MIXER,
         DebugTraceUtil.EVENT_PRODUCED_OUTPUT,
         C.TIME_UNSET,
         "bytesOutput=%s",
         outputBuffer.remaining());
+    maybeLogMixerEnded();
     return outputBuffer;
   }
 
@@ -338,6 +396,15 @@ public final class DefaultAudioMixer implements AudioMixer {
     outputPosition = 0;
     endPosition = Long.MAX_VALUE;
     maxPositionOfRemovedSources = outputSilenceWithNoSources ? Long.MAX_VALUE : 0;
+    isEndLogged = false;
+    DebugTraceUtil.logEvent(COMPONENT_AUDIO_MIXER, EVENT_RELEASE, C.TIME_UNSET);
+  }
+
+  private void maybeLogMixerEnded() {
+    if (!isEndLogged && isEnded()) {
+      DebugTraceUtil.logEvent(COMPONENT_AUDIO_MIXER, EVENT_OUTPUT_ENDED, C.TIME_UNSET);
+      isEndLogged = true;
+    }
   }
 
   private void checkStateIsConfigured() {

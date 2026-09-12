@@ -17,7 +17,6 @@ package androidx.media3.session;
 
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
-import static org.robolectric.annotation.GraphicsMode.Mode.NATIVE;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -42,12 +41,11 @@ import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.GraphicsMode;
+import org.robolectric.annotation.Config;
 
 /** Tests for {@link SimpleBitmapLoader}. */
 @SuppressWarnings("deprecation") // Testing deprecated class
 @RunWith(AndroidJUnit4.class)
-@GraphicsMode(value = NATIVE)
 public class SimpleBitmapLoaderTest {
 
   private static final String TEST_IMAGE_PATH = "media/jpeg/non-motion-photo-shortened.jpg";
@@ -69,6 +67,8 @@ public class SimpleBitmapLoaderTest {
         .isTrue();
   }
 
+  // Robolectric BitmapFactory returns non-null Bitmap for invalid data on SDK < 26.
+  @Config(minSdk = 26)
   @Test
   public void loadData_withInvalidData_throwsException() {
     SimpleBitmapLoader bitmapLoader =
@@ -133,6 +133,8 @@ public class SimpleBitmapLoaderTest {
   }
 
   @Test
+  // Robolectric BitmapFactory returns non-null Bitmap for missing file on SDK < 26.
+  @Config(minSdk = 26)
   public void fileUriWithFileNotExisting() throws Exception {
     SimpleBitmapLoader bitmapLoader =
         new SimpleBitmapLoader(MoreExecutors.newDirectExecutorService());

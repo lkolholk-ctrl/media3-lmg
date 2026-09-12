@@ -15,7 +15,11 @@
  */
 package androidx.media3.common.util;
 
-import static androidx.media3.common.util.Util.SDK_INT;
+import static android.os.Build.VERSION.SDK_INT;
+import static androidx.media3.common.util.CodecSpecificDataUtil.calculateMediaCodecDolbyVisionLevel;
+import static androidx.media3.common.util.CodecSpecificDataUtil.h263ConstToLevelNumber;
+import static androidx.media3.common.util.CodecSpecificDataUtil.h263ConstToProfileNumber;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.annotation.SuppressLint;
 import android.media.AudioFormat;
@@ -81,7 +85,9 @@ public final class MediaFormatUtil {
                 getInteger(
                     mediaFormat, MediaFormat.KEY_BIT_RATE, /* defaultValue= */ Format.NO_VALUE))
             .setCodecs(getCodecString(mediaFormat))
-            .setFrameRate(getFrameRate(mediaFormat, /* defaultValue= */ Format.NO_VALUE))
+            .setFrameRate(
+                getFloatFromIntOrFloat(
+                    mediaFormat, MediaFormat.KEY_FRAME_RATE, /* defaultValue= */ Format.NO_VALUE))
             .setWidth(
                 getInteger(mediaFormat, MediaFormat.KEY_WIDTH, /* defaultValue= */ Format.NO_VALUE))
             .setHeight(
@@ -100,16 +106,19 @@ public final class MediaFormatUtil {
             .setSampleRate(
                 getInteger(
                     mediaFormat, MediaFormat.KEY_SAMPLE_RATE, /* defaultValue= */ Format.NO_VALUE))
-            .setChannelCount(
-                getInteger(
-                    mediaFormat,
-                    MediaFormat.KEY_CHANNEL_COUNT,
-                    /* defaultValue= */ Format.NO_VALUE))
-            .setPcmEncoding(
-                getInteger(
-                    mediaFormat,
-                    MediaFormat.KEY_PCM_ENCODING,
-                    /* defaultValue= */ Format.NO_VALUE));
+            .setPcmEncoding(getPcmEncoding(mediaFormat));
+
+    int channelCount =
+        getInteger(mediaFormat, MediaFormat.KEY_CHANNEL_COUNT, /* defaultValue= */ Format.NO_VALUE);
+    int channelMask =
+        getInteger(mediaFormat, MediaFormat.KEY_CHANNEL_MASK, /* defaultValue= */ Format.NO_VALUE);
+    if (channelCount != Format.NO_VALUE
+        && channelMask != Format.NO_VALUE
+        && Integer.bitCount(channelMask) != channelCount) {
+      channelMask = Format.NO_VALUE;
+    }
+    formatBuilder.setChannelCount(channelCount);
+    formatBuilder.setChannelMask(channelMask);
 
     ImmutableList.Builder<byte[]> csdBuffers = new ImmutableList.Builder<>();
     int csdIndex = 0;
@@ -127,6 +136,10 @@ public final class MediaFormatUtil {
     }
 
     formatBuilder.setInitializationData(csdBuffers.build());
+
+    if (mediaFormat.containsKey(MediaFormat.KEY_TRACK_ID)) {
+      formatBuilder.setId(mediaFormat.getInteger(MediaFormat.KEY_TRACK_ID));
+    }
 
     return formatBuilder.build();
   }
@@ -147,6 +160,10 @@ public final class MediaFormatUtil {
     maybeSetInteger(result, MediaFormat.KEY_BIT_RATE, format.bitrate);
     maybeSetInteger(result, KEY_MAX_BIT_RATE, format.peakBitrate);
     maybeSetInteger(result, MediaFormat.KEY_CHANNEL_COUNT, format.channelCount);
+    int channelMask = Util.getAudioTrackChannelConfig(format);
+    if (channelMask != AudioFormat.CHANNEL_INVALID) {
+      result.setInteger(MediaFormat.KEY_CHANNEL_MASK, channelMask);
+    }
 
     maybeSetColorInfo(result, format.colorInfo);
 
@@ -175,6 +192,14 @@ public final class MediaFormatUtil {
     result.setInteger(MediaFormat.KEY_ENCODER_PADDING, format.encoderPadding);
 
     maybeSetPixelAspectRatio(result, format.pixelWidthHeightRatio);
+
+    if (format.id != null) {
+      try {
+        result.setInteger(MediaFormat.KEY_TRACK_ID, Integer.parseInt(format.id));
+      } catch (NumberFormatException e) {
+        // Ignore, format.id is not always an integer, but KEY_TRACK_ID expects an int.
+      }
+    }
     return result;
   }
 
@@ -313,24 +338,68 @@ public final class MediaFormatUtil {
 
   /** Supports {@link MediaFormat#getInteger(String, int)} for {@code API < 29}. */
   public static int getInteger(MediaFormat mediaFormat, String name, int defaultValue) {
-    return mediaFormat.containsKey(name) ? mediaFormat.getInteger(name) : defaultValue;
+    if (SDK_INT >= 29) {
+      return mediaFormat.getInteger(name, defaultValue);
+    } else {
+      return mediaFormat.containsKey(name) ? mediaFormat.getInteger(name) : defaultValue;
+    }
   }
 
   /** Supports {@link MediaFormat#getFloat(String, float)} for {@code API < 29}. */
   public static float getFloat(MediaFormat mediaFormat, String name, float defaultValue) {
-    return mediaFormat.containsKey(name) ? mediaFormat.getFloat(name) : defaultValue;
+    if (SDK_INT >= 29) {
+      return mediaFormat.getFloat(name, defaultValue);
+    } else {
+      return mediaFormat.containsKey(name) ? mediaFormat.getFloat(name) : defaultValue;
+    }
   }
 
   /** Supports {@link MediaFormat#getString(String, String)} for {@code API < 29}. */
-  @Nullable
-  public static String getString(
-      MediaFormat mediaFormat, String name, @Nullable String defaultValue) {
-    return mediaFormat.containsKey(name) ? mediaFormat.getString(name) : defaultValue;
+  public static String getString(MediaFormat mediaFormat, String name, String defaultValue) {
+    if (SDK_INT >= 29) {
+      return mediaFormat.getString(name, defaultValue);
+    } else {
+      return mediaFormat.containsKey(name)
+          ? checkNotNull(mediaFormat.getString(name))
+          : defaultValue;
+    }
   }
 
   /**
-   * Returns a {@code Codecs string} of {@link MediaFormat}. In case of an H263 codec string, builds
-   * and returns an RFC 6381 H263 codec string using profile and level.
+   * Returns the value of a key whose value can be set as int or float.
+   *
+   * <p>The {@code defaultValue} is returned if the key is not present in the {@link MediaFormat}.
+   *
+   * @throws ClassCastException If the stored value for the key is other than int or float.
+   */
+  public static float getFloatFromIntOrFloat(
+      MediaFormat mediaFormat, String keyName, float defaultValue) {
+    if (!mediaFormat.containsKey(keyName)) {
+      return defaultValue;
+    }
+    float value;
+    if (SDK_INT >= 29) {
+      int valueType = mediaFormat.getValueTypeForKey(keyName);
+      if (valueType == MediaFormat.TYPE_FLOAT) {
+        value = mediaFormat.getFloat(keyName);
+      } else {
+        // It should be int.
+        value = mediaFormat.getInteger(keyName);
+      }
+    } else {
+      try {
+        value = mediaFormat.getFloat(keyName);
+      } catch (ClassCastException ex) {
+        value = mediaFormat.getInteger(keyName);
+      }
+    }
+    return value;
+  }
+
+  /**
+   * Returns a {@code Codecs string} of {@link MediaFormat}.
+   *
+   * <p>For H263 and Dolby Vision formats, builds a codec string using profile and level.
    */
   @Nullable
   @SuppressLint("InlinedApi") // Inlined MediaFormat keys.
@@ -340,29 +409,30 @@ public final class MediaFormatUtil {
         && mediaFormat.containsKey(MediaFormat.KEY_PROFILE)
         && mediaFormat.containsKey(MediaFormat.KEY_LEVEL)) {
       return CodecSpecificDataUtil.buildH263CodecString(
-          mediaFormat.getInteger(MediaFormat.KEY_PROFILE),
-          mediaFormat.getInteger(MediaFormat.KEY_LEVEL));
-    } else {
-      return getString(mediaFormat, MediaFormat.KEY_CODECS_STRING, /* defaultValue= */ null);
-    }
-  }
-
-  /**
-   * Returns the frame rate from a {@link MediaFormat}.
-   *
-   * <p>The {@link MediaFormat#KEY_FRAME_RATE} can have both integer and float value so it returns
-   * which ever value is set.
-   */
-  private static float getFrameRate(MediaFormat mediaFormat, float defaultValue) {
-    float frameRate = defaultValue;
-    if (mediaFormat.containsKey(MediaFormat.KEY_FRAME_RATE)) {
-      try {
-        frameRate = mediaFormat.getFloat(MediaFormat.KEY_FRAME_RATE);
-      } catch (ClassCastException ex) {
-        frameRate = mediaFormat.getInteger(MediaFormat.KEY_FRAME_RATE);
+          h263ConstToProfileNumber(mediaFormat.getInteger(MediaFormat.KEY_PROFILE)),
+          h263ConstToLevelNumber(mediaFormat.getInteger(MediaFormat.KEY_LEVEL)));
+    } else if (Objects.equals(
+            mediaFormat.getString(MediaFormat.KEY_MIME), MimeTypes.VIDEO_DOLBY_VISION)
+        && mediaFormat.containsKey(MediaFormat.KEY_PROFILE)) {
+      int dolbyVisionLevel = getInteger(mediaFormat, MediaFormat.KEY_LEVEL, Format.NO_VALUE);
+      if (dolbyVisionLevel == Format.NO_VALUE) {
+        int width =
+            getInteger(mediaFormat, MediaFormat.KEY_WIDTH, /* defaultValue= */ Format.NO_VALUE);
+        int height =
+            getInteger(mediaFormat, MediaFormat.KEY_HEIGHT, /* defaultValue= */ Format.NO_VALUE);
+        float frameRate =
+            getFloatFromIntOrFloat(
+                mediaFormat, MediaFormat.KEY_FRAME_RATE, /* defaultValue= */ Format.NO_VALUE);
+        dolbyVisionLevel = calculateMediaCodecDolbyVisionLevel(width, height, frameRate);
       }
+      // Add Dolby Vision profile and level to codec string as per Dolby Vision ISO media format.
+      return CodecSpecificDataUtil.buildDolbyVisionCodecString(
+          CodecSpecificDataUtil.dolbyVisionConstantToProfileNumber(
+              mediaFormat.getInteger(MediaFormat.KEY_PROFILE)),
+          CodecSpecificDataUtil.dolbyVisionConstantToLevelNumber(dolbyVisionLevel));
+    } else {
+      return mediaFormat.getString(MediaFormat.KEY_CODECS_STRING);
     }
-    return frameRate;
   }
 
   /** Returns the ratio between a pixel's width and height for a {@link MediaFormat}. */
@@ -432,6 +502,18 @@ public final class MediaFormatUtil {
     mediaFormat.setInteger(MediaFormat.KEY_PIXEL_ASPECT_RATIO_HEIGHT, pixelAspectRatioHeight);
   }
 
+  @SuppressLint("InlinedApi") // Inlined MediaFormat keys.
+  private static @C.PcmEncoding int getPcmEncoding(MediaFormat mediaFormat) {
+    @C.PcmEncoding
+    int exoPcmEncoding =
+        getInteger(mediaFormat, KEY_PCM_ENCODING_EXTENDED, /* defaultValue= */ Format.NO_VALUE);
+    if (exoPcmEncoding != Format.NO_VALUE) {
+      return exoPcmEncoding;
+    }
+    return getInteger(
+        mediaFormat, MediaFormat.KEY_PCM_ENCODING, /* defaultValue= */ Format.NO_VALUE);
+  }
+
   @SuppressLint("InlinedApi") // Inlined KEY_PCM_ENCODING.
   private static void maybeSetPcmEncoding(
       MediaFormat mediaFormat, @C.PcmEncoding int exoPcmEncoding) {
@@ -463,6 +545,9 @@ public final class MediaFormatUtil {
       case C.ENCODING_PCM_16BIT_BIG_ENDIAN:
       case C.ENCODING_PCM_24BIT_BIG_ENDIAN:
       case C.ENCODING_PCM_32BIT_BIG_ENDIAN:
+      case C.ENCODING_PCM_FLOAT_BIG_ENDIAN:
+      case C.ENCODING_PCM_DOUBLE:
+      case C.ENCODING_PCM_DOUBLE_BIG_ENDIAN:
       default:
         // No matching value. Do nothing.
         return;
@@ -477,6 +562,7 @@ public final class MediaFormatUtil {
         || colorSpace == C.COLOR_SPACE_BT709
         || colorSpace == C.COLOR_SPACE_BT2020
         || colorSpace == Format.NO_VALUE;
+    // LINT.ThenChange(../C.java:color_space)
   }
 
   /** Whether this is a valid {@link C.ColorRange} instance. */
@@ -485,18 +571,21 @@ public final class MediaFormatUtil {
     return colorRange == C.COLOR_RANGE_LIMITED
         || colorRange == C.COLOR_RANGE_FULL
         || colorRange == Format.NO_VALUE;
+    // LINT.ThenChange(../C.java:color_range)
   }
 
   /** Whether this is a valid {@link C.ColorTransfer} instance. */
   private static boolean isValidColorTransfer(int colorTransfer) {
     // LINT.IfChange(color_transfer)
-    // C.COLOR_TRANSFER_GAMMA_2_2 & C.COLOR_TRANSFER_SRGB aren't valid because MediaCodec, and
-    // hence MediaFormat, do not support them.
+    // C.COLOR_TRANSFER_GAMMA_2_2 is not valid because MediaCodec, and hence MediaFormat, do not
+    // support them.
     return colorTransfer == C.COLOR_TRANSFER_LINEAR
         || colorTransfer == C.COLOR_TRANSFER_SDR
+        || colorTransfer == C.COLOR_TRANSFER_SRGB
         || colorTransfer == C.COLOR_TRANSFER_ST2084
         || colorTransfer == C.COLOR_TRANSFER_HLG
         || colorTransfer == Format.NO_VALUE;
+    // LINT.ThenChange(../C.java:color_transfer)
   }
 
   private MediaFormatUtil() {}

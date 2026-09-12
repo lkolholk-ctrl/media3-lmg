@@ -15,11 +15,12 @@
  */
 package androidx.media3.extractor.text;
 
-import static androidx.media3.common.util.Assertions.checkState;
-import static androidx.media3.common.util.Assertions.checkStateNotNull;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import androidx.annotation.IntDef;
+import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
@@ -43,11 +44,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
 /** Generic extractor for extracting subtitles from various subtitle formats. */
 @UnstableApi
 public class SubtitleExtractor implements Extractor {
+
+  /** The ID of the single track emitted by this extractor. */
+  public static final int TRACK_ID = 0;
+
   @Documented
   @Retention(RetentionPolicy.SOURCE)
   @Target(TYPE_USE)
@@ -83,12 +89,14 @@ public class SubtitleExtractor implements Extractor {
 
   private final SubtitleParser subtitleParser;
   private final CueEncoder cueEncoder;
-  private final Format format;
+  @Nullable private final Format format;
   private final List<Sample> samples;
   private final ParsableByteArray scratchSampleArray;
 
   private byte[] subtitleData;
   private @MonotonicNonNull TrackOutput trackOutput;
+  private @MonotonicNonNull ExtractorOutput extractorOutput;
+  private @MonotonicNonNull IndexSeekMap seekMap;
   private int bytesRead;
   private @State int state;
   private long[] timestamps;
@@ -99,20 +107,26 @@ public class SubtitleExtractor implements Extractor {
    *
    * @param subtitleParser The parser used for parsing the subtitle data. The extractor will reset
    *     the parser in {@link SubtitleExtractor#release()}.
-   * @param format {@link Format} that describes subtitle data.
+   * @param format {@link Format} that describes subtitle data. Can be null if {@link
+   *     TrackOutput#format}, {@link ExtractorOutput#seekMap} and {@link
+   *     ExtractorOutput#endTracks()} will be called outside this extractor.
    */
-  public SubtitleExtractor(SubtitleParser subtitleParser, Format format) {
+  public SubtitleExtractor(SubtitleParser subtitleParser, @Nullable Format format) {
     this.subtitleParser = subtitleParser;
     cueEncoder = new CueEncoder();
     subtitleData = Util.EMPTY_BYTE_ARRAY;
     scratchSampleArray = new ParsableByteArray();
+    // TODO: b/376693592 - Simplify this by taking the post-transformation Format as a parameter
+    //  instead.
     this.format =
-        format
-            .buildUpon()
-            .setSampleMimeType(MimeTypes.APPLICATION_MEDIA3_CUES)
-            .setCodecs(format.sampleMimeType)
-            .setCueReplacementBehavior(subtitleParser.getCueReplacementBehavior())
-            .build();
+        format != null
+            ? format
+                .buildUpon()
+                .setSampleMimeType(MimeTypes.APPLICATION_MEDIA3_CUES)
+                .setCodecs(format.sampleMimeType)
+                .setCueReplacementBehavior(subtitleParser.getCueReplacementBehavior())
+                .build()
+            : null;
     samples = new ArrayList<>();
     state = STATE_CREATED;
     timestamps = Util.EMPTY_LONG_ARRAY;
@@ -130,14 +144,18 @@ public class SubtitleExtractor implements Extractor {
   @Override
   public void init(ExtractorOutput output) {
     checkState(state == STATE_CREATED);
-    trackOutput = output.track(/* id= */ 0, C.TRACK_TYPE_TEXT);
-    trackOutput.format(format);
-    output.endTracks();
-    output.seekMap(
-        new IndexSeekMap(
-            /* positions= */ new long[] {0},
-            /* timesUs= */ new long[] {0},
-            /* durationUs= */ C.TIME_UNSET));
+    this.extractorOutput = output;
+    trackOutput = output.track(TRACK_ID, C.TRACK_TYPE_TEXT);
+    if (format != null) {
+      trackOutput.format(format);
+      output.endTracks();
+      seekMap =
+          new IndexSeekMap(
+              /* positions= */ new long[] {0},
+              /* timesUs= */ new long[] {0},
+              /* durationUs= */ C.TIME_UNSET);
+      output.seekMap(seekMap);
+    }
     state = STATE_INITIALIZED;
   }
 
@@ -235,6 +253,7 @@ public class SubtitleExtractor implements Extractor {
           seekTimeUs != C.TIME_UNSET
               ? SubtitleParser.OutputOptions.cuesAfterThenRemainingCuesBefore(seekTimeUs)
               : SubtitleParser.OutputOptions.allCues();
+      AtomicLong maxEndTimeUs = new AtomicLong(C.TIME_UNSET);
       subtitleParser.parse(
           subtitleData,
           /* offset= */ 0,
@@ -246,7 +265,13 @@ public class SubtitleExtractor implements Extractor {
                     cuesWithTiming.startTimeUs,
                     cueEncoder.encode(cuesWithTiming.cues, cuesWithTiming.durationUs));
             samples.add(sample);
-            if (seekTimeUs == C.TIME_UNSET || cuesWithTiming.startTimeUs >= seekTimeUs) {
+            if (cuesWithTiming.endTimeUs != C.TIME_UNSET) {
+              maxEndTimeUs.set(
+                  maxEndTimeUs.get() == C.TIME_UNSET
+                      ? cuesWithTiming.endTimeUs
+                      : Math.max(maxEndTimeUs.get(), cuesWithTiming.endTimeUs));
+            }
+            if (seekTimeUs == C.TIME_UNSET || cuesWithTiming.endTimeUs >= seekTimeUs) {
               writeToOutput(sample);
             }
           });
@@ -254,6 +279,14 @@ public class SubtitleExtractor implements Extractor {
       timestamps = new long[samples.size()];
       for (int i = 0; i < samples.size(); i++) {
         timestamps[i] = samples.get(i).timeUs;
+      }
+      // Duration is exact after parsing all subtitle cues.
+      if (maxEndTimeUs.get() != C.TIME_UNSET) {
+        checkNotNull(trackOutput).durationUs(maxEndTimeUs.get());
+        if (seekMap != null) {
+          seekMap.setDurationUs(maxEndTimeUs.get());
+          checkNotNull(extractorOutput).seekMap(seekMap);
+        }
       }
       subtitleData = Util.EMPTY_BYTE_ARRAY;
     } catch (RuntimeException e) {
@@ -273,7 +306,7 @@ public class SubtitleExtractor implements Extractor {
   }
 
   private void writeToOutput(Sample sample) {
-    checkStateNotNull(this.trackOutput);
+    checkNotNull(this.trackOutput);
     int size = sample.data.length;
     scratchSampleArray.reset(sample.data);
     trackOutput.sampleData(scratchSampleArray, size);

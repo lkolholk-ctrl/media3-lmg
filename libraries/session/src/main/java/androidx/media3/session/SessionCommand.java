@@ -15,8 +15,9 @@
  */
 package androidx.media3.session;
 
-import static androidx.media3.common.util.Assertions.checkArgument;
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static androidx.media3.common.util.Util.convertToNullIfInvalid;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import android.os.Bundle;
@@ -27,12 +28,12 @@ import androidx.media3.common.Rating;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.session.MediaLibraryService.LibraryParams;
-import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableList;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.Objects;
 
 /**
  * A command that a {@link MediaController} can send to a {@link MediaSession}.
@@ -73,7 +74,9 @@ public final class SessionCommand {
   /** Command code for {@link MediaController#setRating(String, Rating)}. */
   public static final int COMMAND_CODE_SESSION_SET_RATING = 40010;
 
-  /* package */ static final ImmutableList<Integer> SESSION_COMMANDS =
+  /* package */ static final ImmutableList<Integer> SESSION_READ_COMMANDS = ImmutableList.of();
+
+  /* package */ static final ImmutableList<Integer> SESSION_WRITE_COMMANDS =
       ImmutableList.of(COMMAND_CODE_SESSION_SET_RATING);
 
   //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -101,7 +104,7 @@ public final class SessionCommand {
   /** Command code for {@link MediaBrowser#getSearchResult(String, int, int, LibraryParams)}. */
   public static final int COMMAND_CODE_LIBRARY_GET_SEARCH_RESULT = 50006;
 
-  /* package */ static final ImmutableList<Integer> LIBRARY_COMMANDS =
+  /* package */ static final ImmutableList<Integer> LIBRARY_READ_COMMANDS =
       ImmutableList.of(
           COMMAND_CODE_LIBRARY_GET_LIBRARY_ROOT,
           COMMAND_CODE_LIBRARY_SUBSCRIBE,
@@ -110,6 +113,8 @@ public final class SessionCommand {
           COMMAND_CODE_LIBRARY_GET_ITEM,
           COMMAND_CODE_LIBRARY_SEARCH,
           COMMAND_CODE_LIBRARY_GET_SEARCH_RESULT);
+
+  /* package */ static final ImmutableList<Integer> LIBRARY_WRITE_COMMANDS = ImmutableList.of();
 
   /**
    * The command code of a predefined command. It will be {@link #COMMAND_CODE_CUSTOM} for a custom
@@ -122,10 +127,6 @@ public final class SessionCommand {
 
   /**
    * The extra bundle of a custom command. It will be {@link Bundle#EMPTY} for a predefined command.
-   *
-   * <p>Interoperability: This value is not used when the command is sent to a legacy {@code
-   * android.support.v4.media.session.MediaSessionCompat} or {@code
-   * android.support.v4.media.session.MediaControllerCompat}.
    */
   public final Bundle customExtras;
 
@@ -168,7 +169,7 @@ public final class SessionCommand {
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(customAction, commandCode);
+    return Objects.hash(customAction, commandCode);
   }
 
   private static final String FIELD_COMMAND_CODE = Util.intToStringMaxRadix(0);
@@ -192,9 +193,8 @@ public final class SessionCommand {
       return new SessionCommand(commandCode);
     } else {
       String customAction = checkNotNull(bundle.getString(FIELD_CUSTOM_ACTION));
-      @Nullable Bundle customExtras = bundle.getBundle(FIELD_CUSTOM_EXTRAS);
+      @Nullable Bundle customExtras = convertToNullIfInvalid(bundle.getBundle(FIELD_CUSTOM_EXTRAS));
       return new SessionCommand(customAction, customExtras == null ? Bundle.EMPTY : customExtras);
     }
   }
-  ;
 }

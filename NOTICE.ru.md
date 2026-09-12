@@ -3,7 +3,7 @@
 *[English version](NOTICE.md)*
 
 Этот продукт — **модифицированная версия AndroidX Media3** (проект `androidx/media`,
-тег `1.5.1`).
+тег `1.11.0`).
 
 Оригинальный код: Copyright (C) The Android Open Source Project, лицензия
 Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE).
@@ -15,7 +15,7 @@ Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE
 ## Заявление об изменениях
 
 Согласно разделу 4(b) Apache License 2.0, ниже перечислены файлы, изменённые
-относительно апстрима `1.5.1`. Все изменения помечены в коде комментариями.
+относительно апстрима `1.11.0`. Все изменения помечены в коде комментариями.
 
 ### Код плеера
 
@@ -32,16 +32,13 @@ Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE
 | `.../exoplayer/DefaultMediaClock.java` | Включение второго аудио-рендерера больше не считается ошибкой: при своде два аудио-рендерера работают одновременно. |
 | `.../exoplayer/DefaultRenderersFactory.java` | Создание второго аудио-рендерера. |
 
+### Перенос на Media3 1.11
+
+Добавлен `CrossfadeTrackRouting.java`. `MediaPeriodHolder` переносит поток и выбор трека вместе; `ExoPlayerImplInternal` адаптирует жизненный цикл RendererHolder, продвижение очередей по рендерерам и громкость/аудиофокус playback-потока. `PlayerAudioFadeControl` повторно применяет сохранённые множители громкости. Добавлены `CrossfadeTrackRoutingTest` и методы `MediaPeriodQueueTest.crossfade*`. [Подробности](MIGRATION-1.11.0.md).
+
 ### Сборка и публикация
 
-| Файл | Характер изменений |
-|---|---|
-| `build.gradle`, `common_library_config.gradle`, `publish.gradle` | Координаты артефактов изменены с `androidx.media3` на `com.liquidmusicglass.media3`; публикация не зависит от задач `lint`/`test`. |
-| `missing_aar_type_workaround.gradle` | Учитывает новую группу артефактов. |
-| `constants.gradle` | Версия релиза форка (`1.5.1-lmgN`). |
-| `settings.gradle` | Исключены demo-приложения, testapp и тест-онли модули: форк собирает только библиотечные AAR. |
-| `libraries/test_data` | Удалены тяжёлые медиа-ассеты для тестов. |
-| `.github/workflows/build-aars.yml` | **Новый файл.** Сборка AAR и публикация maven-репозитория в GitHub Release. |
+Kotlin DSL в `build-logic/`, `build-logic-settings/` и корневом `build.gradle.kts` сохраняет группу `com.liquidmusicglass.media3` при публикации и composite substitution. `settings.gradle.kts` выбирает библиотечные модули; версия задаётся в `gradle/libs.versions.toml`. `.github/workflows/build-aars.yml` читает эту версию, выбирает регрессионные тесты LMG и сохраняет SNAPSHOT как CI artifact. Тестовые медиа Google сохранены в тестовом source set. Старые Groovy-скрипты заменены новой инфраструктурой Google на Kotlin DSL.
 
 ## Происхождение реализации кроссфейда
 
@@ -68,3 +65,5 @@ Apple Music — товарный знак Apple Inc.
 сосуществовать** в одной сборке: попытка подключить оба приведёт к ошибке
 дублирующихся классов. Так сделано намеренно, чтобы подмена одного другим была
 видимой, а не молчаливой.
+
+Ограничитель частоты обновлений PlayerAudioFadeControl использует монотонные часы ExoPlayer. Добавлены JVM-регрессии переходов с независимыми часами дек; тест DefaultMediaClock учитывает сохранённую семантику LMG при двух одновременно включённых аудиочасах.

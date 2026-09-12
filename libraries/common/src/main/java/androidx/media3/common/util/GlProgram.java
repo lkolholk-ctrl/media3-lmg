@@ -15,12 +15,16 @@
  */
 package androidx.media3.common.util;
 
-import static androidx.media3.common.util.Assertions.checkNotNull;
+import static android.os.Build.VERSION.SDK_INT;
+import static androidx.media3.common.C.TEXTURE_MIN_FILTER_LINEAR_MIPMAP_LINEAR;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.content.Context;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
+import android.opengl.GLES30;
 import androidx.annotation.Nullable;
+import androidx.media3.common.C;
 import java.io.IOException;
 import java.nio.Buffer;
 import java.util.HashMap;
@@ -47,6 +51,21 @@ public final class GlProgram {
   private final Map<String, Uniform> uniformByName;
 
   private boolean externalTexturesRequireNearestSampling;
+
+  /**
+   * Compiles a GL shader program from vertex and fragment shader GLSL GLES20 code.
+   *
+   * @param context The {@link Context}.
+   * @param vertexShaderResId The resource ID of a vertex shader program.
+   * @param fragmentShaderResId The resource ID of a fragment shader program.
+   * @throws IOException When failing to read shader files.
+   */
+  public GlProgram(Context context, int vertexShaderResId, int fragmentShaderResId)
+      throws IOException, GlUtil.GlException {
+    this(
+        Util.loadRawResource(context, vertexShaderResId),
+        Util.loadRawResource(context, fragmentShaderResId));
+  }
 
   /**
    * Compiles a GL shader program from vertex and fragment shader GLSL GLES20 code.
@@ -154,6 +173,17 @@ public final class GlProgram {
 
   /** Deletes the program. Deleted programs cannot be used again. */
   public void delete() throws GlUtil.GlException {
+    if (SDK_INT == 28) {
+      // Some MediaTek devices running API 28 crash with Fatal signal 6 (SIGABRT), code -6
+      // (SI_TKILL) during glDeleteProgram. Leak the GL program instead of crashing.
+      // Any leaked GL program memory will be cleaned up when the GL context is deleted.
+      // Devices with the chipset Unisoc SC9863A are also affected. Unfortunately, these devices
+      // return an extremely wide range of Build.HARDWARE values, and we cannot allow-list them
+      // all. delete() calls are frequently followed by GL context deletion, so the program memory
+      // won't leak for long.
+      // See b/446675921.
+      return;
+    }
     GLES20.glDeleteProgram(programId);
     GlUtil.checkGlError();
   }
@@ -184,6 +214,22 @@ public final class GlProgram {
    */
   public void setSamplerTexIdUniform(String name, int texId, int texUnitIndex) {
     checkNotNull(uniformByName.get(name)).setSamplerTexId(texId, texUnitIndex);
+  }
+
+  /**
+   * Sets a texture sampler type uniform.
+   *
+   * @param name The uniform's name.
+   * @param texId The texture identifier.
+   * @param texUnitIndex The texture unit index. Use a different index (0, 1, 2, ...) for each
+   *     texture sampler in the program.
+   * @param texMinFilter The {@link C.TextureMinFilter}.
+   */
+  public void setSamplerTexIdUniform(
+      String name, int texId, int texUnitIndex, @C.TextureMinFilter int texMinFilter) {
+    Uniform texUniform = checkNotNull(uniformByName.get(name));
+    texUniform.setSamplerTexId(texId, texUnitIndex);
+    texUniform.setTexMinFilter(texMinFilter);
   }
 
   /** Sets an {@code int} type uniform. */
@@ -365,6 +411,7 @@ public final class GlProgram {
 
     private int texIdValue;
     private int texUnitIndex;
+    private @C.TextureMinFilter int texMinFilter;
 
     private Uniform(String name, int location, int type) {
       this.name = name;
@@ -372,6 +419,7 @@ public final class GlProgram {
       this.type = type;
       this.floatValue = new float[16]; // Allocate 16 for mat4
       this.intValue = new int[4]; // Allocate 4 for ivec4
+      this.texMinFilter = C.TEXTURE_MIN_FILTER_LINEAR;
     }
 
     /**
@@ -384,6 +432,19 @@ public final class GlProgram {
     public void setSamplerTexId(int texId, int texUnitIndex) {
       this.texIdValue = texId;
       this.texUnitIndex = texUnitIndex;
+    }
+
+    /**
+     * Configures {@link #bind(boolean)} to use the specified texture minification filter for this
+     * sampler uniform.
+     *
+     * <p>Only has effect for {@linkplain GLES20#GL_SAMPLER_2D internal texture} type. External
+     * texture sampling is controlled via the parameter passed to {@link #bind(boolean)}.
+     *
+     * @param texMinFilter The {@link C.TextureMinFilter}.
+     */
+    public void setTexMinFilter(@C.TextureMinFilter int texMinFilter) {
+      this.texMinFilter = texMinFilter;
     }
 
     /** Configures {@link #bind(boolean)} to use the specified {@code int} {@code value}. */
@@ -463,19 +524,42 @@ public final class GlProgram {
         case GLES20.GL_SAMPLER_2D:
         case GLES11Ext.GL_SAMPLER_EXTERNAL_OES:
         case GL_SAMPLER_EXTERNAL_2D_Y2Y_EXT:
+        case GLES30.GL_SAMPLER_3D:
           if (texIdValue == 0) {
             throw new IllegalStateException("No call to setSamplerTexId() before bind.");
           }
           GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + texUnitIndex);
           GlUtil.checkGlError();
-          GlUtil.bindTexture(
-              type == GLES20.GL_SAMPLER_2D
-                  ? GLES20.GL_TEXTURE_2D
-                  : GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-              texIdValue,
-              type == GLES20.GL_SAMPLER_2D || !externalTexturesRequireNearestSampling
-                  ? GLES20.GL_LINEAR
-                  : GLES20.GL_NEAREST);
+          int target;
+          int samplingMode;
+          switch (type) {
+            case GLES20.GL_SAMPLER_2D:
+              target = GLES20.GL_TEXTURE_2D;
+              samplingMode = GLES20.GL_LINEAR;
+              break;
+            case GLES11Ext.GL_SAMPLER_EXTERNAL_OES:
+            case GL_SAMPLER_EXTERNAL_2D_Y2Y_EXT:
+              target = GLES11Ext.GL_TEXTURE_EXTERNAL_OES;
+              samplingMode =
+                  externalTexturesRequireNearestSampling ? GLES20.GL_NEAREST : GLES20.GL_LINEAR;
+              break;
+            case GLES30.GL_SAMPLER_3D:
+              target = GLES30.GL_TEXTURE_3D;
+              samplingMode = GLES30.GL_LINEAR;
+              break;
+            default:
+              throw new IllegalStateException("Unexpected sampler type: " + type);
+          }
+          GlUtil.bindTexture(target, texIdValue, samplingMode);
+          if (type == GLES20.GL_SAMPLER_2D) {
+            if (texMinFilter == TEXTURE_MIN_FILTER_LINEAR_MIPMAP_LINEAR) {
+              GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
+              GlUtil.checkGlError();
+            }
+            GLES20.glTexParameteri(
+                GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, texMinFilter);
+            GlUtil.checkGlError();
+          }
           GLES20.glUniform1i(location, texUnitIndex);
           GlUtil.checkGlError();
           break;

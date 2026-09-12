@@ -30,6 +30,7 @@ import org.junit.runner.RunWith;
 public final class DownloadHelperTest {
 
   @Test
+  @SuppressWarnings("deprecation") // Deliberately testing deprecated API
   public void staticDownloadHelperForHls_doesNotThrow() {
     DownloadHelper.forMediaItem(
         ApplicationProvider.getApplicationContext(),
@@ -44,7 +45,7 @@ public final class DownloadHelperTest {
             .setUri("http://uri")
             .setMimeType(MimeTypes.APPLICATION_M3U8)
             .build(),
-        DownloadHelper.DEFAULT_TRACK_SELECTOR_PARAMETERS_WITHOUT_CONTEXT,
+        DownloadHelper.DEFAULT_TRACK_SELECTOR_PARAMETERS,
         (handler, videoListener, audioListener, text, metadata) -> new Renderer[0],
         new FakeDataSource.Factory(),
         /* drmSessionManager= */ null);

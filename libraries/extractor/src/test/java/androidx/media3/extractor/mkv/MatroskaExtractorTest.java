@@ -15,7 +15,7 @@
  */
 package androidx.media3.extractor.mkv;
 
-import static androidx.media3.extractor.mp4.FragmentedMp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA;
+import static androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA;
 
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory;
 import androidx.media3.extractor.text.SubtitleParser;
@@ -28,6 +28,7 @@ import org.junit.runner.RunWith;
 import org.robolectric.ParameterizedRobolectricTestRunner;
 import org.robolectric.ParameterizedRobolectricTestRunner.Parameter;
 import org.robolectric.ParameterizedRobolectricTestRunner.Parameters;
+import org.robolectric.annotation.Config;
 
 /** Tests for {@link MatroskaExtractor}. */
 @RunWith(ParameterizedRobolectricTestRunner.class)
@@ -58,6 +59,17 @@ public final class MatroskaExtractorTest {
   }
 
   @Test
+  public void mkvSampleWithMultipleKeyFrames() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_with_multiple_key_frames.mkv",
+        simulationConfig);
+  }
+
+  @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withSubripSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -68,6 +80,9 @@ public final class MatroskaExtractorTest {
   }
 
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withNullTerminatedSubripSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -78,6 +93,9 @@ public final class MatroskaExtractorTest {
   }
 
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withOverlappingSubripSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -87,7 +105,16 @@ public final class MatroskaExtractorTest {
         simulationConfig);
   }
 
+  /**
+   * Test with CodecId = S_TEST/SSA (https://github.com/androidx/media/issues/2384)
+   *
+   * <p>The subtitle data is identical to {@code sample_with_ass_subtitles.mkv} so the same dump
+   * files are used.
+   */
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withSsaSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -97,8 +124,30 @@ public final class MatroskaExtractorTest {
         simulationConfig);
   }
 
+  /**
+   * Test with CodecId = S_TEST/ASS
+   *
+   * <p>The subtitle data is identical to {@code sample_with_ssa_subtitles.mkv} so the same dump
+   * files are used.
+   */
+  @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
+  public void mkvSample_withAssSubtitles() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_with_ass_subtitles.mkv",
+        getAssertionConfigWithPrefix(
+            "media/mkv/sample_with_ssa_subtitles.mkv", subtitlesParsedDuringExtraction),
+        simulationConfig);
+  }
+
   // https://github.com/google/ExoPlayer/pull/8265
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withNullTerminatedSsaSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -110,6 +159,9 @@ public final class MatroskaExtractorTest {
   }
 
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withOverlappingSsaSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -120,6 +172,9 @@ public final class MatroskaExtractorTest {
   }
 
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withVttSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -130,6 +185,9 @@ public final class MatroskaExtractorTest {
   }
 
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvSample_withNullTerminatedVttSubtitles() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -165,6 +223,9 @@ public final class MatroskaExtractorTest {
   }
 
   @Test
+  // TODO: b/507050745 - Suppressed due to failure with subtitlesParsedDuringExtraction=true on SDK
+  // >= 32.
+  @Config(maxSdk = 31)
   public void mkvFullBlocksSample() throws Exception {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
@@ -186,6 +247,102 @@ public final class MatroskaExtractorTest {
     ExtractorAsserts.assertBehavior(
         getExtractorFactory(subtitlesParsedDuringExtraction),
         "media/mkv/subsample_encrypted_altref.webm",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkvSample_withDts() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_with_dts.mkv",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkaSample_withDtsExpress() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mka/sample_with_dts_express.mka",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkvSample_withDtsHdMa() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_with_dts_hd_ma.mkv",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkvSample_withDtsX() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_with_dts_x.mkv",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkaSample_withFpcm64le() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mka/bear-pcm-f64le.mka",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkaSample_withFlac16bit() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mka/bear-flac-16bit.mka",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkaSample_withFlac24bit() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mka/bear-flac-24bit.mka",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkaSample_withFlac32bit() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mka/bear-flac-32bit.mka",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkaSample_withAlac() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mka/bear-alac.mka",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkvSample_withAv1() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_av1.mkv",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkvSample_withChapters() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_with_chapters.mkv",
+        simulationConfig);
+  }
+
+  @Test
+  public void mkvSampleLastCluster() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        getExtractorFactory(subtitlesParsedDuringExtraction),
+        "media/mkv/sample_last_cluster.mkv",
         simulationConfig);
   }
 

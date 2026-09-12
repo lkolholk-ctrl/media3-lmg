@@ -15,12 +15,13 @@
  */
 package androidx.media3.exoplayer;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
-import androidx.media3.common.util.Assertions;
-import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.source.MediaPeriod;
 import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
+import java.util.Objects;
 
 /** Stores the information required to load and play a {@link MediaPeriod}. */
 /* package */ final class MediaPeriodInfo {
@@ -32,6 +33,12 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
   public final long startPositionUs;
 
   /**
+   * The applied forward projection of the start position when preloading live streams in
+   * microseconds, or {@link C#TIME_UNSET} if no projection was applied.
+   */
+  public final long liveStreamStartPositionProjectionUs;
+
+  /**
    * The requested next start position for the current timeline period, in microseconds, or {@link
    * C#TIME_UNSET} if the period was requested to start at its default position.
    *
@@ -41,18 +48,8 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
   public final long requestedContentPositionUs;
 
   /**
-   * The end position to which the media period's content is clipped in order to play a following ad
-   * group or to terminate a server side ad inserted stream before a played postroll, in
-   * microseconds, or {@link C#TIME_UNSET} if the content is not clipped or if this media period is
-   * an ad. The value {@link C#TIME_END_OF_SOURCE} indicates that a postroll ad follows at the end
-   * of this content media period.
-   */
-  public final long endPositionUs;
-
-  /**
-   * The duration of the media period, like {@link #endPositionUs} but with {@link
-   * C#TIME_END_OF_SOURCE} and {@link C#TIME_UNSET} resolved to the timeline period duration if
-   * known.
+   * The duration of the media period in microseconds, or {@link C#TIME_UNSET} if not known. Note
+   * that the actual duration may be clipped in order to play a following ad group.
    */
   public final long durationUs;
 
@@ -81,22 +78,22 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
   MediaPeriodInfo(
       MediaPeriodId id,
       long startPositionUs,
+      long liveStreamStartPositionProjectionUs,
       long requestedContentPositionUs,
-      long endPositionUs,
       long durationUs,
       boolean isFollowedByTransitionToSameStream,
       boolean isLastInTimelinePeriod,
       boolean isLastInTimelineWindow,
       boolean isFinal) {
-    Assertions.checkArgument(!isFinal || isLastInTimelinePeriod);
-    Assertions.checkArgument(!isLastInTimelineWindow || isLastInTimelinePeriod);
-    Assertions.checkArgument(
+    checkArgument(!isFinal || isLastInTimelinePeriod);
+    checkArgument(!isLastInTimelineWindow || isLastInTimelinePeriod);
+    checkArgument(
         !isFollowedByTransitionToSameStream
             || (!isLastInTimelinePeriod && !isLastInTimelineWindow && !isFinal));
     this.id = id;
     this.startPositionUs = startPositionUs;
+    this.liveStreamStartPositionProjectionUs = liveStreamStartPositionProjectionUs;
     this.requestedContentPositionUs = requestedContentPositionUs;
-    this.endPositionUs = endPositionUs;
     this.durationUs = durationUs;
     this.isFollowedByTransitionToSameStream = isFollowedByTransitionToSameStream;
     this.isLastInTimelinePeriod = isLastInTimelinePeriod;
@@ -105,17 +102,19 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
   }
 
   /**
-   * Returns a copy of this instance with the start position set to the specified value. May return
-   * the same instance if nothing changed.
+   * Returns a copy of this instance with the start position and its projection set to the specified
+   * value. May return the same instance if nothing changed.
    */
-  public MediaPeriodInfo copyWithStartPositionUs(long startPositionUs) {
+  public MediaPeriodInfo copyWithStartPositionUs(
+      long startPositionUs, long liveStreamStartPositionProjectionUs) {
     return startPositionUs == this.startPositionUs
+            && liveStreamStartPositionProjectionUs == this.liveStreamStartPositionProjectionUs
         ? this
         : new MediaPeriodInfo(
             id,
             startPositionUs,
+            liveStreamStartPositionProjectionUs,
             requestedContentPositionUs,
-            endPositionUs,
             durationUs,
             isFollowedByTransitionToSameStream,
             isLastInTimelinePeriod,
@@ -133,8 +132,8 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
         : new MediaPeriodInfo(
             id,
             startPositionUs,
+            liveStreamStartPositionProjectionUs,
             requestedContentPositionUs,
-            endPositionUs,
             durationUs,
             isFollowedByTransitionToSameStream,
             isLastInTimelinePeriod,
@@ -153,13 +152,12 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
     MediaPeriodInfo that = (MediaPeriodInfo) o;
     return startPositionUs == that.startPositionUs
         && requestedContentPositionUs == that.requestedContentPositionUs
-        && endPositionUs == that.endPositionUs
         && durationUs == that.durationUs
         && isFollowedByTransitionToSameStream == that.isFollowedByTransitionToSameStream
         && isLastInTimelinePeriod == that.isLastInTimelinePeriod
         && isLastInTimelineWindow == that.isLastInTimelineWindow
         && isFinal == that.isFinal
-        && Util.areEqual(id, that.id);
+        && Objects.equals(id, that.id);
   }
 
   @Override
@@ -168,7 +166,6 @@ import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
     result = 31 * result + id.hashCode();
     result = 31 * result + (int) startPositionUs;
     result = 31 * result + (int) requestedContentPositionUs;
-    result = 31 * result + (int) endPositionUs;
     result = 31 * result + (int) durationUs;
     result = 31 * result + (isFollowedByTransitionToSameStream ? 1 : 0);
     result = 31 * result + (isLastInTimelinePeriod ? 1 : 0);

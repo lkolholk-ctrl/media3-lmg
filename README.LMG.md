@@ -2,7 +2,7 @@
 
 *[Русская версия](README.LMG.ru.md)*
 
-A fork of [`androidx/media`](https://github.com/androidx/media) (tag **1.5.1**)
+A fork of [`androidx/media`](https://github.com/androidx/media) (tag **1.11.0**)
 that adds crossfading between tracks — overlapping the outgoing and incoming
 track with a smooth volume transition. Stock media3 cannot do this: it switches
 tracks back to back (gapless) and never plays two audio streams at once.
@@ -16,6 +16,8 @@ Version history: [`CHANGELOG.LMG.md`](CHANGELOG.LMG.md).
 
 ---
 
+Version: **1.11.0-lmg31**. All 11 AARs built and 136 JVM tests passed. Device audio validation remains separate. See [migration notes](MIGRATION-1.11.0.md).
+
 ## Setup
 
 Artifacts are published under their own group, `com.liquidmusicglass.media3`, so
@@ -25,7 +27,7 @@ media3 instead of the fork.
 **1. Download the maven repository from a release** (a separate CI step):
 
 ```bash
-VER=1.5.1-lmg30
+VER=1.11.0-lmg31
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -57,10 +59,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.5.1-lmg30")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.5.1-lmg30")
-    implementation("com.liquidmusicglass.media3:media3-session:1.5.1-lmg30")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.5.1-lmg30")
+    implementation("com.liquidmusicglass.media3:media3-common:1.11.0-lmg31")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.11.0-lmg31")
+    implementation("com.liquidmusicglass.media3:media3-session:1.11.0-lmg31")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.11.0-lmg31")
     // if needed: media3-extractor, media3-exoplayer-hls, media3-common-ktx,
     // media3-datasource, media3-decoder, media3-container, media3-database
 }
@@ -178,38 +180,7 @@ configured duration.
 
 ---
 
-## Building the fork
 
-CI (`.github/workflows/build-aars.yml`) runs the crossfade unit tests, builds 11
-modules into a maven repository and publishes it as a zip archive attached to the
-GitHub Release `v<version>`:
+## Build infrastructure
 
-```
-media3-common, media3-common-ktx, media3-container, media3-database,
-media3-datasource, media3-decoder, media3-extractor, media3-exoplayer,
-media3-exoplayer-hls, media3-session, media3-ui
-```
-
-The version is defined **in two places, and they must match**:
-
-- `constants.gradle` → `releaseVersion` — the artifact version;
-- `.github/workflows/build-aars.yml` → `RELEASE_VERSION` — the release and
-  archive name.
-
-Bumping only one of them produces a release named after the old version holding
-artifacts of the new one, and consumers fail with "dependency not found". This
-already happened once — see `lmg19` in the version history.
-
-Local build:
-
-```bash
-./gradlew publishAllPublicationsToLocalRepository
-```
-
-Running the tests:
-
-```bash
-./gradlew :lib-exoplayer:testReleaseUnitTest \
-  --tests 'androidx.media3.exoplayer.PlayerAudioFadeControlCurvesTest' \
-  --tests 'androidx.media3.exoplayer.CrossfadeConfigurationTest'
-```
+The fork now uses Google’s Kotlin DSL build logic, Gradle 9.1.0, AGP 9.0.1, Kotlin 2.2.0 and compileSdk 36 (minSdk 23). The single version source is `gradle/libs.versions.toml`; CI reads it for artifact names. The Maven group remains `com.liquidmusicglass.media3`. SNAPSHOT builds are CI artifacts, not GitHub Releases. The release AARs and 136 JVM tests were validated with JDK 21. See [validation status](MIGRATION-1.11.0.md).

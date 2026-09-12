@@ -15,8 +15,16 @@
  */
 package androidx.media3.extractor.flac;
 
+import static com.google.common.truth.Truth.assertThat;
+
+import androidx.media3.common.Format;
+import androidx.media3.extractor.PositionHolder;
 import androidx.media3.test.utils.ExtractorAsserts;
 import androidx.media3.test.utils.ExtractorAsserts.AssertionConfig;
+import androidx.media3.test.utils.FakeExtractorInput;
+import androidx.media3.test.utils.FakeExtractorOutput;
+import androidx.media3.test.utils.TestUtil;
+import androidx.test.core.app.ApplicationProvider;
 import com.google.common.collect.ImmutableList;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -40,7 +48,20 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear.flac",
+        /* peekLimit= */ 50,
         new AssertionConfig.Builder().setDumpFilesPrefix("extractordumps/flac/bear_flac").build(),
+        simulationConfig);
+  }
+
+  @Test
+  public void sample32bit() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        FlacExtractor::new,
+        "media/flac/bear_32bit.flac",
+        /* peekLimit= */ 11300,
+        new AssertionConfig.Builder()
+            .setDumpFilesPrefix("extractordumps/flac/bear_32bit_flac")
+            .build(),
         simulationConfig);
   }
 
@@ -49,6 +70,7 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_with_id3.flac",
+        /* peekLimit= */ 46500,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_with_id3_enabled_flac")
             .build(),
@@ -60,8 +82,36 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         () -> new FlacExtractor(FlacExtractor.FLAG_DISABLE_ID3_METADATA),
         "media/flac/bear_with_id3.flac",
+        /* peekLimit= */ 46500,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_with_id3_disabled_flac")
+            .build(),
+        simulationConfig);
+  }
+
+  @Test
+  public void sampleWithNoSeekTable_usesBinarySeeker() throws Exception {
+    ExtractorAsserts.assertBehavior(
+        FlacExtractor::new,
+        "media/flac/bear_no_seek_table.flac",
+        /* peekLimit= */ 7800,
+        new AssertionConfig.Builder()
+            .setDumpFilesPrefix("extractordumps/flac/bear_binary_seeking_flac")
+            .build(),
+        simulationConfig);
+  }
+
+  // https://github.com/androidx/media/issues/2327
+  @Test
+  public void sampleWithEmptySeekTable_usesBinarySeeker() throws Exception {
+    // This test asserts that a file with an effectively empty seek table is handled
+    // the same way as a file with no seek table.
+    ExtractorAsserts.assertBehavior(
+        FlacExtractor::new,
+        "media/flac/bear_placeholder_seek_point_only.flac",
+        /* peekLimit= */ 7800,
+        new AssertionConfig.Builder()
+            .setDumpFilesPrefix("extractordumps/flac/bear_binary_seeking_flac")
             .build(),
         simulationConfig);
   }
@@ -71,6 +121,7 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_no_seek_table_no_num_samples.flac",
+        /* peekLimit= */ 50,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_no_seek_table_no_num_samples_flac")
             .build(),
@@ -82,6 +133,7 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_with_vorbis_comments.flac",
+        /* peekLimit= */ 50,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_with_vorbis_comments_flac")
             .build(),
@@ -93,6 +145,7 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_with_picture.flac",
+        /* peekLimit= */ 50,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_with_picture_flac")
             .build(),
@@ -104,6 +157,7 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_one_metadata_block.flac",
+        /* peekLimit= */ 7800,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_one_metadata_block_flac")
             .build(),
@@ -115,6 +169,7 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_no_min_max_frame_size.flac",
+        /* peekLimit= */ 50,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_no_min_max_frame_size_flac")
             .build(),
@@ -126,6 +181,7 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_no_num_samples.flac",
+        /* peekLimit= */ 50,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_no_num_samples_flac")
             .build(),
@@ -137,9 +193,29 @@ public class FlacExtractorTest {
     ExtractorAsserts.assertBehavior(
         FlacExtractor::new,
         "media/flac/bear_uncommon_sample_rate.flac",
+        /* peekLimit= */ 50,
         new AssertionConfig.Builder()
             .setDumpFilesPrefix("extractordumps/flac/bear_uncommon_sample_rate_flac")
             .build(),
         simulationConfig);
+  }
+
+  @Test
+  public void sampleWithPictureAndDisableArtwork_omitsArtwork() throws Exception {
+    byte[] fileBytes =
+        TestUtil.getByteArray(
+            ApplicationProvider.getApplicationContext(), "media/flac/bear_with_picture.flac");
+    FlacExtractor extractor = new FlacExtractor(FlacExtractor.FLAG_DISABLE_ARTWORK_METADATA);
+    FakeExtractorOutput output = new FakeExtractorOutput();
+    extractor.init(output);
+    FakeExtractorInput input = new FakeExtractorInput.Builder().setData(fileBytes).build();
+    PositionHolder positionHolder = new PositionHolder();
+
+    while (output.seekMap == null) {
+      int unused = extractor.read(input, positionHolder);
+    }
+    Format audioFormat = output.trackOutputs.get(0).lastFormat;
+
+    assertThat(audioFormat.metadata).isNull();
   }
 }
