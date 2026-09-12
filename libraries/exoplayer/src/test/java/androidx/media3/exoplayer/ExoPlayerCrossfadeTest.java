@@ -140,12 +140,12 @@ public final class ExoPlayerCrossfadeTest {
     return source(TRACK_DURATION_US, ExoPlayerTestRunner.AUDIO_FORMAT);
   }
 
-  private static FakeMediaSource source(long durationUs, Format... formats) {
+  private static FakeMediaSource source(long durationUs, Format format, Format... formats) {
     return new FakeMediaSource.Builder()
         .setTimeline(new FakeTimeline(new TimelineWindowDefinition.Builder()
             .setWindowPositionInFirstPeriodUs(0)
             .setDurationUs(durationUs).build()))
-        .setFormats(formats)
+        .setFormats(format, formats)
         .setTrackDataFactory(TrackDataFactory.samplesWithRateDurationAndKeyframeInterval(
             0, 20, durationUs, 1))
         .build();
