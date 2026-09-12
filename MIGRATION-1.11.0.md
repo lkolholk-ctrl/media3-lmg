@@ -12,7 +12,8 @@ changes and the audio-only eligibility restriction have been removed.
 
 Google 1.11 integration still requires RendererHolder lifecycle calls, per-renderer
 queue pointers, audio stream/track-selection routing, the new notification signature,
-and forwarding playback-thread volume/audio focus to the original controller.
+forwarding playback-thread volume/audio focus to the original controller, and
+transferring non-overlapping metadata/text renderers to the incoming item.
 These integration files are not byte-identical to lmg30. They must not be described
 as a literal restoration of the entire old player.
 

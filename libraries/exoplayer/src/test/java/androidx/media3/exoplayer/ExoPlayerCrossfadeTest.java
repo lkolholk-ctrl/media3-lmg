@@ -92,9 +92,10 @@ public final class ExoPlayerCrossfadeTest {
   public void eighteenSecondOverlap_withMetadataAndRecipeRefresh_keepsOriginalFade() throws Exception {
     VolumeRenderer first = new VolumeRenderer(clock);
     VolumeRenderer second = new VolumeRenderer(clock);
+    FakeRenderer metadataRenderer = new FakeRenderer(C.TRACK_TYPE_METADATA);
     ExoPlayer player = new TestExoPlayerBuilder(ApplicationProvider.getApplicationContext())
         .setClock(clock)
-        .setRenderers(first, second, new FakeRenderer(C.TRACK_TYPE_METADATA))
+        .setRenderers(first, second, metadataRenderer)
         .build();
     ExoPlayer.CrossfadeConfiguration recipe = new ExoPlayer.CrossfadeConfiguration(
         18_000_000, ExoPlayer.CrossfadeConfiguration.CURVE_DEFAULT, 0);
@@ -110,6 +111,7 @@ public final class ExoPlayerCrossfadeTest {
           .untilPositionDiscontinuityWithReason(Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
       assertThat(player.getCurrentMediaItemIndex()).isEqualTo(1);
       assertThat(second.sawPartialGain).isTrue();
+      assertThat(metadataRenderer.enabledCount).isEqualTo(2);
       assertThat((first.audioClock.getPositionUs() - first.streamStartPositionUs) / 1000)
           .isLessThan(39_500L);
 

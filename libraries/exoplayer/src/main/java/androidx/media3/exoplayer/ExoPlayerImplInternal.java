@@ -3158,6 +3158,19 @@ import java.util.Objects;
     MediaPeriodHolder oldPlaying = checkNotNull(queue.getPlayingPeriod()); // A
     MediaPeriodHolder newPlaying =
         checkNotNull(queue.advancePlayingPeriodWithoutReleasing()); // B (A остаётся как B.previous)
+    // Google 1.11 tracks stream ownership per renderer. Only the two audio decks
+    // overlap; metadata/text and other renderers must follow the new playing item.
+    TrackSelectorResult newTracks = newPlaying.getTrackSelectorResult();
+    for (int i = 0; i < renderers.length; i++) {
+      if (i == oldPlaying.getRendererIdx() || i == newPlaying.getRendererIdx()) {
+        continue;
+      }
+      boolean wasEnabled = renderers[i].isRendererEnabled();
+      disableRenderer(i);
+      if (newTracks.isRendererEnabled(i)) {
+        enableRenderer(newPlaying, i, wasEnabled, newPlaying.getStartPositionRendererTime());
+      }
+    }
     setAllRenderersToCorrectState(newPlaying);
     updatePlayingPeriodRenderers(oldPlaying, /* disableOldRenderers= */ false);
     resetPendingPauseAtEndOfPeriod();
