@@ -38,6 +38,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The obsolete SDK package "tools" is no longer in Google's repository.
+          packages: platform-tools
 
       - name: Install SDK packages (platform 36, build-tools 36)
         run: |
