@@ -27,9 +27,36 @@ plugins { id("gradlebuild.media3-settings-logic") }
 
 rootProject.name = "androidx.media3"
 
+// The core publication/consumer profile avoids configuring optional native decoders.
+// All upstream modules remain available in the default full build.
+val lmgCoreModules = setOf(
+    "lib-common",
+    "lib-common-ktx",
+    "lib-container",
+    "lib-database",
+    "lib-datasource",
+    "lib-decoder",
+    "lib-effect",
+    "lib-effect-ndk",
+    "lib-exoplayer",
+    "lib-exoplayer-dash",
+    "lib-exoplayer-hls",
+    "lib-extractor",
+    "lib-inspector",
+    "lib-inspector-frame",
+    "lib-muxer",
+    "lib-session",
+    "lib-transformer",
+    "lib-ui",
+    "test-data",
+    "test-utils",
+    "test-utils-robolectric")
+val lmgCoreOnly = providers.gradleProperty("lmgCoreOnly").orNull == "true"
+
 Media3Modules.EXTERNAL_MODULES.forEach { (gradleName, moduleInfo) ->
   // LMG: library fork; demos and test applications are intentionally not imported.
-  if (moduleInfo.directory.startsWith("libraries/") && moduleInfo.includeInCompositeBuild) {
+  if (moduleInfo.directory.startsWith("libraries/") && moduleInfo.includeInCompositeBuild
+      && (!lmgCoreOnly || gradleName in lmgCoreModules)) {
     include(":$gradleName")
     project(":$gradleName").projectDir = file(moduleInfo.directory)
   }

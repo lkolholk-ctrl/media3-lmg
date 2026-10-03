@@ -127,6 +127,98 @@ public final class ExoPlayerCrossfadeTest {
     }
   }
 
+  @Test
+  public void pauseBeforeHandoff_longPause_preservesBothStreams() throws Exception {
+    checkPauseDuringOverlap(/* item= */ 0, /* positionMs= */ 17_000);
+  }
+
+  @Test
+  public void pauseAfterHandoff_longPause_resumesIncomingRenderer() throws Exception {
+    checkPauseDuringOverlap(/* item= */ 1, /* positionMs= */ 2_000);
+  }
+
+  private void checkPauseDuringOverlap(int item, long positionMs) throws Exception {
+    VolumeRenderer first = new VolumeRenderer(clock);
+    VolumeRenderer second = new VolumeRenderer(clock);
+    ExoPlayer player = createPlayer(first, second);
+    try {
+      player.setMediaSources(ImmutableList.of(source(), source(), source()));
+      player.prepare();
+      advance(player).withTimeoutMs(60_000).untilPosition(item, positionMs);
+      player.pause();
+      advance(player).untilPendingCommandsAreFullyHandled();
+      assertThat(first.getState()).isEqualTo(Renderer.STATE_ENABLED);
+      assertThat(second.getState()).isEqualTo(Renderer.STATE_ENABLED);
+      clock.advanceTime(20_000);
+      player.play();
+      advance(player).withTimeoutMs(60_000).untilState(Player.STATE_ENDED);
+      assertThat(player.getPlayerError()).isNull();
+      assertThat(second.sawPartialGain).isTrue();
+      assertThat(first.volume).isEqualTo(1f);
+      assertThat(second.volume).isEqualTo(1f);
+    } finally {
+      player.release();
+    }
+  }
+
+  @Test
+  public void disableOverlapBeforeHandoff_rewindsIncomingAndFinishesGapless() throws Exception {
+    checkDisableDuringOverlap(/* item= */ 0, /* positionMs= */ 17_000);
+  }
+
+  @Test
+  public void disableOverlapAfterHandoff_keepsIncomingAndFinishesGapless() throws Exception {
+    checkDisableDuringOverlap(/* item= */ 1, /* positionMs= */ 2_000);
+  }
+
+  private void checkDisableDuringOverlap(int item, long positionMs) throws Exception {
+    VolumeRenderer first = new VolumeRenderer(clock);
+    VolumeRenderer second = new VolumeRenderer(clock);
+    ExoPlayer player = createPlayer(first, second);
+    try {
+      player.setMediaSources(ImmutableList.of(source(), source(), source()));
+      player.prepare();
+      advance(player).withTimeoutMs(60_000).untilPosition(item, positionMs);
+      player.setCrossfadeConfiguration(new ExoPlayer.CrossfadeConfiguration(
+          0, ExoPlayer.CrossfadeConfiguration.CURVE_DEFAULT, 0));
+      advance(player).withTimeoutMs(60_000).untilState(Player.STATE_ENDED);
+      assertThat(player.getPlayerError()).isNull();
+      assertThat(player.getCurrentMediaItemIndex()).isEqualTo(2);
+      assertThat(first.volume).isEqualTo(1f);
+      assertThat(second.volume).isEqualTo(1f);
+    } finally {
+      player.release();
+    }
+  }
+
+  @Test
+  public void steadyPlaybackAfterHandoff_pauseAndSeekKeepSecondRendererAudible() throws Exception {
+    VolumeRenderer first = new VolumeRenderer(clock);
+    VolumeRenderer second = new VolumeRenderer(clock);
+    ExoPlayer player = createPlayer(first, second);
+    try {
+      player.setMediaSources(ImmutableList.of(
+          source(80_000_000, ExoPlayerTestRunner.AUDIO_FORMAT),
+          source(80_000_000, ExoPlayerTestRunner.AUDIO_FORMAT)));
+      player.prepare();
+      advance(player).withTimeoutMs(60_000).untilPosition(1, 50_000);
+      player.pause();
+      advance(player).untilPendingCommandsAreFullyHandled();
+      assertThat(first.getState()).isEqualTo(Renderer.STATE_DISABLED);
+      assertThat(second.getState()).isEqualTo(Renderer.STATE_ENABLED);
+      assertThat(second.volume).isEqualTo(1f);
+      player.seekTo(1, 60_000);
+      player.play();
+      advance(player).withTimeoutMs(60_000).untilPosition(1, 65_000);
+      assertThat(player.getPlayerError()).isNull();
+      assertThat(second.getState()).isEqualTo(Renderer.STATE_STARTED);
+      assertThat(second.volume).isEqualTo(1f);
+      advance(player).withTimeoutMs(60_000).untilState(Player.STATE_ENDED);
+    } finally {
+      player.release();
+    }
+  }
+
   private ExoPlayer createPlayer(VolumeRenderer first, VolumeRenderer second) {
     ExoPlayer player = new TestExoPlayerBuilder(ApplicationProvider.getApplicationContext())
         .setClock(clock)
@@ -195,21 +287,18 @@ public final class ExoPlayerCrossfadeTest {
 
     @Override
     public void render(long positionUs, long elapsedRealtimeUs) throws ExoPlaybackException {
-      // The unmodified lmg30 controller throttles with System.currentTimeMillis().
-      // Pace the test's accelerated playback instead of changing production timekeeping.
-      try {
-        Thread.sleep(2);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new IllegalStateException(e);
-      }
       // Each sink continues on its own clock when the player's master changes at the handoff.
       super.render(audioClock.getPositionUs(), elapsedRealtimeUs);
     }
 
     @Override
     public void handleMessage(int messageType, Object message) throws ExoPlaybackException {
-      if (messageType == Renderer.MSG_SET_VOLUME) {
+      if (messageType == androidx.media3.exoplayer.audio.LmgTransitionGainSink.MESSAGE_TYPE) {
+        androidx.media3.exoplayer.audio.LmgTransitionGainSink.Update gain =
+            (androidx.media3.exoplayer.audio.LmgTransitionGainSink.Update) message;
+        volume = gain.combined();
+        sawPartialGain |= volume > 0f && volume < 1f;
+      } else if (messageType == Renderer.MSG_SET_VOLUME) {
         volume = (Float) message;
         sawPartialGain |= volume > 0f && volume < 1f;
       } else {

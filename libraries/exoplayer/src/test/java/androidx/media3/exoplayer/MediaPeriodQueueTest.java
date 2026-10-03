@@ -2597,8 +2597,17 @@ public final class MediaPeriodQueueTest {
 
     control.setPlayerVolume(0.2f);
     control.reset();
-    org.mockito.Mockito.verify(first).handleMessage(Renderer.MSG_SET_VOLUME, 0.2f);
-    org.mockito.Mockito.verify(second).handleMessage(Renderer.MSG_SET_VOLUME, 0.2f);
+    for (Renderer renderer : new Renderer[] {first, second}) {
+      org.mockito.ArgumentCaptor<androidx.media3.exoplayer.audio.LmgTransitionGainSink.Update> gain =
+          org.mockito.ArgumentCaptor.forClass(
+              androidx.media3.exoplayer.audio.LmgTransitionGainSink.Update.class);
+      org.mockito.Mockito.verify(renderer).handleMessage(
+          org.mockito.ArgumentMatchers.eq(
+              androidx.media3.exoplayer.audio.LmgTransitionGainSink.MESSAGE_TYPE), gain.capture());
+      assertThat(gain.getValue().transitionGain).isEqualTo(1f);
+      assertThat(gain.getValue().playerGain).isEqualTo(0.2f);
+      assertThat(gain.getValue().combined()).isEqualTo(0.2f);
+    }
     outgoing.release();
     incoming.release();
   }

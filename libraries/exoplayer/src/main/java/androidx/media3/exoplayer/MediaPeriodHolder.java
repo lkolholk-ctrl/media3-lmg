@@ -205,6 +205,10 @@ import java.io.IOException;
         CrossfadeTrackRouting.moveSelection(trackSelectorResult, sourceIndex, targetIndex);
     CrossfadeTrackRouting.moveStream(sampleStreams, sourceIndex, targetIndex);
     trackSelectorResult = routed;
+    if (sourceIndex != targetIndex) {
+      renderersInCorrectState[sourceIndex] = false;
+      renderersInCorrectState[targetIndex] = false;
+    }
     crossFadeRendererIndex = targetIndex;
   }
 

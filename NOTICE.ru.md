@@ -3,7 +3,7 @@
 *[English version](NOTICE.md)*
 
 Этот продукт — **модифицированная версия AndroidX Media3** (проект `androidx/media`,
-тег `1.11.0`).
+тег `1.11.1`).
 
 Оригинальный код: Copyright (C) The Android Open Source Project, лицензия
 Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE).
@@ -15,7 +15,7 @@ Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE
 ## Заявление об изменениях
 
 Согласно разделу 4(b) Apache License 2.0, ниже перечислены файлы, изменённые
-относительно апстрима `1.11.0`. Все изменения помечены в коде комментариями.
+относительно апстрима `1.11.1`. Все изменения помечены в коде комментариями.
 
 ### Код плеера
 
@@ -34,7 +34,7 @@ Apache License 2.0 — полный текст в файле [`LICENSE`](LICENSE
 
 ### Перенос на Media3 1.11
 
-Добавлен `CrossfadeTrackRouting.java`. `MediaPeriodHolder` переносит поток и выбор трека вместе; `ExoPlayerImplInternal` адаптирует жизненный цикл RendererHolder, продвижение очередей по рендерерам и громкость/аудиофокус playback-потока. `PlayerAudioFadeControl` повторно применяет сохранённые множители громкости. Добавлены `CrossfadeTrackRoutingTest` и методы `MediaPeriodQueueTest.crossfade*`. [Подробности](MIGRATION-1.11.0.md).
+Добавлен `CrossfadeTrackRouting.java`. `MediaPeriodHolder` переносит поток и выбор трека вместе; `ExoPlayerImplInternal` адаптирует жизненный цикл RendererHolder, продвижение очередей по рендерерам и громкость/аудиофокус playback-потока. `PlayerAudioFadeControl` повторно применяет сохранённые множители громкости. Добавлены `CrossfadeTrackRoutingTest` и методы `MediaPeriodQueueTest.crossfade*`. [Подробности](MIGRATION-1.11.1.md).
 
 ### Сборка и публикация
 
@@ -67,3 +67,7 @@ Apple Music — товарный знак Apple Inc.
 видимой, а не молчаливой.
 
 Ограничитель частоты обновлений PlayerAudioFadeControl использует монотонные часы ExoPlayer. Добавлены JVM-регрессии переходов с независимыми часами дек; тест DefaultMediaClock учитывает сохранённую семантику LMG при двух одновременно включённых аудиочасах.
+
+### 1.11.1 / lmg32 additions
+
+The decoded-output boundary and live-output interfaces (`LmgPcmBoundaryListener`, `LmgTransitionGainSink`, `LmgLivePlaybackSink`, `LmgLivePlaybackClient`, `LmgLivePlaybackLease`, `LmgLivePlaybackRenderer`) and their tests are LMG additions. `MediaCodecRenderer` captures output identity; `MediaCodecAudioRenderer` forwards it and split gain updates. The pause/cancellation and live ownership changes are ported from the installed 1.5.1 fork. The complete source comparison is in [UPSTREAM-AUDIT.json](UPSTREAM-AUDIT.json).

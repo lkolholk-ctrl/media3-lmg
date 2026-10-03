@@ -1,6 +1,6 @@
-> **LMG fork of Media3 1.11.0 — 1.11.0-lmg31.**
-> Google 1.11.0 with LMG native crossfade. 136 JVM tests passed; device audio validation remains separate.
-> [Migration notes](MIGRATION-1.11.0.md) · [LMG usage](README.LMG.md) · [Русский](README.LMG.ru.md)
+> **LMG fork of Media3 1.11.1 — 1.11.1-lmg32.**
+> Google 1.11.1 with LMG native crossfade. 174 JVM tests passed; device audio validation remains separate.
+> [Migration notes](MIGRATION-1.11.1.md) · [LMG usage](README.LMG.md) · [Русский](README.LMG.ru.md)
 
 # AndroidX Media
 

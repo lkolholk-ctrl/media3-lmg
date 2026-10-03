@@ -1,8 +1,10 @@
 {
-  "upstream_tag": "1.11.0",
-  "upstream_commit": "91fd5df7ab6b5c2f1a589fbdee5ee8deeae97f02",
-  "lmg_base": "09b577b01a731885f1ee8707f9008de64badf223",
-  "identical_upstream_library_files": 6239,
+  "upstream_tag": "1.11.1",
+  "upstream_commit": "915b73c447aed6471aa33380a95126121a79375d",
+  "fork_version": "1.11.1-lmg32",
+  "lmg_source_commit": "491a7f6640",
+  "lmg_source_overlay": "1.5.1-lmg30-boundary4-silence1 (includes installed uncommitted lifecycle fixes)",
+  "identical_upstream_library_files": 6245,
   "modified_upstream_library_files": [
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultMediaClock.java",
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/DefaultRenderersFactory.java",
@@ -12,34 +14,44 @@
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/MediaPeriodHolder.java",
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/MediaPeriodQueue.java",
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/SimpleExoPlayer.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/MediaCodecAudioRenderer.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/mediacodec/MediaCodecRenderer.java",
     "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/DefaultMediaClockTest.java",
     "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/MediaPeriodQueueTest.java",
     "libraries/test_utils/src/main/java/androidx/media3/test/utils/StubExoPlayer.java"
   ],
   "missing_upstream_library_files": [],
-  "validation": "lmg30 restoration: source equality checked; corrected-build tests pending on GitHub. No device audio validation.",
   "added_lmg_library_files": [
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/AudioFadeControl.java",
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/CrossfadeConfig.java",
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/CrossfadeTrackRouting.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/LmgLivePlaybackClient.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/LmgLivePlaybackLease.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/LmgLivePlaybackRenderer.java",
     "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/PlayerAudioFadeControl.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/LmgLivePlaybackSink.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/LmgPcmBoundaryListener.java",
+    "libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/LmgTransitionGainSink.java",
     "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/CrossfadeConfigurationTest.java",
     "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/CrossfadeTrackRoutingTest.java",
     "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/ExoPlayerCrossfadeTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/LmgLiveGainReservationTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/LmgLiveMediaClockTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/LmgLivePlaybackLeaseTest.java",
     "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/PlayerAudioFadeControlCurvesTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/audio/LmgTransitionGainMessageTest.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/audio/LmgTransitionGainProtocolScenarios.java",
+    "libraries/exoplayer/src/test/java/androidx/media3/exoplayer/mediacodec/LmgOutputBoundaryIdentityTest.java",
     "libraries/test_data/src/main/assets/.keep"
   ],
-  "unchanged_original_fade_control_methods": 41,
-  "fork_version": "1.11.0-lmg31",
-  "clock_only_changes_in_original_fade_methods": [],
   "fade_formula_changes": false,
-  "consumer_validation": "Pending corrected GitHub release and one main app debug build.",
-  "restoration": {
-    "byte_identical_to_lmg30": [
-      "AudioFadeControl.java",
-      "CrossfadeConfig.java",
-      "PlayerAudioFadeControl.java"
-    ],
-    "integration": "Original arming conditions, recipe updates, wall clock, watchdog, release, seek/reset and loading rules restored. RendererHolder lifecycle and track/queue routing remain adapted to Google 1.11."
-  }
+  "validation": "174 selected JVM tests passed (0 failures/errors/skips), including queue, routing, boundary, live-output contracts, clock and overlap lifecycle. No physical-device audio validation.",
+  "publication": "All 11 core release AARs, sources and Maven metadata built locally with JDK 21.",
+  "consumer_validation": "Consumer compilation and physical-device validation are separate from fork JVM tests. See MIGRATION-1.11.1.md.",
+  "source_equal_to_installed_1_5_1": [
+    "AudioFadeControl.java",
+    "CrossfadeConfig.java",
+    "PlayerAudioFadeControl.java",
+    "LmgLivePlaybackLease.java"
+  ]
 }

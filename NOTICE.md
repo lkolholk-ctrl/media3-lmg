@@ -3,7 +3,7 @@
 *[Русская версия](NOTICE.ru.md)*
 
 This product is a **modified version of AndroidX Media3** (project `androidx/media`,
-tag `1.11.0`).
+tag `1.11.1`).
 
 Original code: Copyright (C) The Android Open Source Project, licensed under the
 Apache License 2.0 — full text in [`LICENSE`](LICENSE).
@@ -15,7 +15,7 @@ Apache License 2.0 terms.
 ## Statement of changes
 
 As required by section 4(b) of the Apache License 2.0, the files below were
-modified relative to upstream `1.11.0`. All changes are marked with comments in
+modified relative to upstream `1.11.1`. All changes are marked with comments in
 the code.
 
 ### Player code
@@ -43,7 +43,7 @@ the code.
 
 ### Media3 1.11 migration
 
-`CrossfadeTrackRouting.java` is new. `MediaPeriodHolder` routes sample streams and selections together; `ExoPlayerImplInternal` integrates RendererHolder lifecycle, per-renderer queue advancement and playback-thread volume/audio focus. `PlayerAudioFadeControl` reapplies existing gains after volume changes. `CrossfadeTrackRoutingTest` and additional `MediaPeriodQueueTest.crossfade*` tests cover the new integration. See [migration details](MIGRATION-1.11.0.md).
+`CrossfadeTrackRouting.java` is new. `MediaPeriodHolder` routes sample streams and selections together; `ExoPlayerImplInternal` integrates RendererHolder lifecycle, per-renderer queue advancement and playback-thread volume/audio focus. `PlayerAudioFadeControl` reapplies existing gains after volume changes. `CrossfadeTrackRoutingTest` and additional `MediaPeriodQueueTest.crossfade*` tests cover the new integration. See [migration details](MIGRATION-1.11.1.md).
 
 ### Build and publishing
 
@@ -75,3 +75,7 @@ in one build: pulling in both fails with duplicate classes. That is intentional,
 so that substituting one for the other is visible rather than silent.
 
 PlayerAudioFadeControl update throttling uses ExoPlayer's monotonic clock. JVM regressions exercise overlap with independent deck clocks; DefaultMediaClock tests reflect the preserved LMG policy for two simultaneously enabled audio clocks.
+
+### 1.11.1 / lmg32 additions
+
+The decoded-output boundary and live-output interfaces (`LmgPcmBoundaryListener`, `LmgTransitionGainSink`, `LmgLivePlaybackSink`, `LmgLivePlaybackClient`, `LmgLivePlaybackLease`, `LmgLivePlaybackRenderer`) and their tests are LMG additions. `MediaCodecRenderer` captures output identity; `MediaCodecAudioRenderer` forwards it and split gain updates. The pause/cancellation and live ownership changes are ported from the installed 1.5.1 fork. The complete source comparison is in [UPSTREAM-AUDIT.json](UPSTREAM-AUDIT.json).

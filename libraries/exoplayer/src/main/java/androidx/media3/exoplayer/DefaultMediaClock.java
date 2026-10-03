@@ -41,6 +41,18 @@ import androidx.media3.common.util.Clock;
     void onPlaybackParametersChanged(PlaybackParameters newPlaybackParameters);
   }
 
+  @Nullable private MediaClock lmgOwnedClock;
+  void setLmgOwnedClock(MediaClock clock) {
+    if (lmgOwnedClock != null) throw new IllegalStateException("Output clock already owned");
+    lmgOwnedClock = checkNotNull(clock);
+  }
+  void clearLmgOwnedClock(long rendererPositionUs) {
+    if (lmgOwnedClock != null) {
+      lmgOwnedClock = null;
+      standaloneClock.resetPosition(rendererPositionUs);
+    }
+  }
+
   private final StandaloneMediaClock standaloneClock;
   private final PlaybackParametersListener listener;
 
@@ -80,6 +92,7 @@ import androidx.media3.common.util.Clock;
    * @param positionUs The position to set in microseconds.
    */
   public void resetPosition(long positionUs) {
+    if (lmgOwnedClock != null) throw new IllegalStateException("Reset requires live lease cancellation");
     standaloneClock.resetPosition(positionUs);
   }
 
@@ -130,6 +143,7 @@ import androidx.media3.common.util.Clock;
    * @param isReadingAhead Whether the renderers are reading ahead.
    */
   public long syncAndGetPositionUs(boolean isReadingAhead) {
+    if (lmgOwnedClock != null) return lmgOwnedClock.getPositionUs();
     syncClocks(isReadingAhead);
     return getPositionUs();
   }
@@ -138,6 +152,7 @@ import androidx.media3.common.util.Clock;
 
   @Override
   public long getPositionUs() {
+    if (lmgOwnedClock != null) return lmgOwnedClock.getPositionUs();
     return isUsingStandaloneClock
         ? standaloneClock.getPositionUs()
         : checkNotNull(rendererClock).getPositionUs();
@@ -145,6 +160,7 @@ import androidx.media3.common.util.Clock;
 
   @Override
   public boolean hasSkippedSilenceSinceLastCall() {
+    if (lmgOwnedClock != null) return false;
     return isUsingStandaloneClock
         ? standaloneClock.hasSkippedSilenceSinceLastCall()
         : checkNotNull(rendererClock).hasSkippedSilenceSinceLastCall();
@@ -152,6 +168,7 @@ import androidx.media3.common.util.Clock;
 
   @Override
   public void setPlaybackParameters(PlaybackParameters playbackParameters) {
+    if (lmgOwnedClock != null) { lmgOwnedClock.setPlaybackParameters(playbackParameters); return; }
     if (rendererClock != null) {
       rendererClock.setPlaybackParameters(playbackParameters);
       playbackParameters = rendererClock.getPlaybackParameters();
@@ -161,6 +178,7 @@ import androidx.media3.common.util.Clock;
 
   @Override
   public PlaybackParameters getPlaybackParameters() {
+    if (lmgOwnedClock != null) return lmgOwnedClock.getPlaybackParameters();
     return rendererClock != null
         ? rendererClock.getPlaybackParameters()
         : standaloneClock.getPlaybackParameters();

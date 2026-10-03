@@ -25,6 +25,7 @@ import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.Log;
+import androidx.media3.common.util.Clock;
 import java.util.HashMap;
 
 /* package */ final class PlayerAudioFadeControl implements AudioFadeControl {
@@ -43,6 +44,7 @@ import java.util.HashMap;
 
   // Состояния кроссфейда: 0=AUTOMATIC, 1=MANUAL, 2=OFF (как у Apple).
   private final Renderer[] renderers;
+  private final Clock clock;
   private final HashMap<FadeType, AudioFadeTransition> transitionsMap = new HashMap<>();
 
   private long msBetweenMessages = MAX_MS_BETWEEN_MESSAGES;
@@ -70,7 +72,12 @@ import java.util.HashMap;
   private int repeatMode = Player.REPEAT_MODE_OFF;
 
   public PlayerAudioFadeControl(Renderer[] renderers) {
+    this(renderers, Clock.DEFAULT);
+  }
+
+  PlayerAudioFadeControl(Renderer[] renderers, Clock clock) {
     this.renderers = renderers;
+    this.clock = clock;
     // Дефолт-кривые (как в Apple reset() и по ТЗ): fade-in LOGARITHMIC, fade-out EXPONENTIAL.
     // Примечание: Apple-конструктор кладёт new AudioFadeTransition() (LINEAR) и полагается
     // на композер; у нас композера нет, поэтому сразу ставим LOG/EXP (совпадает с reset()).
@@ -309,6 +316,19 @@ import java.util.HashMap;
   private volatile float playerVolume = MAX_VOLUME;
 
   /** media3-адаптация: прокидывается из ExoPlayerImplInternal при смене громкости/фокуса. */
+  /** Fresh real gain proof for live ownership, without entering the manual fade state.
+   * Refuse an already attenuated outgoing stream: queued samples may still use its gain.
+   * setVolume uses the accepted typed split-gain dispatch, preserving actual master/ducking. */
+  boolean prepareLmgLiveUnityGains(int outgoing, int incoming) throws ExoPlaybackException {
+    if (isCrossFadeInProgress() || outgoing < 0 || incoming < 0 || outgoing == incoming
+        || outgoing >= renderers.length || incoming >= renderers.length) return false;
+    Float old = lastVolume.get(outgoing);
+    if (old != null && old != MAX_VOLUME) return false;
+    setVolume(outgoing, MAX_VOLUME);
+    setVolume(incoming, MAX_VOLUME);
+    return true;
+  }
+
   public void setPlayerVolume(float playerVolume) {
     this.playerVolume = Math.max(MIN_VOLUME, Math.min(MAX_VOLUME, playerVolume));
   }
@@ -323,7 +343,8 @@ import java.util.HashMap;
   private void setVolume(int rendererIdx, float volume) throws ExoPlaybackException {
     if (rendererIdx >= 0 && rendererIdx < renderers.length) {
       renderers[rendererIdx].handleMessage(
-          Renderer.MSG_SET_VOLUME, Float.valueOf(volume * playerVolume));
+          androidx.media3.exoplayer.audio.LmgTransitionGainSink.MESSAGE_TYPE,
+          new androidx.media3.exoplayer.audio.LmgTransitionGainSink.Update(volume, playerVolume));
       lastVolume.put(rendererIdx, volume);
     }
   }
@@ -343,7 +364,9 @@ import java.util.HashMap;
           // Возвращаем ГРОМКОСТЬ ПЛЕЕРА, а не жёсткую 1.0: иначе свод затирал
           // setVolume() приложения и duck по аудиофокусу — трек после перехода
           // играл на 100% независимо от настроек.
-          renderers[i].handleMessage(Renderer.MSG_SET_VOLUME, Float.valueOf(playerVolume));
+          renderers[i].handleMessage(
+              androidx.media3.exoplayer.audio.LmgTransitionGainSink.MESSAGE_TYPE,
+              new androidx.media3.exoplayer.audio.LmgTransitionGainSink.Update(MAX_VOLUME, playerVolume));
           lastVolume.put(i, MAX_VOLUME);
           logDebug("xfade GAIN RESTORE idx=" + i + " was=" + v + " reason=" + reason);
         } catch (Exception e) {
@@ -462,7 +485,7 @@ import java.util.HashMap;
     // поэтому здесь взводим lastMsgTs = now — иначе троттлинг doCrossFade (now - lastMsgTs<step)
     // при lastMsgTs=MAX_VALUE навсегда блокировал бы первый тик. У Apple lastMsgTs ставит
     // setCrossFadeInProgress в момент cross-point.
-    this.lastMsgTs = System.currentTimeMillis();
+    this.lastMsgTs = clock.elapsedRealtime();
     this.fadePhase = FadePhase.FADE_OUT;
   }
 
@@ -477,7 +500,7 @@ import java.util.HashMap;
     }
     long periodTime = fadeOutPeriodHolder.toPeriodTime(rendererPositionUs) - this.secondTrackOffsetUs;
     if (1 <= periodTime && periodTime < CROSS_POINT_TOLERANCE_US) {
-      this.lastMsgTs = System.currentTimeMillis();
+      this.lastMsgTs = clock.elapsedRealtime();
       this.fadePhase = FadePhase.FADE_OUT;
     }
     return this.fadePhase != FadePhase.IDLE;
@@ -542,7 +565,7 @@ import java.util.HashMap;
     if (fadeOutPeriodHolder == null) {
       return;
     }
-    long now = System.currentTimeMillis();
+    long now = clock.elapsedRealtime();
     if (now - this.lastMsgTs < this.msBetweenMessages) {
       return;
     }
@@ -635,7 +658,7 @@ import java.util.HashMap;
       if (periodTime < transition.getStartUs()) {
         return;
       }
-      long now = System.currentTimeMillis();
+      long now = clock.elapsedRealtime();
       if (now - this.lastMsgTs < this.msBetweenMessages) {
         return;
       }
@@ -647,7 +670,8 @@ import java.util.HashMap;
   // ── pauseFadeOut / resumeFadeOut (Apple 1:1) ──
   @Override
   public synchronized void pauseFadeOut() throws ExoPlaybackException {
-    if (isCrossFadeEnabled() && this.fadePhase != FadePhase.IDLE) {
+    this.paused = this.fadePhase != FadePhase.IDLE;
+    if (this.fadePhase != FadePhase.IDLE) {
       MediaPeriodHolder mediaPeriodHolder = this.fadeOutPeriodHolder;
       if (mediaPeriodHolder == null) {
         return;
@@ -655,14 +679,13 @@ import java.util.HashMap;
       Renderer renderer = renderers[mediaPeriodHolder.getRendererIdx()];
       if (renderer.getState() == Renderer.STATE_STARTED) {
         renderer.stop();
-        this.paused = true;
       }
     }
   }
 
   @Override
   public synchronized void resumeFadeOut() throws ExoPlaybackException {
-    if (isCrossFadeEnabled() && this.fadePhase != FadePhase.IDLE) {
+    if (this.fadePhase != FadePhase.IDLE) {
       MediaPeriodHolder mediaPeriodHolder = this.fadeOutPeriodHolder;
       if (mediaPeriodHolder == null) {
         return;
@@ -690,6 +713,7 @@ import java.util.HashMap;
       Log.e(TAG, "reset() exception ex: " + e);
     }
     this.lastMsgTs = Long.MAX_VALUE;
+    this.paused = false;
     this.fadeOutPeriodHolder = null;
     this.fadeInPeriodHolder = null;
     this.fadeOutLevel = MAX_VOLUME;

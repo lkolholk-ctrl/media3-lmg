@@ -2,7 +2,11 @@
 
 *[Русская версия](CHANGELOG.LMG.ru.md)*
 
-Version format: `<upstream>-lmgN`. Current release: **1.11.0-lmg31**.
+Version format: `<upstream>-lmgN`. Current release: **1.11.1-lmg32**.
+
+## 1.11.1-lmg32
+
+Imported the complete Google 1.11.1 library tree. Ported the installed 1.5.1-lmg30-boundary4-silence1 changes: decoded-output identity, split transition/player gain, opt-in live output leases, monotonic pause-aware fade timing and cancellation/renderer lifecycle fixes. Adapted these to RendererHolder and routed track selections without reverting upstream 1.11.1 fixes. All 11 core AARs published locally; 174 selected JVM tests passed. Device audio validation remains separate. See [migration notes](MIGRATION-1.11.1.md).
 
 ## 1.11.0-lmg31
 

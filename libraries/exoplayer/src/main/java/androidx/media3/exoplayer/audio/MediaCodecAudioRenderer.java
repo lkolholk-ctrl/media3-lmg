@@ -48,6 +48,7 @@ import androidx.media3.common.audio.AudioProcessor;
 import androidx.media3.common.util.CodecSpecificDataUtil;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.MediaFormatUtil;
+import androidx.media3.common.util.ThrowingRunnable;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.decoder.DecoderInputBuffer;
@@ -77,6 +78,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Decodes and renders audio using {@link MediaCodec} and an {@link AudioSink}.
@@ -116,7 +118,7 @@ import java.util.Objects;
  * </ul>
  */
 @UnstableApi
-public class MediaCodecAudioRenderer extends MediaCodecRenderer implements MediaClock {
+public class MediaCodecAudioRenderer extends MediaCodecRenderer implements MediaClock, androidx.media3.exoplayer.LmgLivePlaybackRenderer {
 
   private static final String TAG = "MediaCodecAudioRenderer";
 
@@ -132,6 +134,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   private final EventDispatcher eventDispatcher;
   private final AudioSink audioSink;
   @Nullable private final LoudnessCodecController loudnessCodecController;
+  private final AtomicBoolean processOutputBufferResultHolder;
 
   private int codecMaxInputSize;
   private boolean codecNeedsDiscardChannelsWorkaround;
@@ -330,6 +333,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     this.loudnessCodecController = loudnessCodecController;
     rendererPriority = C.PRIORITY_PLAYBACK;
     eventDispatcher = new EventDispatcher(eventHandler, eventListener);
+    processOutputBufferResultHolder = new AtomicBoolean();
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
     firstNotReadyTimeMs = C.TIME_UNSET;
     hasBeenReady = false;
@@ -635,6 +639,26 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     return evaluation;
   }
 
+  @Nullable private Format lmgBoundaryDecodedFormat;
+  private boolean lmgBoundaryIdentityChannels = true;
+  private boolean lmgBoundaryObserverFailed;
+
+  private void notifyLmgPcmBoundary(long rendererPositionUs) {
+    if (lmgBoundaryObserverFailed || !(audioSink instanceof LmgPcmBoundaryListener)) {
+      return;
+    }
+    try {
+      ((LmgPcmBoundaryListener) audioSink).onLmgPcmOutputBoundary(
+          getLmgOutputStreamToken(), getLmgOutputTimeline(), getLmgOutputMediaPeriodId(),
+          lmgBoundaryDecodedFormat, getLmgOutputStreamOffsetUs(), rendererPositionUs,
+          lmgBoundaryIdentityChannels, getConfiguration().tunneling);
+    } catch (RuntimeException ignored) {
+      // An optional diagnostic may not break the original sink/decoder path.
+      // No next callback is emitted; the wrapper's per-call guard fails closed.
+      lmgBoundaryObserverFailed = true;
+    }
+  }
+
   @Override
   protected void onOutputFormatChanged(Format format, @Nullable MediaFormat mediaFormat)
       throws ExoPlaybackException {
@@ -721,6 +745,8 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
               .setTimeline(getTimeline())
               .setMediaPeriodId(getMediaPeriodId())
               .build());
+      lmgBoundaryDecodedFormat = audioSinkInputFormat;
+      lmgBoundaryIdentityChannels = channelMap == null;
     } catch (AudioSink.ConfigurationException e) {
       throw createRendererException(
           e, e.format, PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED);
@@ -790,6 +816,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     inputFormat = null;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
     hasReportedAudioPositionAdvancing = false;
+    lmgBoundaryDecodedFormat = null;
     try {
       audioSink.flush();
     } finally {
@@ -927,9 +954,17 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
       return true;
     }
 
-    boolean fullyConsumed;
     try {
-      fullyConsumed = audioSink.handleBuffer(buffer, bufferPresentationTimeUs, sampleCount);
+      notifyLmgPcmBoundary(positionUs);
+      ThrowingRunnable<Exception> handleBufferOperation =
+          () ->
+              processOutputBufferResultHolder.set(
+                  audioSink.handleBuffer(buffer, bufferPresentationTimeUs, sampleCount));
+      if (codec != null) {
+        codec.useBuffer(handleBufferOperation);
+      } else {
+        handleBufferOperation.run();
+      }
     } catch (InitializationException e) {
       throw createRendererException(
           e,
@@ -948,7 +983,13 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
                   && getConfiguration().offloadModePreferred != AudioSink.OFFLOAD_MODE_DISABLED
               ? PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED
               : PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED);
+    } catch (RuntimeException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
     }
+
+    boolean fullyConsumed = processOutputBufferResultHolder.get();
 
     if (fullyConsumed) {
       if (codec != null) {
@@ -1003,11 +1044,23 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   }
 
   @Override
+  @Nullable
+  public androidx.media3.exoplayer.LmgLivePlaybackClient getLmgLivePlaybackClient() {
+    return audioSink instanceof LmgLivePlaybackSink
+        ? ((LmgLivePlaybackSink) audioSink).getLmgLivePlaybackClient() : null;
+  }
+
+  @Override
   public void handleMessage(@MessageType int messageType, @Nullable Object message)
       throws ExoPlaybackException {
     switch (messageType) {
+      case LmgTransitionGainSink.MESSAGE_TYPE:
+        LmgTransitionGainSink.dispatch(
+            audioSink, (LmgTransitionGainSink.Update) checkNotNull(message), audioSink::setVolume);
+        break;
       case MSG_SET_VOLUME:
-        audioSink.setVolume((Float) checkNotNull(message));
+        LmgTransitionGainSink.dispatchPlayer(
+            audioSink, (Float) checkNotNull(message), audioSink::setVolume);
         break;
       case MSG_SET_AUDIO_ATTRIBUTES:
         AudioAttributes audioAttributes = (AudioAttributes) message;

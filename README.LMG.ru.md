@@ -2,7 +2,7 @@
 
 *[English version](README.LMG.md)*
 
-Форк [`androidx/media`](https://github.com/androidx/media) (тег **1.11.0**).
+Форк [`androidx/media`](https://github.com/androidx/media) (тег **1.11.1**).
 Добавляет кроссфейд между треками — наложение уходящего и входящего трека с
 плавным переходом громкости, чего сток media3 не умеет: он переключает треки
 встык (gapless) и не играет два аудиопотока одновременно.
@@ -16,7 +16,7 @@
 
 ---
 
-Версия: **1.11.0-lmg31**. Собраны 11 AAR и пройдены 136 JVM-тестов. Проверка звука на устройстве остаётся отдельным этапом. См. [описание переноса](MIGRATION-1.11.0.md).
+Версия: **1.11.1-lmg32**. Собраны 11 AAR и пройдены 174 JVM-тестов. Проверка звука на устройстве остаётся отдельным этапом. См. [описание переноса](MIGRATION-1.11.1.md).
 
 ## Подключение
 
@@ -26,7 +26,7 @@
 **1. Скачать maven-репозиторий из релиза** (в CI — отдельным шагом):
 
 ```bash
-VER=1.11.0-lmg31
+VER=1.11.1-lmg32
 curl -sSL -o media3-m2.zip \
   "https://github.com/lkolholk-ctrl/media3-lmg/releases/download/v${VER}/media3-${VER}-m2.zip"
 mkdir -p media3-m2 && unzip -q media3-m2.zip -d media3-m2
@@ -57,10 +57,10 @@ configurations.configureEach {
 }
 
 dependencies {
-    implementation("com.liquidmusicglass.media3:media3-common:1.11.0-lmg31")
-    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.11.0-lmg31")
-    implementation("com.liquidmusicglass.media3:media3-session:1.11.0-lmg31")
-    implementation("com.liquidmusicglass.media3:media3-ui:1.11.0-lmg31")
+    implementation("com.liquidmusicglass.media3:media3-common:1.11.1-lmg32")
+    implementation("com.liquidmusicglass.media3:media3-exoplayer:1.11.1-lmg32")
+    implementation("com.liquidmusicglass.media3:media3-session:1.11.1-lmg32")
+    implementation("com.liquidmusicglass.media3:media3-ui:1.11.1-lmg32")
     // при необходимости: media3-extractor, media3-exoplayer-hls,
     // media3-common-ktx, media3-datasource, media3-decoder,
     // media3-container, media3-database
@@ -171,7 +171,7 @@ CrossfadeConfig.setDebugLogging(true)   // уровни громкости на 
    играющего периода **без освобождения** предыдущего, освобождение уходящего
    периода после завершения;
 4. `PlayerAudioFadeControl` на каждом тике считает громкость обоих треков по
-   выбранной кривой и выставляет её рендерерам сообщением `MSG_SET_VOLUME`.
+   выбранной кривой и выставляет её рендерерам типизированным сообщением `LmgTransitionGainSink.Update` (с поддержкой обычного управления громкостью).
 
 Момент старта свода — позиционный: последние N секунд трека, где N — заданная
 длительность.
@@ -181,4 +181,4 @@ CrossfadeConfig.setDebugLogging(true)   // уровни громкости на 
 
 ## Инфраструктура сборки
 
-Перенесена система Google на Kotlin DSL: Gradle 9.1.0, AGP 9.0.1, Kotlin 2.2.0, compileSdk 36, minSdk 23. Единственный источник версии — `gradle/libs.versions.toml`; CI читает его при именовании артефактов. Maven-группа — `com.liquidmusicglass.media3`. SNAPSHOT сохраняется как CI artifact, без GitHub Release. AAR и 136 JVM-тестов проверены с JDK 21. [Статус проверок](MIGRATION-1.11.0.md).
+Перенесена система Google на Kotlin DSL: Gradle 9.1.0, AGP 9.0.1, Kotlin 2.2.0, compileSdk 36, minSdk 23. Единственный источник версии — `gradle/libs.versions.toml`; CI читает его при именовании артефактов. Maven-группа — `com.liquidmusicglass.media3`. SNAPSHOT сохраняется как CI artifact, без GitHub Release. AAR и 174 JVM-тестов проверены с JDK 21. [Статус проверок](MIGRATION-1.11.1.md).
